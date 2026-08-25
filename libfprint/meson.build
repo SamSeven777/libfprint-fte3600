@@ -122,6 +122,11 @@ driver_sources = {
     'elan' : files('drivers/elan.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
+    'fte3600' : files(
+        'drivers/fte3600.c',
+        'drivers/fte3600-brisk.c',
+        'drivers/fte3600-template.c',
+    ),
     'nb1010' : files('drivers/nb1010.c'),
     'virtual_image' : files('drivers/virtual-image.c'),
     'virtual_device' : files('drivers/virtual-device.c'),
@@ -148,6 +153,7 @@ helper_sources = {
     'openssl': files(),
     'pixman': files(),
     'udev': files(),
+    'gpiod': files(),
     'virtual': files('drivers/virtual-device-listener.c'),
 }
 
@@ -156,6 +162,9 @@ drivers_cflags = []
 foreach driver: drivers
     drivers_sources += driver_sources[driver]
 endforeach
+if 'fte3600' in drivers
+    drivers_cflags += fte3600_personal_auth_cflags
+endif
 foreach helper : driver_helpers
     drivers_sources += helper_sources[helper]
 endforeach

@@ -292,7 +292,7 @@ else
         args: ['-c', 'exit 77']
     )
 
-    foreach driver_test: drivers_tests
+    foreach driver_test, ignored_args: drivers_tests
         test(driver_test,
             sh,
             args: ['-c', 'exit 77']
@@ -314,6 +314,12 @@ unit_tests = [
     'fpi-assembling',
 ]
 
+if have_spi
+    unit_tests += [
+        'fpi-spi-transfer',
+    ]
+endif
+
 if 'virtual_image' in drivers
     unit_tests += [
         'fp-context',
@@ -322,6 +328,53 @@ if 'virtual_image' in drivers
 endif
 
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
+
+if 'fte3600' in drivers
+    fte3600_driver_test = executable('test-fte3600-driver',
+        sources: 'test-fte3600-driver.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-driver',
+        fte3600_driver_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    fte3600_brisk_test = executable('test-fte3600-brisk',
+        sources: [
+            'test-fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-brisk.c',
+        ],
+        dependencies: [glib_dep, mathlib_dep],
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-brisk',
+        fte3600_brisk_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    fte3600_template_test = executable('test-fte3600-template',
+        sources: [
+            'test-fte3600-template.c',
+            '../libfprint/drivers/fte3600-template.c',
+            '../libfprint/drivers/fte3600-brisk.c',
+        ],
+        dependencies: [glib_dep, mathlib_dep],
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-template',
+        fte3600_template_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+endif
 
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)

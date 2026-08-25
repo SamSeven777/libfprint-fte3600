@@ -148,8 +148,9 @@ drivers_info = {
     'mafpmoc': {},
     'secugen': {},
 
-    # SPI driver (non-optional if SPI is available)
+    # SPI drivers (non-optional if SPI is available)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
+    'fte3600': { 'spi': true, 'helper': ['udev', 'gpiod'], 'optional': not have_spi },
 
     # Virtual drivers (test-only, optional)
     'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },
@@ -200,6 +201,14 @@ endforeach
 
 if drivers.length() == 0 or drivers[0] == ''
     error('Cannot build libfprint without drivers, please specify a valid value for the drivers option')
+endif
+
+fte3600_personal_auth_cflags = []
+if get_option('fte3600_personal_auth')
+    if 'fte3600' not in drivers
+        error('fte3600_personal_auth requires the fte3600 driver')
+    endif
+    fte3600_personal_auth_cflags += '-DFTE3600_ENABLE_PERSONAL_AUTH=1'
 endif
 
 if drivers == all_drivers or drivers == default_drivers
@@ -254,6 +263,15 @@ foreach i : driver_helpers
         libfprint_conf.set10('HAVE_UDEV', true)
 
         optional_deps += gudev_dep
+    elif i == 'gpiod'
+        gpiod_dep = dependency('libgpiod', version: '>= 2.0', required: false)
+        if not gpiod_dep.found()
+            error('libgpiod >= 2.0 is required for @0@')
+        endif
+
+        libfprint_conf.set10('HAVE_GPIOD', true)
+
+        optional_deps += gpiod_dep
     endif
 endforeach
 
@@ -347,4 +365,7 @@ pkgconfig.generate(
     filebase: versioned_libname,
 )
 
-summary({'Drivers': drivers, }, section: 'Drivers')
+summary({
+    'Drivers': drivers,
+    'FTE3600 personal authentication': get_option('fte3600_personal_auth'),
+}, section: 'Drivers')

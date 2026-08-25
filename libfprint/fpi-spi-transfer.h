@@ -43,10 +43,11 @@ typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
  * @length_rd: The length of the read buffer
  * @buffer_wr: The write buffer.
  * @buffer_rd: The read buffer.
+ * @sensitive: Whether buffer contents must be redacted from transfer logs.
  *
- * Helper for handling SPI transfers. Currently transfers can either be pure
- * write/read transfers or a write followed by a read (full duplex support
- * can easily be added if desired).
+ * Helper for handling SPI transfers. Transfers can either be pure write/read
+ * transfers, a write followed by a read, or a simultaneous full-duplex
+ * transfer.
  */
 struct _FpiSpiTransfer
 {
@@ -73,6 +74,10 @@ struct _FpiSpiTransfer
   /* Data free function */
   GDestroyNotify free_buffer_wr;
   GDestroyNotify free_buffer_rd;
+
+  /* Transfer options */
+  gboolean full_duplex;
+  gboolean sensitive;
 };
 
 GType              fpi_spi_transfer_get_type (void) G_GNUC_CONST;
@@ -98,6 +103,12 @@ void               fpi_spi_transfer_read_full (FpiSpiTransfer *transfer,
                                                guint8         *buffer,
                                                gsize           length,
                                                GDestroyNotify  free_func);
+
+void               fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
+                                                      gboolean        full_duplex);
+
+void               fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
+                                                    gboolean        sensitive);
 
 void               fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
                                             GCancellable          *cancellable,
