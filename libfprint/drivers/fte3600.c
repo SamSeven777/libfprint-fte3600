@@ -107,6 +107,7 @@ struct _FpiDeviceFte3600
   FpImage *captured_image;
 
   guint8 small_rx[FT9361_SMALL_FRAME_SIZE];
+  gboolean small_rx_valid;
   guint8 *capture_tx;
   guint8 *capture_rx;
 };
@@ -717,6 +718,18 @@ fte3600_submit_reg_write (FpiSsm *ssm, guint8 reg, guint8 value,
 }
 
 static void
+fte3600_reg_read_cb (FpiSpiTransfer *transfer,
+                     FpDevice       *device,
+                     gpointer        user_data,
+                     GError         *error)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+  self->small_rx_valid = error == NULL;
+  fpi_ssm_spi_transfer_cb (transfer, device, user_data, error);
+}
+
+static void
 fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
                          gboolean cancellable)
 {
@@ -742,6 +755,7 @@ fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
   g_assert (frame_len <= sizeof (self->small_rx));
 
   memset (self->small_rx, 0, frame_len);
+  self->small_rx_valid = FALSE;
   transfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
   fpi_spi_transfer_write (transfer, frame_len);
   transfer->buffer_wr[0] = 0x10;
@@ -750,7 +764,10 @@ fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
   transfer->buffer_wr[3] = 0x00;
   fpi_spi_transfer_read_full (transfer, self->small_rx, frame_len, NULL);
   fpi_spi_transfer_set_full_duplex (transfer, TRUE);
-  fte3600_submit_transfer (ssm, transfer, cancellable);
+  transfer->ssm = ssm;
+  fpi_spi_transfer_submit (
+      transfer, cancellable ? fpi_device_get_cancellable (device) : NULL,
+      fte3600_reg_read_cb, NULL);
 }
 
 static void
@@ -779,7 +796,8 @@ fte3600_read_result_byte (FpiDeviceFte3600 *self)
 static gboolean
 fte3600_mcu_is_idle (FpiDeviceFte3600 *self)
 {
-  return self->small_rx[FT9361_REG_READ_HEADER_SIZE] == 0xa5
+  return self->small_rx_valid
+         && self->small_rx[FT9361_REG_READ_HEADER_SIZE] == 0xa5
          && self->small_rx[FT9361_REG_READ_HEADER_SIZE + 1] == 0x5a;
 }
 
