@@ -33,7 +33,7 @@ sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel libgusb \
   libgudev libgpiod cairo fprintd
 ```
 
-Fedora 42 or newer:
+Fedora 43 or newer:
 
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \

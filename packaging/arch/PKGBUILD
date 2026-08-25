@@ -2,7 +2,7 @@
 
 pkgname=libfprint-fte3600-personal-git
 # makepkg replaces this bootstrap value with pkgver() from the committed HEAD.
-pkgver=1.94.100.r8
+pkgver=1.94.100.r9
 pkgrel=1
 pkgdesc='libfprint with experimental FTE3600/FT9361 SPI support'
 arch=(x86_64)

@@ -31,7 +31,7 @@ Do not bypass this check on another computer; open a sanitized
 [hardware report](https://github.com/SamSeven777/libfprint-fte3600/issues/new?template=hardware-report.yml)
 instead.
 
-The dependency set supports Fedora 42+ and Ubuntu 26.04+. CI currently builds
+The dependency set supports Fedora 43+ and Ubuntu 26.04+. CI currently builds
 the driver on Fedora 43 and Ubuntu 26.04; neither distribution has been tested
 on FTE3600 hardware. Ubuntu 22.04 and 24.04 ship libgpiod 1.x and cannot build
 this revision without a libgpiod 2.x backport.
@@ -70,7 +70,7 @@ sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel \
   libgusb libgudev libgpiod cairo fprintd
 ```
 
-Fedora 42 or newer:
+Fedora 43 or newer:
 
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \

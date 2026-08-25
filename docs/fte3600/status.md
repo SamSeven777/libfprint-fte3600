@@ -36,7 +36,7 @@ the same ACPI HID are not automatically supported.
 | Distribution | Dependency status | Hardware status |
 | --- | --- | --- |
 | Arch Linux / Omarchy | Native libgpiod 2.x; package recipe included | Verified on one One-Netbook A1 |
-| Fedora 42 and newer | Native libgpiod 2.x; source build supported | Not yet hardware-verified |
+| Fedora 43 and newer | Native libgpiod 2.x; source build supported | Not yet hardware-verified |
 | Ubuntu 26.04 and newer | Native libgpiod 2.x; source build supported | Not yet hardware-verified |
 | Ubuntu 22.04 / 24.04 | Official `libgpiod-dev` is 1.x | Requires a 2.x backport; unsupported as packaged |
 
