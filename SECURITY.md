@@ -30,9 +30,9 @@ its lengths and result but redact both SPI buffers. The driver wipes its main
 raw capture, worker-image, feature, and comparison buffers, plus the in-memory
 template objects it owns, at their ownership boundaries. Serialized template
 bytes are deliberately handed to libfprint/fprintd for host-side persistence
-and are not erased by the driver after that ownership transfer. Image-processing
-libraries may still create temporary derived allocations that are released
-normally rather than securely erased.
+and are not erased by the driver after that ownership transfer. Temporary
+canonicalization/matching stack copies and image-processing-library derived
+allocations may still be released normally rather than securely erased.
 
 The explicit diagnostic capture API intentionally transfers ownership of an
 `FpImage` to its caller. A caller that requests a raw image is responsible for
