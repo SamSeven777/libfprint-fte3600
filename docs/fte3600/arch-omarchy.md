@@ -5,7 +5,19 @@ FTE3600 hardware.
 
 ## Build the local package
 
-From a committed checkout of this branch:
+The package recipe enables `-Dfte3600_personal_auth=true`. Before installing,
+check whether the machine already exposes fingerprint authentication through
+global PAM files:
+
+```sh
+grep -R --line-number 'pam_fprintd.so' /etc/pam.d 2>/dev/null
+```
+
+Do not continue if fingerprint authentication is already wired into login,
+`sudo`, polkit, or another unattended path. Remove that integration using the
+distribution's supported PAM tool while a password fallback is still tested.
+
+From a committed Git checkout of this branch:
 
 ```sh
 cd packaging/arch
@@ -14,8 +26,8 @@ sudo reboot
 ```
 
 The package replaces the stock `libfprint`, installs the spidev buffer setting,
-and grants the sandboxed `fprintd` service GPIO-character-device access. A
-reboot is required.
+grants the sandboxed `fprintd` service GPIO-character-device access, and
+enables the experimental personal policy. A reboot is required.
 
 After reboot, enroll and verify before changing any lock-screen integration:
 

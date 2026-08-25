@@ -93,6 +93,12 @@ included [PKGBUILD](../../packaging/arch/PKGBUILD). Fedora and Ubuntu builds
 are covered by CI, but native RPM/DEB replacement packages have not yet been
 published; distribution packagers are welcome.
 
+The Arch recipe explicitly enables `-Dfte3600_personal_auth=true`. Before
+installing it, check that `pam_fprintd.so` is not already connected to login,
+`sudo`, polkit, or another global PAM path. GitHub's generated source archives
+also lack the Git metadata required by this development recipe; clone the
+release tag as shown in the root [README](../../README.md).
+
 Runtime installations need both supplied settings:
 
 - `config/modprobe.d/fte3600-spidev.conf` so one 5,128-byte SPI transaction is

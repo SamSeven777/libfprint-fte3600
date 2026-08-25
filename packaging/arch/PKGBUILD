@@ -2,11 +2,11 @@
 
 pkgname=libfprint-fte3600-personal-git
 # makepkg replaces this bootstrap value with pkgver() from the committed HEAD.
-pkgver=1.94.100.r4
+pkgver=1.94.100.r8
 pkgrel=1
 pkgdesc='libfprint with experimental FTE3600/FT9361 SPI support'
 arch=(x86_64)
-url='https://fprint.freedesktop.org/'
+url='https://github.com/SamSeven777/libfprint-fte3600'
 license=(LGPL-2.1-or-later)
 groups=(fprint)
 depends=(libgcc glib2 glibc libgudev libgusb openssl pixman libgpiod)
@@ -28,10 +28,19 @@ sha256sums=(
   '71445336251cd3d18566ff2c86871c5ce229e3307eb47c05a1b5fd4df87d239b'
 )
 
+# Upstream libfprint development snapshot from which the FTE3600 work starts.
+_fte_upstream_base=c4654fdc85c25afdd9115bec2f95a44145ae3b94
+
 pkgver() {
   cd libfprint
-  git describe --long --tags --match 'v[0-9]*' | \
-    sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/'
+
+  local upstream_version revision short_commit
+  upstream_version=$(awk -F"'" \
+    '/^[[:space:]]*version:/ { print $2; exit }' meson.build)
+  revision=$(git rev-list --count "${_fte_upstream_base}..HEAD")
+  short_commit=$(git rev-parse --short=7 HEAD)
+
+  printf '%s.r%s.g%s' "$upstream_version" "$revision" "$short_commit"
 }
 
 build() {

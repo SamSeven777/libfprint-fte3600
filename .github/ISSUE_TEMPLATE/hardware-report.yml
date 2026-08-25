@@ -1,0 +1,130 @@
+name: Hardware compatibility report
+description: Report an FTE3600 system or request a carefully reviewed hardware profile
+title: "[Hardware]: "
+labels:
+  - hardware-report
+  - needs-hardware-testing
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping expand hardware coverage. The ACPI name `FTE3600` is not enough to make GPIO operations safe on a new computer.
+
+        **Never attach fingerprint images, templates, descriptors, image-bearing SPI captures, Windows/vendor binaries, firmware, decompiler output, full DSDTs, serial numbers, or private logs.** Start with the narrow, non-biometric information below.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and clean-room boundary
+      options:
+        - label: I have not attached biometric data, raw captures, templates, proprietary binaries/firmware, decompiler output, or a full DSDT.
+          required: true
+        - label: I have redacted usernames, hostnames, serial numbers, and unrelated device identifiers from pasted output.
+          required: true
+
+  - type: input
+    id: computer
+    attributes:
+      label: Computer make and model
+      description: Use the retail product name; do not include a serial number.
+      placeholder: One-Netbook A1
+    validations:
+      required: true
+
+  - type: input
+    id: distribution
+    attributes:
+      label: Linux distribution and version
+      placeholder: Arch Linux, Fedora 43, Ubuntu 26.04, ...
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version
+      description: Output of `uname -r` only.
+      placeholder: 6.x.y-distribution
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Tested release or commit
+      description: Use a release tag or the output of `git rev-parse --short HEAD`.
+      placeholder: fte3600-v0.1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: dmi
+    attributes:
+      label: Exact DMI identity
+      description: Paste only the output of the two commands below. Do not include product_serial, board_serial, or product_uuid.
+      render: shell
+      placeholder: |
+        cat /sys/class/dmi/id/sys_vendor
+        cat /sys/class/dmi/id/product_name
+    validations:
+      required: true
+
+  - type: textarea
+    id: acpi_spi
+    attributes:
+      label: ACPI and SPI discovery
+      description: Run these commands without `sudo`. Redact unrelated paths or identifiers if necessary.
+      render: shell
+      placeholder: |
+        grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
+        ls -l /dev/spidev* /dev/gpiochip*
+        cat /sys/module/spidev/parameters/bufsiz
+    validations:
+      required: true
+
+  - type: dropdown
+    id: current_result
+    attributes:
+      label: Furthest stage reached
+      options:
+        - Not tested because this model is not enabled
+        - Device is not discovered
+        - Device is rejected by the DMI safety gate
+        - Open or initialization fails
+        - Capture or enrollment fails
+        - Verification fails
+        - Enrollment and verification work
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Reproduction, expected result, and actual result
+      description: Describe the commands or UI operation, what you expected, and the exact error in your own words. Do not paste debug/binary dumps or biometric data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safe_versions
+    attributes:
+      label: Safe software-version output
+      description: Optional. Paste only version/status text after checking it for private data. Keep libfprint debug logging disabled.
+      render: shell
+      placeholder: |
+        pkg-config --modversion libfprint-2 libgpiod
+        systemctl show fprintd.service -p LoadState -p ActiveState -p FragmentPath -p DropInPaths
+
+  - type: checkboxes
+    id: safety_gate
+    attributes:
+      label: Reporting and hardware safety
+      options:
+        - label: I have read `SECURITY.md` and `CONTRIBUTING.md`.
+          required: true
+        - label: I understand that the ACPI name `FTE3600` alone is not a compatibility claim for this driver.
+          required: true
+        - label: I understand that maintainers must review GPIO/SPI resources before this model can be enabled, and I will not bypass the DMI safety gate.
+          required: true
+        - label: If I tested enrollment or verification, I kept a working password fallback.
+          required: true

@@ -25,6 +25,9 @@ when the source is cited and the code is independently written.
 An `ACPI\FTE3600` identifier alone is not enough. GPIO offsets and polarity
 are platform-specific. A new profile should provide, in a sanitized issue:
 
+[Open the hardware compatibility report form](https://github.com/SamSeven777/libfprint-fte3600/issues/new?template=hardware-report.yml)
+and fill in only the non-biometric information requested there.
+
 - exact `/sys/class/dmi/id/sys_vendor` and `product_name` strings;
 - sensor ID, geometry, application version, and AGC version;
 - the ACPI controller path and a minimal resource excerpt, not a full DSDT;
@@ -34,6 +37,10 @@ are platform-specific. A new profile should provide, in a sanitized issue:
   and repeated-open results.
 
 Do not describe a few local rejections as a measured false-accept rate.
+
+If a requested diagnostic could contain fingerprint pixels, a template,
+firmware, a full firmware/driver dump, or proprietary material, do not post it.
+Wait for a maintainer to identify a narrower, redistributable diagnostic.
 
 ## Scope of pull requests
 
