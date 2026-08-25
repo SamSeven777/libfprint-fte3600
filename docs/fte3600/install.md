@@ -29,8 +29,8 @@ a reboot.
 Arch Linux:
 
 ```sh
-sudo pacman -S --needed base-devel git meson ninja glib2 libgusb libgudev \
-  libgpiod cairo fprintd
+sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel libgusb \
+  libgudev libgpiod cairo fprintd
 ```
 
 Fedora 42 or newer:

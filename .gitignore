@@ -8,3 +8,4 @@ __pycache__/
 *.pkg.tar.*
 packaging/arch/pkg/
 packaging/arch/src/
+packaging/arch/libfprint/
