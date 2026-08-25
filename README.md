@@ -1,4 +1,36 @@
+# Experimental FTE3600 / FT9361 support
 
+This branch adds a clean-room `libfprint` driver for the FocalTech fingerprint
+sensor exposed as `ACPI\FTE3600` in the **One-Netbook A1**. It supports the
+FT9361 SPI transport, capture, eight-stage enrollment, and an explicitly
+opt-in personal verification policy.
+
+> [!WARNING]
+> The verification policy has not completed independent, multi-person,
+> multi-session FAR/FRR calibration. Use it only for a local lock screen with
+> a tested password fallback. Do not enable it for login, `sudo`, polkit, disk
+> encryption, passkeys, or unattended security decisions.
+
+The hardware path is currently validated only on Arch Linux / Omarchy on the
+exact DMI profile `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`. Fedora and Ubuntu
+can use the same Linux driver core when they provide `libgpiod >= 2.0`,
+`spidev`, and `fprintd`; those distribution integrations still need additional
+hardware reports. Ubuntu 22.04 and 24.04 ship libgpiod 1.x and therefore cannot
+build this revision without a libgpiod 2.x backport.
+
+- [Status and supported hardware](docs/fte3600/status.md)
+- [Build and installation](docs/fte3600/install.md)
+- [Arch / Omarchy setup](docs/fte3600/arch-omarchy.md)
+- [Security boundary](SECURITY.md)
+- [Clean-room implementation notes](docs/fte3600/clean-room.md)
+- [Troubleshooting](docs/fte3600/troubleshooting.md)
+- [Contributing hardware reports](CONTRIBUTING.md)
+
+No private FTE3600 capture, enrolled template, proprietary vendor binary,
+firmware image, or decompiler database is included in this branch. The normal
+upstream libfprint test fixtures remain unchanged.
+
+---
 
 <div align="center">
 
