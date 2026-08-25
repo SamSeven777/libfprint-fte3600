@@ -249,7 +249,7 @@ initialize_rigid_fixture (Fte3600BriskFeatureSet *query,
 static void
 test_pattern_and_pairs (void)
 {
-  gboolean used[FTE3600_BRISK_PATTERN_POINTS][FTE3600_BRISK_PATTERN_POINTS] = { FALSE };
+  gboolean used[FTE3600_BRISK_PATTERN_POINTS][FTE3600_BRISK_PATTERN_POINTS] = { { FALSE } };
   guint point_usage[FTE3600_BRISK_PATTERN_POINTS] = { 0 };
   guint8 serialized_pairs[FTE3600_BRISK_DESCRIPTOR_BITS * 2];
   guint cross_ring = 0;
