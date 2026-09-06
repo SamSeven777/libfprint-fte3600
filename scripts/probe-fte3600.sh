@@ -86,14 +86,21 @@ echo ""
 
 echo "### 5. GPIO Controllers"
 echo "\`\`\`"
-for chip in /sys/class/gpio/gpiochip*; do
+seen_chips=""
+for chip in /sys/bus/gpio/devices/gpiochip* /sys/class/gpio/gpiochip*; do
   [ -d "$chip" ] || continue
   cname=$(basename "$chip")
+  case " $seen_chips " in
+    *" $cname "*) continue ;;
+  esac
+  seen_chips="$seen_chips $cname"
   label=$(cat "$chip/label" 2>/dev/null || echo "unknown")
   base=$(cat "$chip/base" 2>/dev/null || echo "unknown")
   ngpio=$(cat "$chip/ngpio" 2>/dev/null || echo "unknown")
   acpi_path="none"
-  if [ -f "$chip/device/firmware_node/path" ]; then
+  if [ -f "$chip/firmware_node/path" ]; then
+    acpi_path=$(cat "$chip/firmware_node/path" 2>/dev/null || echo "unknown")
+  elif [ -f "$chip/device/firmware_node/path" ]; then
     acpi_path=$(cat "$chip/device/firmware_node/path" 2>/dev/null || echo "unknown")
   fi
   printf "%-12s | label: %-20s | base: %-4s | ngpio: %-4s | acpi: %s\n" \

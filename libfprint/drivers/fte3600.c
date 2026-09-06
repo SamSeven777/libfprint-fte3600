@@ -64,8 +64,9 @@ typedef struct
 {
   const gchar *sys_vendor;
   const gchar *product_name;
-  const gchar *controller_acpi_path;
+  const gchar *reset_controller_acpi_path;
   guint        reset_offset;
+  const gchar *irq_controller_acpi_path;
   guint        irq_offset;
 } Fte3600GpioProfile;
 
@@ -73,9 +74,18 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
   {
     .sys_vendor = "ONE-NETBOOK TECHNOLOGY CO., LTD.",
     .product_name = "A1",
-    .controller_acpi_path = "\\_SB_.PCI0.GPI0",
+    .reset_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .reset_offset = 0x55,
+    .irq_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .irq_offset = 0x56,
+  },
+  {
+    .sys_vendor = "MEDION",
+    .product_name = "E3224",
+    .reset_controller_acpi_path = "\\_SB_.GPO1",
+    .reset_offset = 0x27,
+    .irq_controller_acpi_path = "\\_SB_.GPO2",
+    .irq_offset = 0x00,
   },
 };
 
@@ -92,7 +102,8 @@ struct _FpiDeviceFte3600
   gboolean init_hardware_reset_attempted;
   guint enroll_stages_passed;
 
-  struct gpiod_line_request *gpio_request;
+  struct gpiod_line_request *reset_request;
+  struct gpiod_line_request *irq_request;
   struct gpiod_edge_event_buffer *irq_event_buffer;
   GSource *irq_source;
   FpiSsm *irq_wait_ssm;
@@ -307,9 +318,9 @@ static void
 fte3600_deassert_hardware_reset_best_effort (FpiDeviceFte3600 *self,
                                              const gchar      *context)
 {
-  if (self->gpio_request && self->gpio_profile &&
+  if (self->reset_request && self->gpio_profile &&
       gpiod_line_request_set_value (
-          self->gpio_request, self->gpio_profile->reset_offset,
+          self->reset_request, self->gpio_profile->reset_offset,
           GPIOD_LINE_VALUE_ACTIVE) < 0)
     fp_warn ("Failed to leave the FTE3600 hardware reset line high while %s: "
              "%s", context, g_strerror (errno));
@@ -323,7 +334,8 @@ fte3600_release_gpio (FpiDeviceFte3600 *self)
   g_clear_pointer (&self->irq_event_buffer,
                    gpiod_edge_event_buffer_free);
   fte3600_deassert_hardware_reset_best_effort (self, "releasing GPIOs");
-  g_clear_pointer (&self->gpio_request, gpiod_line_request_release);
+  g_clear_pointer (&self->reset_request, gpiod_line_request_release);
+  g_clear_pointer (&self->irq_request, gpiod_line_request_release);
 }
 
 static gboolean
@@ -386,9 +398,59 @@ fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
   return FALSE;
 }
 
+static gboolean
+fte3600_acpi_path_equal (const gchar *path_a,
+                         const gchar *path_b)
+{
+  g_auto (GStrv) parts_a = NULL;
+  g_auto (GStrv) parts_b = NULL;
+  guint len_a, len_b;
+
+  if (g_strcmp0 (path_a, path_b) == 0)
+    return TRUE;
+  if (!path_a || !path_b)
+    return FALSE;
+
+  while (*path_a == '\\')
+    path_a++;
+  while (*path_b == '\\')
+    path_b++;
+
+  parts_a = g_strsplit (path_a, ".", -1);
+  parts_b = g_strsplit (path_b, ".", -1);
+  len_a = g_strv_length (parts_a);
+  len_b = g_strv_length (parts_b);
+  if (len_a != len_b)
+    return FALSE;
+
+  for (guint i = 0; i < len_a; i++)
+    {
+      gchar *s_a = parts_a[i];
+      gchar *s_b = parts_b[i];
+      gsize slen_a = strlen (s_a);
+      gsize slen_b = strlen (s_b);
+
+      while (slen_a > 0 && s_a[slen_a - 1] == '_')
+        {
+          s_a[slen_a - 1] = '\0';
+          slen_a--;
+        }
+      while (slen_b > 0 && s_b[slen_b - 1] == '_')
+        {
+          s_b[slen_b - 1] = '\0';
+          slen_b--;
+        }
+
+      if (g_strcmp0 (s_a, s_b) != 0)
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
 static gchar *
-fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
-                           GError          **error)
+fte3600_find_gpiochip (const gchar  *target_acpi_path,
+                       GError      **error)
 {
   const gchar *subsystems[] = { "gpio", NULL };
   g_autoptr (GUdevClient) client = NULL;
@@ -414,13 +476,18 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 
       controller_path_file =
           g_build_filename (sysfs_path, "firmware_node", "path", NULL);
+      if (!g_file_test (controller_path_file, G_FILE_TEST_EXISTS))
+        {
+          g_clear_pointer (&controller_path_file, g_free);
+          controller_path_file =
+              g_build_filename (sysfs_path, "device", "firmware_node", "path", NULL);
+        }
       if (!g_file_get_contents (controller_path_file, &controller_path, NULL,
                                 &read_error))
         continue;
 
       g_strchomp (controller_path);
-      if (g_str_equal (controller_path,
-                       self->gpio_profile->controller_acpi_path))
+      if (fte3600_acpi_path_equal (controller_path, target_acpi_path))
         {
           result = g_strdup (device_file);
           break;
@@ -433,7 +500,7 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                  "Could not find the GPIO controller %s required by the "
                  "FTE3600 ACPI resource profile",
-                 self->gpio_profile->controller_acpi_path);
+                 target_acpi_path);
 
   return g_steal_pointer (&result);
 }
@@ -441,91 +508,128 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 static gboolean
 fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 {
-  g_autofree gchar *gpiochip_path = NULL;
-  struct gpiod_request_config *request_config = NULL;
-  struct gpiod_line_settings *irq_settings = NULL;
+  g_autofree gchar *reset_gpiochip_path = NULL;
+  g_autofree gchar *irq_gpiochip_path = NULL;
+  struct gpiod_request_config *reset_req_config = NULL;
+  struct gpiod_request_config *irq_req_config = NULL;
   struct gpiod_line_settings *reset_settings = NULL;
-  struct gpiod_line_config *line_config = NULL;
-  struct gpiod_line_request *request = NULL;
+  struct gpiod_line_settings *irq_settings = NULL;
+  struct gpiod_line_config *reset_line_config = NULL;
+  struct gpiod_line_config *irq_line_config = NULL;
   struct gpiod_edge_event_buffer *event_buffer = NULL;
-  struct gpiod_chip *chip = NULL;
+  struct gpiod_chip *reset_chip = NULL;
+  struct gpiod_chip *irq_chip = NULL;
   unsigned int irq_offset;
   unsigned int reset_offset;
   gint saved_errno = 0;
 
   g_assert (self->gpio_profile != NULL);
-  irq_offset = self->gpio_profile->irq_offset;
   reset_offset = self->gpio_profile->reset_offset;
-  g_assert_cmpuint (irq_offset, !=, reset_offset);
-  gpiochip_path = fte3600_find_irq_gpiochip (self, error);
-  if (!gpiochip_path)
+  irq_offset = self->gpio_profile->irq_offset;
+
+  if (fte3600_acpi_path_equal (self->gpio_profile->reset_controller_acpi_path,
+                               self->gpio_profile->irq_controller_acpi_path))
+    g_assert_cmpuint (irq_offset, !=, reset_offset);
+
+  reset_gpiochip_path = fte3600_find_gpiochip (
+      self->gpio_profile->reset_controller_acpi_path, error);
+  if (!reset_gpiochip_path)
     return FALSE;
 
-  chip = gpiod_chip_open (gpiochip_path);
-  irq_settings = gpiod_line_settings_new ();
+  irq_gpiochip_path = fte3600_find_gpiochip (
+      self->gpio_profile->irq_controller_acpi_path, error);
+  if (!irq_gpiochip_path)
+    return FALSE;
+
+  /* Reset line configuration */
+  reset_chip = gpiod_chip_open (reset_gpiochip_path);
   reset_settings = gpiod_line_settings_new ();
-  line_config = gpiod_line_config_new ();
-  request_config = gpiod_request_config_new ();
-  if (!chip || !irq_settings || !reset_settings || !line_config ||
-      !request_config)
+  reset_line_config = gpiod_line_config_new ();
+  reset_req_config = gpiod_request_config_new ();
+  if (!reset_chip || !reset_settings || !reset_line_config || !reset_req_config)
     goto fail;
 
-  gpiod_request_config_set_consumer (request_config, "libfprint-fte3600");
+  gpiod_request_config_set_consumer (reset_req_config, "libfprint-fte3600-reset");
   if (gpiod_line_settings_set_direction (
           reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0
       || gpiod_line_settings_set_output_value (
              reset_settings, GPIOD_LINE_VALUE_ACTIVE) < 0
       || gpiod_line_config_add_line_settings (
-             line_config, &reset_offset, 1, reset_settings) < 0
-      || gpiod_line_settings_set_direction (
-             irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0
+             reset_line_config, &reset_offset, 1, reset_settings) < 0)
+    goto fail;
+
+  self->reset_request = gpiod_chip_request_lines (
+      reset_chip, reset_req_config, reset_line_config);
+  if (!self->reset_request)
+    goto fail;
+
+  /* IRQ line configuration */
+  irq_chip = gpiod_chip_open (irq_gpiochip_path);
+  irq_settings = gpiod_line_settings_new ();
+  irq_line_config = gpiod_line_config_new ();
+  irq_req_config = gpiod_request_config_new ();
+  if (!irq_chip || !irq_settings || !irq_line_config || !irq_req_config)
+    goto fail;
+
+  gpiod_request_config_set_consumer (irq_req_config, "libfprint-fte3600-irq");
+  if (gpiod_line_settings_set_direction (
+          irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0
       || gpiod_line_settings_set_edge_detection (
              irq_settings, GPIOD_LINE_EDGE_RISING) < 0
       || gpiod_line_config_add_line_settings (
-             line_config, &irq_offset, 1, irq_settings) < 0)
+             irq_line_config, &irq_offset, 1, irq_settings) < 0)
     goto fail;
 
-  request = gpiod_chip_request_lines (chip, request_config, line_config);
-  if (!request)
+  self->irq_request = gpiod_chip_request_lines (
+      irq_chip, irq_req_config, irq_line_config);
+  if (!self->irq_request)
     goto fail;
 
   event_buffer = gpiod_edge_event_buffer_new (8);
   if (!event_buffer)
     goto fail;
 
-  self->gpio_request = request;
   self->irq_event_buffer = event_buffer;
-  request = NULL;
   event_buffer = NULL;
 
-  gpiod_request_config_free (request_config);
-  gpiod_line_config_free (line_config);
-  gpiod_line_settings_free (irq_settings);
+  gpiod_request_config_free (reset_req_config);
+  gpiod_line_config_free (reset_line_config);
   gpiod_line_settings_free (reset_settings);
-  gpiod_chip_close (chip);
+  gpiod_chip_close (reset_chip);
 
-  fp_dbg ("Using %s lines %u (reset) and %u (finger IRQ) for FTE3600",
-          gpiochip_path, reset_offset, irq_offset);
+  gpiod_request_config_free (irq_req_config);
+  gpiod_line_config_free (irq_line_config);
+  gpiod_line_settings_free (irq_settings);
+  gpiod_chip_close (irq_chip);
+
+  fp_dbg ("Using reset line %s:%u and finger IRQ line %s:%u for FTE3600",
+          reset_gpiochip_path, reset_offset, irq_gpiochip_path, irq_offset);
   return TRUE;
 
 fail:
   saved_errno = errno ? errno : ENOMEM;
   g_clear_pointer (&event_buffer, gpiod_edge_event_buffer_free);
-  g_clear_pointer (&request, gpiod_line_request_release);
-  if (request_config)
-    gpiod_request_config_free (request_config);
-  if (line_config)
-    gpiod_line_config_free (line_config);
-  if (irq_settings)
-    gpiod_line_settings_free (irq_settings);
+  g_clear_pointer (&self->irq_request, gpiod_line_request_release);
+  g_clear_pointer (&self->reset_request, gpiod_line_request_release);
+  if (reset_req_config)
+    gpiod_request_config_free (reset_req_config);
+  if (reset_line_config)
+    gpiod_line_config_free (reset_line_config);
   if (reset_settings)
     gpiod_line_settings_free (reset_settings);
-  if (chip)
-    gpiod_chip_close (chip);
+  if (reset_chip)
+    gpiod_chip_close (reset_chip);
+  if (irq_req_config)
+    gpiod_request_config_free (irq_req_config);
+  if (irq_line_config)
+    gpiod_line_config_free (irq_line_config);
+  if (irq_settings)
+    gpiod_line_settings_free (irq_settings);
+  if (irq_chip)
+    gpiod_chip_close (irq_chip);
 
   g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-               "Failed to request FTE3600 reset/IRQ GPIOs %s lines %u/%u: %s",
-               gpiochip_path, reset_offset, irq_offset,
+               "Failed to claim FTE3600 GPIO lines: %s",
                g_strerror (saved_errno));
   return FALSE;
 }
@@ -542,7 +646,7 @@ fte3600_drain_irq_events (FpiDeviceFte3600 *self, GError **error)
       gint count;
 
       do
-        ready = gpiod_line_request_wait_edge_events (self->gpio_request, 0);
+        ready = gpiod_line_request_wait_edge_events (self->irq_request, 0);
       while (ready < 0 && errno == EINTR);
 
       if (ready == 0)
@@ -552,7 +656,7 @@ fte3600_drain_irq_events (FpiDeviceFte3600 *self, GError **error)
 
       do
         count = gpiod_line_request_read_edge_events (
-            self->gpio_request, self->irq_event_buffer,
+            self->irq_request, self->irq_event_buffer,
             gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
       while (count < 0 && errno == EINTR);
 
@@ -570,7 +674,7 @@ fte3600_drain_irq_events (FpiDeviceFte3600 *self, GError **error)
        * queue is still active.  Probe once more without consuming anything;
        * fail only if an additional event is actually pending. */
       do
-        ready = gpiod_line_request_wait_edge_events (self->gpio_request, 0);
+        ready = gpiod_line_request_wait_edge_events (self->irq_request, 0);
       while (ready < 0 && errno == EINTR);
       if (ready < 0)
         goto fail;
@@ -605,7 +709,7 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
   gint count;
 
   g_assert (ssm != NULL);
-  g_assert_cmpint (fd, ==, gpiod_line_request_get_fd (self->gpio_request));
+  g_assert_cmpint (fd, ==, gpiod_line_request_get_fd (self->irq_request));
 
   if (condition & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
     {
@@ -616,7 +720,7 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
 
   do
     count = gpiod_line_request_read_edge_events (
-        self->gpio_request, self->irq_event_buffer,
+        self->irq_request, self->irq_event_buffer,
         gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
   while (count < 0 && errno == EINTR);
 
@@ -662,11 +766,11 @@ fte3600_wait_for_irq (FpiSsm *ssm)
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
   gint fd;
 
-  g_assert (self->gpio_request != NULL);
+  g_assert (self->irq_request != NULL);
   g_assert (self->irq_source == NULL);
   g_assert (self->irq_wait_ssm == NULL);
 
-  fd = gpiod_line_request_get_fd (self->gpio_request);
+  fd = gpiod_line_request_get_fd (self->irq_request);
   self->irq_source = g_unix_fd_source_new (
       fd, G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL);
   self->irq_wait_ssm = ssm;
@@ -808,7 +912,7 @@ fte3600_set_hardware_reset (FpiSsm            *ssm,
 {
   enum gpiod_line_value value;
 
-  g_assert (self->gpio_request != NULL);
+  g_assert (self->reset_request != NULL);
   g_assert (self->gpio_profile != NULL);
 
   /* GPIO 85 is electrically active-low.  No libgpiod active-low transform is
@@ -816,7 +920,7 @@ fte3600_set_hardware_reset (FpiSsm            *ssm,
   value = asserted ? GPIOD_LINE_VALUE_INACTIVE : GPIOD_LINE_VALUE_ACTIVE;
   self->idle_verified = FALSE;
   if (gpiod_line_request_set_value (
-          self->gpio_request, self->gpio_profile->reset_offset, value) < 0)
+          self->reset_request, self->gpio_profile->reset_offset, value) < 0)
     {
       fpi_ssm_mark_failed (
           ssm, g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),

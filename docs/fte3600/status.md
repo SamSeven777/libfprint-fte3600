@@ -1,22 +1,14 @@
 # FTE3600 / FT9361 status
 
-## Verified hardware profile
+## Hardware profiles
 
-| Field | Verified value |
-| --- | --- |
-| System vendor | `ONE-NETBOOK TECHNOLOGY CO., LTD.` |
-| Product | `A1` |
-| ACPI HID | `FTE3600` |
-| Sensor | FT9361, 64 x 80 pixels |
-| Application / AGC version | `0x30` / `0x31` |
-| SPI | mode 0, 8 bits, 1 MHz, chip select 0 |
-| Image transaction | 5,128-byte simultaneous full-duplex transfer |
-| Reset GPIO | controller offset `0x55`, active low |
-| Finger IRQ GPIO | controller offset `0x56`, rising edge |
-| Idle MCU status | `a5 5a` |
+| Model | System vendor | Product | ACPI HID | SPI Bus | Reset GPIO | Finger IRQ GPIO | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| One-Netbook A1 | `ONE-NETBOOK TECHNOLOGY CO., LTD.` | `A1` | `FTE3600` | Mode 0, 1 MHz, CS 0 (`\_SB.PCI0.GPI0`) | Offset `0x55` on `\_SB_.PCI0.GPI0` | Offset `0x56` on `\_SB_.PCI0.GPI0` | Verified on hardware |
+| Medion Akoya E3224 | `MEDION` | `E3224` | `FTE3600` | Mode 0, 1 MHz, CS 0 (`\_SB.PCI0.SPI1`) | Offset `0x27` on `\_SB_.GPO1` | Offset `0x00` on `\_SB_.GPO2` | Profile added; testing in progress |
 
 The driver refuses an unknown DMI/GPIO profile. Other computers that expose
-the same ACPI HID are not automatically supported.
+the same ACPI HID are not automatically supported without a verified profile.
 
 ## Functional status
 
