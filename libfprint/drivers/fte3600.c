@@ -572,6 +572,12 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
                                self->gpio_profile->irq_controller_acpi_path))
     g_assert_cmpuint (irq_offset, !=, reset_offset);
 
+  /* Resolve required GPIO controllers first before requesting any lines */
+  irq_gpiochip_path = fte3600_find_gpiochip (
+      self->gpio_profile->irq_controller_acpi_path, error);
+  if (!irq_gpiochip_path)
+    return FALSE;
+
   if (self->gpio_profile->allow_hardware_reset
       && self->gpio_profile->reset_controller_acpi_path != NULL)
     {
@@ -616,11 +622,6 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
     {
       fp_dbg ("FTE3600 hardware reset line not claimed (allow_hardware_reset=FALSE)");
     }
-
-  irq_gpiochip_path = fte3600_find_gpiochip (
-      self->gpio_profile->irq_controller_acpi_path, error);
-  if (!irq_gpiochip_path)
-    return FALSE;
 
   /* IRQ line configuration */
   irq_chip = gpiod_chip_open (irq_gpiochip_path);
@@ -667,6 +668,7 @@ fail:
   saved_errno = errno ? errno : ENOMEM;
   g_clear_pointer (&event_buffer, gpiod_edge_event_buffer_free);
   g_clear_pointer (&self->irq_request, gpiod_line_request_release);
+  fte3600_deassert_hardware_reset_best_effort (self, "GPIO request failure");
   g_clear_pointer (&self->reset_request, gpiod_line_request_release);
   if (reset_req_config)
     gpiod_request_config_free (reset_req_config);
@@ -2497,6 +2499,7 @@ fte3600_open (FpDevice *dev)
 
   if (!fte3600_request_gpio (self, &error))
     {
+      fte3600_release_gpio (self);
       close (self->spi_fd);
       self->spi_fd = -1;
       fpi_device_open_complete (dev, error);
