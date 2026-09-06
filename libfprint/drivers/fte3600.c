@@ -64,8 +64,12 @@ typedef struct
 {
   const gchar *sys_vendor;
   const gchar *product_name;
+  const gchar *product_version;
+  const gchar *board_name;
   const gchar *reset_controller_acpi_path;
   guint        reset_offset;
+  gboolean     reset_active_low;
+  gboolean     allow_hardware_reset;
   const gchar *irq_controller_acpi_path;
   guint        irq_offset;
 } Fte3600GpioProfile;
@@ -74,20 +78,40 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
   {
     .sys_vendor = "ONE-NETBOOK TECHNOLOGY CO., LTD.",
     .product_name = "A1",
+    .product_version = NULL,
+    .board_name = NULL,
     .reset_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .reset_offset = 0x55,
+    .reset_active_low = TRUE,
+    .allow_hardware_reset = TRUE,
     .irq_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .irq_offset = 0x56,
   },
   {
     .sys_vendor = "MEDION",
     .product_name = "E3224",
+    .product_version = "FT",
+    .board_name = "YS13G",
     .reset_controller_acpi_path = "\\_SB_.GPO1",
     .reset_offset = 0x27,
+    .reset_active_low = TRUE,
+    .allow_hardware_reset = FALSE, /* Safety gate: disabled until polarity is confirmed */
     .irq_controller_acpi_path = "\\_SB_.GPO2",
     .irq_offset = 0x00,
   },
 };
+
+static inline enum gpiod_line_value
+fte3600_reset_line_value (const Fte3600GpioProfile *profile,
+                          gboolean                  asserted)
+{
+  g_assert (profile != NULL);
+
+  if (profile->reset_active_low)
+    return asserted ? GPIOD_LINE_VALUE_INACTIVE : GPIOD_LINE_VALUE_ACTIVE;
+  else
+    return asserted ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
+}
 
 G_STATIC_ASSERT (FT9361_IMAGE_SIZE == FTE3600_BRISK_IMAGE_SIZE);
 
@@ -319,10 +343,11 @@ fte3600_deassert_hardware_reset_best_effort (FpiDeviceFte3600 *self,
                                              const gchar      *context)
 {
   if (self->reset_request && self->gpio_profile &&
+      self->gpio_profile->allow_hardware_reset &&
       gpiod_line_request_set_value (
           self->reset_request, self->gpio_profile->reset_offset,
-          GPIOD_LINE_VALUE_ACTIVE) < 0)
-    fp_warn ("Failed to leave the FTE3600 hardware reset line high while %s: "
+          fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
+    fp_warn ("Failed to leave the FTE3600 hardware reset line deasserted while %s: "
              "%s", context, g_strerror (errno));
 }
 
@@ -374,27 +399,43 @@ fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
 {
   g_autofree gchar *sys_vendor = NULL;
   g_autofree gchar *product_name = NULL;
+  g_autofree gchar *product_version = NULL;
+  g_autofree gchar *board_name = NULL;
 
   self->gpio_profile = NULL;
   if (!fte3600_read_dmi_value ("sys_vendor", &sys_vendor, error) ||
       !fte3600_read_dmi_value ("product_name", &product_name, error))
     return FALSE;
 
+  fte3600_read_dmi_value ("product_version", &product_version, NULL);
+  fte3600_read_dmi_value ("board_name", &board_name, NULL);
+
   for (guint i = 0; i < G_N_ELEMENTS (fte3600_gpio_profiles); i++)
     {
       const Fte3600GpioProfile *profile = &fte3600_gpio_profiles[i];
 
-      if (g_str_equal (sys_vendor, profile->sys_vendor) &&
-          g_str_equal (product_name, profile->product_name))
-        {
-          self->gpio_profile = profile;
-          return TRUE;
-        }
+      if (!g_str_equal (sys_vendor, profile->sys_vendor) ||
+          !g_str_equal (product_name, profile->product_name))
+        continue;
+
+      if (profile->product_version != NULL &&
+          (!product_version || !g_str_equal (product_version, profile->product_version)))
+        continue;
+
+      if (profile->board_name != NULL &&
+          (!board_name || !g_str_equal (board_name, profile->board_name)))
+        continue;
+
+      self->gpio_profile = profile;
+      return TRUE;
     }
 
   g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-               "FTE3600 GPIO routing is not verified for DMI system '%s' '%s'",
-               sys_vendor, product_name);
+               "FTE3600 GPIO routing is not verified for DMI system '%s' '%s' "
+               "(version: '%s', board: '%s')",
+               sys_vendor, product_name,
+               product_version ? product_version : "unknown",
+               board_name ? board_name : "unknown");
   return FALSE;
 }
 
@@ -531,37 +572,55 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
                                self->gpio_profile->irq_controller_acpi_path))
     g_assert_cmpuint (irq_offset, !=, reset_offset);
 
-  reset_gpiochip_path = fte3600_find_gpiochip (
-      self->gpio_profile->reset_controller_acpi_path, error);
-  if (!reset_gpiochip_path)
-    return FALSE;
+  if (self->gpio_profile->allow_hardware_reset
+      && self->gpio_profile->reset_controller_acpi_path != NULL)
+    {
+      reset_gpiochip_path = fte3600_find_gpiochip (
+          self->gpio_profile->reset_controller_acpi_path, error);
+      if (!reset_gpiochip_path)
+        return FALSE;
+
+      /* Reset line configuration */
+      reset_chip = gpiod_chip_open (reset_gpiochip_path);
+      reset_settings = gpiod_line_settings_new ();
+      reset_line_config = gpiod_line_config_new ();
+      reset_req_config = gpiod_request_config_new ();
+      if (!reset_chip || !reset_settings || !reset_line_config || !reset_req_config)
+        goto fail;
+
+      gpiod_request_config_set_consumer (reset_req_config, "libfprint-fte3600-reset");
+      if (gpiod_line_settings_set_direction (
+              reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0
+          || gpiod_line_settings_set_output_value (
+                 reset_settings,
+                 fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0
+          || gpiod_line_config_add_line_settings (
+                 reset_line_config, &reset_offset, 1, reset_settings) < 0)
+        goto fail;
+
+      self->reset_request = gpiod_chip_request_lines (
+          reset_chip, reset_req_config, reset_line_config);
+      if (!self->reset_request)
+        goto fail;
+
+      gpiod_request_config_free (reset_req_config);
+      gpiod_line_config_free (reset_line_config);
+      gpiod_line_settings_free (reset_settings);
+      gpiod_chip_close (reset_chip);
+      reset_req_config = NULL;
+      reset_line_config = NULL;
+      reset_settings = NULL;
+      reset_chip = NULL;
+    }
+  else
+    {
+      fp_dbg ("FTE3600 hardware reset line not claimed (allow_hardware_reset=FALSE)");
+    }
 
   irq_gpiochip_path = fte3600_find_gpiochip (
       self->gpio_profile->irq_controller_acpi_path, error);
   if (!irq_gpiochip_path)
     return FALSE;
-
-  /* Reset line configuration */
-  reset_chip = gpiod_chip_open (reset_gpiochip_path);
-  reset_settings = gpiod_line_settings_new ();
-  reset_line_config = gpiod_line_config_new ();
-  reset_req_config = gpiod_request_config_new ();
-  if (!reset_chip || !reset_settings || !reset_line_config || !reset_req_config)
-    goto fail;
-
-  gpiod_request_config_set_consumer (reset_req_config, "libfprint-fte3600-reset");
-  if (gpiod_line_settings_set_direction (
-          reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0
-      || gpiod_line_settings_set_output_value (
-             reset_settings, GPIOD_LINE_VALUE_ACTIVE) < 0
-      || gpiod_line_config_add_line_settings (
-             reset_line_config, &reset_offset, 1, reset_settings) < 0)
-    goto fail;
-
-  self->reset_request = gpiod_chip_request_lines (
-      reset_chip, reset_req_config, reset_line_config);
-  if (!self->reset_request)
-    goto fail;
 
   /* IRQ line configuration */
   irq_chip = gpiod_chip_open (irq_gpiochip_path);
@@ -592,18 +651,16 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   self->irq_event_buffer = event_buffer;
   event_buffer = NULL;
 
-  gpiod_request_config_free (reset_req_config);
-  gpiod_line_config_free (reset_line_config);
-  gpiod_line_settings_free (reset_settings);
-  gpiod_chip_close (reset_chip);
-
   gpiod_request_config_free (irq_req_config);
   gpiod_line_config_free (irq_line_config);
   gpiod_line_settings_free (irq_settings);
   gpiod_chip_close (irq_chip);
 
-  fp_dbg ("Using reset line %s:%u and finger IRQ line %s:%u for FTE3600",
-          reset_gpiochip_path, reset_offset, irq_gpiochip_path, irq_offset);
+  fp_dbg ("Using reset line %s:%u (claimed=%d) and finger IRQ line %s:%u for FTE3600",
+          reset_gpiochip_path ? reset_gpiochip_path : "unclaimed",
+          reset_offset,
+          self->reset_request != NULL,
+          irq_gpiochip_path, irq_offset);
   return TRUE;
 
 fail:
@@ -912,12 +969,16 @@ fte3600_set_hardware_reset (FpiSsm            *ssm,
 {
   enum gpiod_line_value value;
 
-  g_assert (self->reset_request != NULL);
-  g_assert (self->gpio_profile != NULL);
+  if (!self->gpio_profile || !self->gpio_profile->allow_hardware_reset
+      || !self->reset_request)
+    {
+      fpi_ssm_mark_failed (
+          ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                    "Hardware reset recovery is not enabled or verified for this platform"));
+      return;
+    }
 
-  /* GPIO 85 is electrically active-low.  No libgpiod active-low transform is
-   * configured, so raw 0 asserts reset and raw 1 returns the MCU to service. */
-  value = asserted ? GPIOD_LINE_VALUE_INACTIVE : GPIOD_LINE_VALUE_ACTIVE;
+  value = fte3600_reset_line_value (self->gpio_profile, asserted);
   self->idle_verified = FALSE;
   if (gpiod_line_request_set_value (
           self->reset_request, self->gpio_profile->reset_offset, value) < 0)
@@ -988,7 +1049,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_INIT_CHECK_MCU_STATUS:
       if (!fte3600_mcu_is_idle (self))
         {
-          if (!self->init_hardware_reset_attempted)
+          if (!self->init_hardware_reset_attempted
+              && self->gpio_profile
+              && self->gpio_profile->allow_hardware_reset)
             {
               self->init_hardware_reset_attempted = TRUE;
               self->armed = FALSE;
@@ -1004,8 +1067,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_mark_failed (
             ssm, fpi_device_error_new_msg (
                    FP_DEVICE_ERROR_PROTO,
-                   "FT9361 MCU did not return to idle after hardware "
-                   "recovery (%02x %02x)",
+                   self->init_hardware_reset_attempted
+                     ? "FT9361 MCU did not return to idle after hardware recovery (%02x %02x)"
+                     : "FT9361 MCU did not return to idle (%02x %02x)",
                    self->small_rx[4], self->small_rx[5]));
           return;
         }
