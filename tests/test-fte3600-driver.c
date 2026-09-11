@@ -81,6 +81,59 @@ test_udev_rule_pattern (void)
   g_type_class_unref (klass);
 }
 
+static void
+test_udev_rules_generator_output (void)
+{
+  const gchar *bin_path = g_getenv ("FPRINT_LIST_UDEV_RULES_BIN");
+  g_autofree gchar *standard_output = NULL;
+  g_autofree gchar *standard_error = NULL;
+  gint exit_status = 0;
+  GError *error = NULL;
+  const gchar *line_start;
+  const gchar *pattern_start;
+  const gchar *pattern_end;
+  g_autofree gchar *extracted_pattern = NULL;
+  gboolean ok;
+
+  if (!bin_path || !*bin_path)
+    {
+      g_test_skip ("FPRINT_LIST_UDEV_RULES_BIN not set; skipping generator output test");
+      return;
+    }
+
+  ok = g_spawn_command_line_sync (bin_path, &standard_output, &standard_error,
+                                  &exit_status, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  g_assert_cmpint (exit_status, ==, 0);
+  g_assert_nonnull (standard_output);
+
+  /* Assert generator output actually contains the wildcard rule */
+  line_start = strstr (standard_output, "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
+  g_assert_nonnull (line_start);
+
+  /* Extract the pattern directly from the generator output and verify semantics */
+  pattern_start = line_start + strlen ("ENV{MODALIAS}==\"");
+  pattern_end = strchr (pattern_start, '"');
+  g_assert_nonnull (pattern_end);
+  extracted_pattern = g_strndup (pattern_start, pattern_end - pattern_start);
+  g_assert_cmpstr (extracted_pattern, ==, "acpi:FTE3600:*");
+
+  /* Must match single ACPI HID without _CID */
+  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:"));
+
+  /* Must match repeated ACPI _CID (as seen on Medion Akoya E3224) */
+  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:FTE3600:"));
+
+  /* Must match generic alternative _CID */
+  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:PNP0C02:"));
+
+  /* Boundary checks: must NOT match longer HID or foreign devices */
+  g_assert_false (g_pattern_match_simple (extracted_pattern, "acpi:FTE36000:"));
+  g_assert_false (g_pattern_match_simple (extracted_pattern, "acpi:ELAN7001:"));
+  g_assert_false (g_pattern_match_simple (extracted_pattern, "spi:FTE3600"));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -90,5 +143,7 @@ main (int   argc,
                    test_published_capabilities);
   g_test_add_func ("/fte3600-driver/udev-rule-pattern",
                    test_udev_rule_pattern);
+  g_test_add_func ("/fte3600-driver/udev-rules-generator-output",
+                   test_udev_rules_generator_output);
   return g_test_run ();
 }

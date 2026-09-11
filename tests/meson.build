@@ -330,6 +330,13 @@ endif
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
 
 if 'fte3600' in drivers
+    fte3600_driver_envs = envs
+    fte3600_driver_deps = []
+    if install_udev_rules
+        fte3600_driver_envs.set('FPRINT_LIST_UDEV_RULES_BIN', udev_rules.full_path())
+        fte3600_driver_deps += [ udev_rules ]
+    endif
+
     fte3600_driver_test = executable('test-fte3600-driver',
         sources: 'test-fte3600-driver.c',
         dependencies: libfprint_private_dep,
@@ -339,8 +346,9 @@ if 'fte3600' in drivers
     )
     test('fte3600-driver',
         fte3600_driver_test,
+        depends: fte3600_driver_deps,
         suite: ['unit-tests'],
-        env: envs,
+        env: fte3600_driver_envs,
     )
 
     fte3600_brisk_test = executable('test-fte3600-brisk',
