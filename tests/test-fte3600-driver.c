@@ -101,8 +101,10 @@ test_udev_rules_generator_output (void)
       return;
     }
 
-  ok = g_spawn_command_line_sync (bin_path, &standard_output, &standard_error,
-                                  &exit_status, &error);
+  gchar *argv[] = { (gchar *) bin_path, NULL };
+
+  ok = g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
+                     &standard_output, &standard_error, &exit_status, &error);
   g_assert_no_error (error);
   g_assert_true (ok);
   g_assert_cmpint (exit_status, ==, 0);
