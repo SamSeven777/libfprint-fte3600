@@ -1543,12 +1543,12 @@ fte3600_brisk_result_meets_diagnostic_policy (const Fte3600BriskMatchResult *res
 
   return result->mutual_matches >= FTE3600_BRISK_MIN_MUTUAL_MATCHES &&
          result->inliers >= FTE3600_BRISK_MIN_INLIERS &&
-         result->inlier_ratio >= 0.25 &&
+         result->inlier_ratio >= 0.20 &&
          result->inliers - result->competing_inliers >= 2 &&
-         result->median_error < 0.8 &&
-         result->rms_error < 1.0 &&
-         result->mean_hamming <= 56.0 &&
-         result->occupied_quadrants >= 3 &&
+         result->median_error < 1.25 &&
+         result->rms_error < 1.40 &&
+         result->mean_hamming <= 60.0 &&
+         result->occupied_quadrants >= 2 &&
          result->occupied_cells >= 3 &&
          result->x_span >= 8.0 && result->y_span >= 10.0 &&
          result->query_min_variance >= 4.0 &&
