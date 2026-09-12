@@ -1539,8 +1539,12 @@ fte3600_enroll_retry_error (Fte3600TemplateStatus status)
       return fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER);
 
     case FTE3600_TEMPLATE_RETRY_DUPLICATE:
-    case FTE3600_TEMPLATE_RETRY_INCONSISTENT:
       return fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER);
+
+    case FTE3600_TEMPLATE_RETRY_INCONSISTENT:
+      return fpi_device_retry_new_msg (
+          FP_DEVICE_RETRY_CENTER_FINGER,
+          "Place the same finger near the previously accepted position");
 
     case FTE3600_TEMPLATE_OK:
     case FTE3600_TEMPLATE_NEED_MORE_SAMPLES:

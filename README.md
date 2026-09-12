@@ -102,14 +102,16 @@ sudo apt install build-essential git meson ninja-build pkg-config \
 
 Confirm that `pkg-config --modversion libgpiod` reports 2.0 or newer.
 
-### 3. Clone the pinned release
+### 3. Clone the current experimental branch
 
 GitHub's automatically generated source archive can be used for a direct Meson
 build, but not for the included Arch development `PKGBUILD`, which requires Git
-metadata. Arch users should clone the release tag:
+metadata. These instructions target `medion-e3224`, including the experimental
+Medion profile and current fixes. The older `fte3600-v0.1.0` tag does not
+contain this profile or the A1 SPI power service files.
 
 ```sh
-git clone --branch fte3600-v0.1.0 \
+git clone --branch medion-e3224 \
   https://github.com/SamSeven777/libfprint-fte3600.git
 cd libfprint-fte3600
 ```
