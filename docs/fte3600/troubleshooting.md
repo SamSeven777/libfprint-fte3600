@@ -38,6 +38,20 @@ The effective unit must allow `char-gpiochip rw`. Keep the service sandbox in
 place and do not grant broad access to all devices merely to bypass a GPIO
 configuration error.
 
+If the error reports `Permission denied` on an SELinux-enforcing system (e.g.
+Fedora), check for audit denials:
+
+```sh
+sudo ausearch -m AVC,USER_AVC -ts recent -c fprintd -i
+```
+
+If an AVC denial shows `fprintd_t` was denied access to `gpio_device_t`, install
+the provided SELinux policy module:
+
+```sh
+sudo semodule -i config/selinux/fte3600-gpio.cil
+```
+
 ## The first open works, then SPI reads become all-zero or `0x95`
 
 This state was reproduced on the One-Netbook A1 when either the Intel LPSS

@@ -183,6 +183,10 @@ sudo install -Dm644 config/systemd/fte3600-a1-spi-power.service \
   /etc/systemd/system/fte3600-a1-spi-power.service
 sudo install -Dm644 config/systemd/20-fte3600-a1-spi-power.conf \
   /etc/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf
+
+# On SELinux-enforcing distributions (such as Fedora), permit fprintd GPIO access:
+sudo semodule -i config/selinux/fte3600-gpio.cil
+
 sudo systemctl daemon-reload
 sudo reboot
 ```

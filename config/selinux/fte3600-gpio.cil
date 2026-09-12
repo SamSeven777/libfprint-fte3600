@@ -1,0 +1,7 @@
+; SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
+; SPDX-License-Identifier: LGPL-2.1-or-later
+
+; SELinux policy module for libfprint FTE3600 driver.
+; Permits the confined fprintd service domain (fprintd_t) to access
+; GPIO character devices (gpio_device_t) for hardware reset and finger IRQ lines.
+(allow fprintd_t gpio_device_t (chr_file (getattr open read write ioctl)))

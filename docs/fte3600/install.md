@@ -107,7 +107,13 @@ Runtime installations need the supplied transport and service settings:
 - `config/modprobe.d/fte3600-spidev.conf` so one 5,128-byte SPI transaction is
   permitted after reboot;
 - `config/systemd/10-fte3600-gpio.conf` so sandboxed `fprintd` can open the
-  GPIO character device;
+  GPIO character device via device cgroups;
+- `config/selinux/fte3600-gpio.cil` on distributions with SELinux (such as
+  Fedora), allowing the confined `fprintd_t` service domain to access the
+  `gpio_device_t` character device:
+  ```sh
+  sudo semodule -i config/selinux/fte3600-gpio.cil
+  ```
 - `scripts/fte3600-a1-spi-power`, its systemd unit, and the fprintd drop-in so
   the verified A1's Intel LPSS/pxa2xx controller cannot enter the observed
   broken runtime-suspend state before a fingerprint operation.
