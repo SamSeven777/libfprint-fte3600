@@ -19,9 +19,10 @@ tested password fallback.
 ## Hardware safety
 
 The driver performs volatile SPI register operations and RAM image reads. It
-does not upload firmware or write sensor flash/OTP. GPIO routing and hardware
-reset are enabled only for the exact verified One-Netbook A1 DMI profile; an
-unknown platform fails closed.
+does not upload firmware or write sensor flash/OTP. Hardware reset is enabled
+only for the exact verified One-Netbook A1 DMI profile. The experimental
+Medion profile has an exact, separate IRQ mapping but leaves its unverified
+reset line untouched; every unknown platform fails closed.
 
 ## Biometric data in memory and logs
 

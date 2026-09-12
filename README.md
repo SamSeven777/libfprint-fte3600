@@ -126,7 +126,8 @@ meson setup build-fte3600 --prefix=/usr \
   -Dwerror=true
 ninja -C build-fte3600
 meson test -C build-fte3600 --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
+  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+  fte3600-a1-spi-power
 ```
 
 Before enabling or installing the personal policy, audit existing PAM files:
@@ -147,14 +148,16 @@ rebuild:
 meson configure build-fte3600 -Dfte3600_personal_auth=true
 ninja -C build-fte3600
 meson test -C build-fte3600 --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
+  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+  fte3600-a1-spi-power
 ```
 
 ### 5. Install
 
 On the verified Arch/Omarchy system, use the checkout-based package recipe. It
 replaces the stock `libfprint`, enables the experimental personal policy, adds
-the spidev/GPIO configuration, and requires a reboot:
+the spidev/GPIO configuration, and installs a DMI-gated One-Netbook A1 SPI
+runtime-power workaround. A reboot is required:
 
 ```sh
 cd packaging/arch
@@ -172,9 +175,22 @@ sudo install -Dm644 config/modprobe.d/fte3600-spidev.conf \
   /etc/modprobe.d/fte3600-spidev.conf
 sudo install -Dm644 config/systemd/10-fte3600-gpio.conf \
   /etc/systemd/system/fprintd.service.d/10-fte3600-gpio.conf
+sudo install -Dm755 scripts/fte3600-a1-spi-power \
+  /usr/lib/libfprint/fte3600-a1-spi-power
+sudo install -Dm644 config/systemd/fte3600-a1-spi-power.service \
+  /etc/systemd/system/fte3600-a1-spi-power.service
+sudo install -Dm644 config/systemd/20-fte3600-a1-spi-power.conf \
+  /etc/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf
 sudo systemctl daemon-reload
 sudo reboot
 ```
+
+The power service is a One-Netbook A1 platform workaround, not part of the
+portable matching algorithm. It checks the exact DMI, ACPI, PCI, and SPI
+topology before changing anything and is skipped on the Medion profile and all
+other computers. It keeps only the affected Intel LPSS parent and pxa2xx SPI
+child out of runtime suspend while the service is active; this can cause a
+small increase in idle power use.
 
 Distribution packagers should turn the staged Meson install into an RPM or DEB
 instead of recommending the manual replacement above.

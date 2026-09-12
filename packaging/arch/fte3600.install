@@ -9,6 +9,13 @@ post_upgrade() {
   post_install
 }
 
+pre_remove() {
+  # Restore any runtime-PM policy saved by the A1 workaround while its helper
+  # is still installed. The unit is inactive on every non-matching platform.
+  systemctl stop fte3600-a1-spi-power.service 2>/dev/null || true
+  /usr/lib/libfprint/fte3600-a1-spi-power stop 2>/dev/null || true
+}
+
 post_remove() {
   systemctl daemon-reload
   udevadm control --reload

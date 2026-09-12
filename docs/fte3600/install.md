@@ -11,9 +11,11 @@ grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
 ls -l /dev/spidev*
 ```
 
-This revision supports only `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`. Do not
-force the DMI check on another model; an incorrect GPIO reset mapping can
-affect unrelated hardware.
+This revision supports the verified `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`
+profile and the restricted experimental `MEDION / E3224 / FT / YS13G`
+profile. Do not force the DMI check on another model; an incorrect GPIO reset
+mapping can affect unrelated hardware. The Medion reset line remains disabled
+until its polarity is verified on hardware.
 
 The image transaction cannot be split. Check the current kernel limit:
 
@@ -65,7 +67,8 @@ meson setup build-fte3600-safe \
   -Dwerror=true
 meson compile -C build-fte3600-safe
 meson test -C build-fte3600-safe --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
+  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+  fte3600-a1-spi-power
 ```
 
 For the explicitly experimental enrollment/verification policy, change the
@@ -99,12 +102,19 @@ installing it, check that `pam_fprintd.so` is not already connected to login,
 also lack the Git metadata required by this development recipe; clone the
 release tag as shown in the root [README](../../README.md).
 
-Runtime installations need both supplied settings:
+Runtime installations need the supplied transport and service settings:
 
 - `config/modprobe.d/fte3600-spidev.conf` so one 5,128-byte SPI transaction is
   permitted after reboot;
 - `config/systemd/10-fte3600-gpio.conf` so sandboxed `fprintd` can open the
-  GPIO character device.
+  GPIO character device;
+- `scripts/fte3600-a1-spi-power`, its systemd unit, and the fprintd drop-in so
+  the verified A1's Intel LPSS/pxa2xx controller cannot enter the observed
+  broken runtime-suspend state before a fingerprint operation.
+
+The SPI power service performs exact DMI, ACPI, PCI, and SPI topology checks.
+It is skipped on Medion and every other non-A1 profile, and it yields to a
+future native kernel driver instead of rebinding that driver to spidev.
 
 After installation, reboot. Reloading udev alone cannot change an already
 loaded spidev buffer limit or reliably re-enumerate the SPI device.

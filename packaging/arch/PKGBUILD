@@ -63,7 +63,8 @@ build() {
 
 check() {
   meson test -C "$srcdir/build" --print-errorlogs --no-rebuild \
-    fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
+    fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+    fte3600-a1-spi-power
 }
 
 package() {
@@ -73,4 +74,12 @@ package() {
     "$pkgdir/usr/lib/systemd/system/fprintd.service.d/10-fte3600-gpio.conf"
   install -Dm644 "$srcdir/fte3600-spidev.conf" \
     "$pkgdir/usr/lib/modprobe.d/fte3600-spidev.conf"
+  install -Dm755 "$srcdir/libfprint/scripts/fte3600-a1-spi-power" \
+    "$pkgdir/usr/lib/libfprint/fte3600-a1-spi-power"
+  install -Dm644 \
+    "$srcdir/libfprint/config/systemd/fte3600-a1-spi-power.service" \
+    "$pkgdir/usr/lib/systemd/system/fte3600-a1-spi-power.service"
+  install -Dm644 \
+    "$srcdir/libfprint/config/systemd/20-fte3600-a1-spi-power.conf" \
+    "$pkgdir/usr/lib/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf"
 }
