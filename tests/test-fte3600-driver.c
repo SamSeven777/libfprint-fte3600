@@ -110,12 +110,15 @@ test_udev_rules_generator_output (void)
   g_assert_cmpint (exit_status, ==, 0);
   g_assert_nonnull (standard_output);
 
-  /* Assert generator output actually contains the wildcard rule */
-  line_start = strstr (standard_output, "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
+  /* The same rule must require an unbound SPI device before scheduling
+   * module loading, driver_override or bind writes. */
+  line_start = strstr (standard_output,
+                       "ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", "
+                       "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
   g_assert_nonnull (line_start);
 
   /* Extract the pattern directly from the generator output and verify semantics */
-  pattern_start = line_start + strlen ("ENV{MODALIAS}==\"");
+  pattern_start = strstr (line_start, "ENV{MODALIAS}==\"") + strlen ("ENV{MODALIAS}==\"");
   pattern_end = strchr (pattern_start, '"');
   g_assert_nonnull (pattern_end);
   extracted_pattern = g_strndup (pattern_start, pattern_end - pattern_start);

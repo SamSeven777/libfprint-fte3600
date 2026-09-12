@@ -49,7 +49,7 @@ print_driver (const FpDeviceClass *cls)
       if (num_printed == 0)
         g_print ("# %s\n", cls->full_name);
 
-      g_print ("ACTION==\"add|change\", SUBSYSTEM==\"spi\", ENV{MODALIAS}==\"acpi:%s:*\", RUN{builtin}+=\"kmod load spi:spidev\", RUN+=\"/bin/sh -c 'echo spidev > %%S%%p/driver_override && echo %%k > %%S%%p/subsystem/drivers/spidev/bind'\"\n",
+      g_print ("ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", ENV{MODALIAS}==\"acpi:%s:*\", RUN{builtin}+=\"kmod load spi:spidev\", RUN+=\"/bin/sh -c 'echo spidev > %%S%%p/driver_override && echo %%k > %%S%%p/subsystem/drivers/spidev/bind'\"\n",
                entry->spi_acpi_id);
       num_printed++;
     }
