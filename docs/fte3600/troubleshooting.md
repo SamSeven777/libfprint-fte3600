@@ -38,19 +38,31 @@ The effective unit must allow `char-gpiochip rw`. Keep the service sandbox in
 place and do not grant broad access to all devices merely to bypass a GPIO
 configuration error.
 
-If the error reports `Permission denied` on an SELinux-enforcing system (e.g.
-Fedora), check for audit denials:
+If the error reports `Permission denied` on Fedora 43/44 with enforcing
+SELinux, check the audit log and current policy contexts:
 
 ```sh
-sudo ausearch -m AVC,USER_AVC -ts recent -c fprintd -i
+sudo ausearch -m AVC,USER_AVC,SELINUX_ERR,USER_SELINUX_ERR \
+  -ts recent -c fprintd -i
+ls -lZ /dev/gpiochip*
+ps -eZ | grep '[f]printd'
 ```
 
-If an AVC denial shows `fprintd_t` was denied access to `gpio_device_t`, install
-the provided SELinux policy module:
+Only if the denial and commands show source type `fprintd_t` and target type
+`gpio_device_t`, install and verify the provided local policy module:
 
 ```sh
 sudo semodule -i config/selinux/fte3600-gpio.cil
+sudo semodule -lfull | grep -F fte3600-gpio
+sudo systemctl restart fprintd.service
 ```
+
+Fedora assigns `gpio_device_t` to every `/dev/gpiochip*` node. The module
+therefore permits `fprintd_t` to perform the listed operations on all GPIO
+character devices, not only the FTE3600 lines; the systemd device allow-list
+still remains in force. Do not install this Fedora-specific module on another
+SELinux policy without reviewing its types. Remove it with
+`sudo semodule -r fte3600-gpio` when uninstalling the driver.
 
 ## The first open works, then SPI reads become all-zero or `0x95`
 

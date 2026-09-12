@@ -40,7 +40,7 @@ Fedora 43 or newer:
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
   glib2-devel libgusb-devel libgudev-devel libgpiod-devel systemd-devel \
-  systemd cairo-devel fprintd
+  systemd cairo-devel fprintd policycoreutils
 ```
 
 Ubuntu 26.04 or newer:
@@ -100,7 +100,7 @@ The Arch recipe explicitly enables `-Dfte3600_personal_auth=true`. Before
 installing it, check that `pam_fprintd.so` is not already connected to login,
 `sudo`, polkit, or another global PAM path. GitHub's generated source archives
 also lack the Git metadata required by this development recipe; clone the
-release tag as shown in the root [README](../../README.md).
+`medion-e3224` branch as shown in the root [README](../../README.md).
 
 Runtime installations need the supplied transport and service settings:
 
@@ -108,11 +108,13 @@ Runtime installations need the supplied transport and service settings:
   permitted after reboot;
 - `config/systemd/10-fte3600-gpio.conf` so sandboxed `fprintd` can open the
   GPIO character device via device cgroups;
-- `config/selinux/fte3600-gpio.cil` on distributions with SELinux (such as
-  Fedora), allowing the confined `fprintd_t` service domain to access the
-  `gpio_device_t` character device:
+- `config/selinux/fte3600-gpio.cil` on Fedora 43/44 with enforcing SELinux,
+  allowing the confined `fprintd_t` service domain to access
+  `gpio_device_t`. Verify those exact local policy types first as described in
+  [troubleshooting](troubleshooting.md), then install and confirm the module:
   ```sh
   sudo semodule -i config/selinux/fte3600-gpio.cil
+  sudo semodule -lfull | grep -F fte3600-gpio
   ```
 - `scripts/fte3600-a1-spi-power`, its systemd unit, and the fprintd drop-in so
   the verified A1's Intel LPSS/pxa2xx controller cannot enter the observed
@@ -124,6 +126,11 @@ future native kernel driver instead of rebinding that driver to spidev.
 
 After installation, reboot. Reloading udev alone cannot change an already
 loaded spidev buffer limit or reliably re-enumerate the SPI device.
+
+Fedora labels every `/dev/gpiochip*` node `gpio_device_t`, so the local module
+grants the listed GPIO operations to `fprintd_t` on all GPIO character devices,
+not only the FTE3600 lines. It is not a portable SELinux policy. Remove it with
+`sudo semodule -r fte3600-gpio` when uninstalling the driver.
 
 ## 5. Enroll and verify
 

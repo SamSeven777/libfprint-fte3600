@@ -439,6 +439,8 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   struct gpiod_chip *irq_chip = NULL;
   const gchar *failed_op = NULL;
   const gchar *failed_target = NULL;
+  guint failed_offset = 0;
+  guint failed_n_offsets = 0;
   unsigned int irq_offset;
   unsigned int reset_offset;
   gint saved_errno = 0;
@@ -469,6 +471,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
       reset_chip = gpiod_chip_open (reset_gpiochip_path);
       if (!reset_chip)
         {
+          saved_errno = errno ? errno : EIO;
           failed_op = "open reset GPIO controller";
           failed_target = reset_gpiochip_path;
           goto fail;
@@ -479,6 +482,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
       reset_req_config = gpiod_request_config_new ();
       if (!reset_settings || !reset_line_config || !reset_req_config)
         {
+          saved_errno = ENOMEM;
           failed_op = "allocate reset GPIO configuration";
           failed_target = reset_gpiochip_path;
           goto fail;
@@ -486,15 +490,34 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 
       gpiod_request_config_set_consumer (reset_req_config, "libfprint-fte3600-reset");
       if (gpiod_line_settings_set_direction (
-              reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0
-          || gpiod_line_settings_set_output_value (
-                 reset_settings,
-                 fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0
-          || gpiod_line_config_add_line_settings (
-                 reset_line_config, &reset_offset, 1, reset_settings) < 0)
+              reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0)
         {
-          failed_op = "configure reset GPIO settings";
+          saved_errno = errno ? errno : EIO;
+          failed_op = "set reset GPIO direction";
           failed_target = reset_gpiochip_path;
+          failed_offset = reset_offset;
+          failed_n_offsets = 1;
+          goto fail;
+        }
+      if (gpiod_line_settings_set_output_value (
+              reset_settings,
+              fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
+        {
+          saved_errno = errno ? errno : EIO;
+          failed_op = "set reset GPIO inactive value";
+          failed_target = reset_gpiochip_path;
+          failed_offset = reset_offset;
+          failed_n_offsets = 1;
+          goto fail;
+        }
+      if (gpiod_line_config_add_line_settings (
+              reset_line_config, &reset_offset, 1, reset_settings) < 0)
+        {
+          saved_errno = errno ? errno : EIO;
+          failed_op = "add reset GPIO to line configuration";
+          failed_target = reset_gpiochip_path;
+          failed_offset = reset_offset;
+          failed_n_offsets = 1;
           goto fail;
         }
 
@@ -502,8 +525,11 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
           reset_chip, reset_req_config, reset_line_config);
       if (!self->reset_request)
         {
+          saved_errno = errno ? errno : EIO;
           failed_op = "request reset GPIO line";
           failed_target = reset_gpiochip_path;
+          failed_offset = reset_offset;
+          failed_n_offsets = 1;
           goto fail;
         }
 
@@ -525,6 +551,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   irq_chip = gpiod_chip_open (irq_gpiochip_path);
   if (!irq_chip)
     {
+      saved_errno = errno ? errno : EIO;
       failed_op = "open finger IRQ GPIO controller";
       failed_target = irq_gpiochip_path;
       goto fail;
@@ -535,6 +562,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   irq_req_config = gpiod_request_config_new ();
   if (!irq_settings || !irq_line_config || !irq_req_config)
     {
+      saved_errno = ENOMEM;
       failed_op = "allocate finger IRQ GPIO configuration";
       failed_target = irq_gpiochip_path;
       goto fail;
@@ -542,14 +570,33 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 
   gpiod_request_config_set_consumer (irq_req_config, "libfprint-fte3600-irq");
   if (gpiod_line_settings_set_direction (
-          irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0
-      || gpiod_line_settings_set_edge_detection (
-             irq_settings, GPIOD_LINE_EDGE_RISING) < 0
-      || gpiod_line_config_add_line_settings (
-             irq_line_config, &irq_offset, 1, irq_settings) < 0)
+          irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0)
     {
-      failed_op = "configure finger IRQ GPIO settings";
+      saved_errno = errno ? errno : EIO;
+      failed_op = "set finger IRQ GPIO direction";
       failed_target = irq_gpiochip_path;
+      failed_offset = irq_offset;
+      failed_n_offsets = 1;
+      goto fail;
+    }
+  if (gpiod_line_settings_set_edge_detection (
+          irq_settings, GPIOD_LINE_EDGE_RISING) < 0)
+    {
+      saved_errno = errno ? errno : EIO;
+      failed_op = "set finger IRQ GPIO edge detection";
+      failed_target = irq_gpiochip_path;
+      failed_offset = irq_offset;
+      failed_n_offsets = 1;
+      goto fail;
+    }
+  if (gpiod_line_config_add_line_settings (
+          irq_line_config, &irq_offset, 1, irq_settings) < 0)
+    {
+      saved_errno = errno ? errno : EIO;
+      failed_op = "add finger IRQ GPIO to line configuration";
+      failed_target = irq_gpiochip_path;
+      failed_offset = irq_offset;
+      failed_n_offsets = 1;
       goto fail;
     }
 
@@ -557,14 +604,18 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
       irq_chip, irq_req_config, irq_line_config);
   if (!self->irq_request)
     {
+      saved_errno = errno ? errno : EIO;
       failed_op = "request finger IRQ GPIO line";
       failed_target = irq_gpiochip_path;
+      failed_offset = irq_offset;
+      failed_n_offsets = 1;
       goto fail;
     }
 
   event_buffer = gpiod_edge_event_buffer_new (8);
   if (!event_buffer)
     {
+      saved_errno = ENOMEM;
       failed_op = "allocate GPIO edge event buffer";
       failed_target = irq_gpiochip_path;
       goto fail;
@@ -586,7 +637,8 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   return TRUE;
 
 fail:
-  saved_errno = errno ? errno : ENOMEM;
+  if (saved_errno == 0)
+    saved_errno = EIO;
   g_clear_pointer (&event_buffer, gpiod_edge_event_buffer_free);
   g_clear_pointer (&self->irq_request, gpiod_line_request_release);
   fte3600_deassert_hardware_reset_best_effort (self, "GPIO request failure");
@@ -608,7 +660,12 @@ fail:
   if (irq_chip)
     gpiod_chip_close (irq_chip);
 
-  if (failed_op && failed_target)
+  if (failed_op && failed_target && failed_n_offsets == 1)
+    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+                 "Failed to %s on %s line %u: %s",
+                 failed_op, failed_target, failed_offset,
+                 g_strerror (saved_errno));
+  else if (failed_op && failed_target)
     g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
                  "Failed to %s on %s: %s",
                  failed_op, failed_target, g_strerror (saved_errno));

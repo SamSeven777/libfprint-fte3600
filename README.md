@@ -89,7 +89,7 @@ Fedora 43 or newer:
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
   glib2-devel libgusb-devel libgudev-devel libgpiod-devel systemd-devel \
-  systemd cairo-devel fprintd
+  systemd cairo-devel fprintd policycoreutils
 ```
 
 Ubuntu 26.04 or newer:
@@ -184,8 +184,10 @@ sudo install -Dm644 config/systemd/fte3600-a1-spi-power.service \
 sudo install -Dm644 config/systemd/20-fte3600-a1-spi-power.conf \
   /etc/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf
 
-# On SELinux-enforcing distributions (such as Fedora), permit fprintd GPIO access:
+# Fedora 43/44 with enforcing SELinux only; first verify the contexts as
+# described in docs/fte3600/troubleshooting.md:
 sudo semodule -i config/selinux/fte3600-gpio.cil
+sudo semodule -lfull | grep -F fte3600-gpio
 
 sudo systemctl daemon-reload
 sudo reboot
@@ -200,6 +202,13 @@ small increase in idle power use.
 
 Distribution packagers should turn the staged Meson install into an RPM or DEB
 instead of recommending the manual replacement above.
+
+The supplied SELinux module is specific to Fedora's `fprintd_t` and
+`gpio_device_t` policy types. Because Fedora assigns `gpio_device_t` to every
+`/dev/gpiochip*` node, the module grants the listed operations on every GPIO
+character device to `fprintd_t`, not just the FTE3600 lines. Do not install it
+blindly on another SELinux distribution. Remove it with
+`sudo semodule -r fte3600-gpio` when removing this driver.
 
 ### 6. Enroll, verify, and configure PAM safely
 

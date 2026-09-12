@@ -24,6 +24,18 @@ only for the exact verified One-Netbook A1 DMI profile. The experimental
 Medion profile has an exact, separate IRQ mapping but leaves its unverified
 reset line untouched; every unknown platform fails closed.
 
+## Fedora SELinux GPIO access
+
+Fedora 43/44 labels all `/dev/gpiochip*` nodes `gpio_device_t`. The optional
+`config/selinux/fte3600-gpio.cil` module therefore grants confined `fprintd_t`
+the listed operations on every GPIO character device, not only the controller
+and lines used by FTE3600. It grants nothing to other domains, and the fprintd
+systemd device allow-list remains an independent restriction.
+
+Install this local module only after confirming the exact source and target
+types on a Fedora system. It is not intended as portable policy for other
+SELinux distributions. Remove it when uninstalling the driver.
+
 ## Biometric data in memory and logs
 
 The FTE3600 image transfer is marked sensitive, so `FP_DEBUG_TRANSFER` logs
