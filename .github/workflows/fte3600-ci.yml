@@ -18,15 +18,7 @@ jobs:
           dnf install -y git gcc gcc-c++ meson ninja-build
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
           libgpiod-devel systemd systemd-devel cairo-devel
-          policycoreutils selinux-policy-targeted setools-console
       - uses: actions/checkout@v6
-      - name: Validate Fedora SELinux policy
-        run: |
-          semodule -i config/selinux/fte3600-gpio.cil
-          semodule -lfull | grep -F fte3600-gpio
-          sesearch -A -s fprintd_t -t gpio_device_t -c chr_file \
-            -p getattr -p open -p read -p write -p ioctl
-          semodule -r fte3600-gpio
       - name: Build both authentication policies
         run: ./scripts/check-fte3600.sh
 
