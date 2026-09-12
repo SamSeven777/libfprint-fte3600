@@ -11,11 +11,9 @@ grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
 ls -l /dev/spidev*
 ```
 
-This revision supports the verified `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`
-profile and the restricted experimental `MEDION / E3224 / FT / YS13G`
-profile. Do not force the DMI check on another model; an incorrect GPIO reset
-mapping can affect unrelated hardware. The Medion reset line remains disabled
-until its polarity is verified on hardware.
+This revision supports only `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`. Do not
+force the DMI check on another model; an incorrect GPIO reset mapping can
+affect unrelated hardware.
 
 The image transaction cannot be split. Check the current kernel limit:
 
@@ -113,8 +111,8 @@ Runtime installations need the supplied transport and service settings:
   broken runtime-suspend state before a fingerprint operation.
 
 The SPI power service performs exact DMI, ACPI, PCI, and SPI topology checks.
-It is skipped on Medion and every other non-A1 profile, and it yields to a
-future native kernel driver instead of rebinding that driver to spidev.
+It is skipped on every non-A1 profile, and it yields to a future native kernel
+driver instead of rebinding that driver to spidev.
 
 After installation, reboot. Reloading udev alone cannot change an already
 loaded spidev buffer limit or reliably re-enumerate the SPI device.

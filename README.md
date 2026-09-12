@@ -173,8 +173,8 @@ sudo reboot
 
 The power service is a One-Netbook A1 platform workaround, not part of the
 portable matching algorithm. It checks the exact DMI, ACPI, PCI, and SPI
-topology before changing anything and is skipped on the Medion profile and all
-other computers. It keeps only the affected Intel LPSS parent and pxa2xx SPI
+topology before changing anything and is skipped on every other computer. It
+keeps only the affected Intel LPSS parent and pxa2xx SPI
 child out of runtime suspend while the service is active; this can cause a
 small increase in idle power use.
 
