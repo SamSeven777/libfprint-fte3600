@@ -24,6 +24,10 @@ the same ACPI HID are not automatically supported.
   and close work on the verified machine.
 - A bounded DMI-gated hardware-reset recovery handles the observed non-idle
   bootloader state without uploading firmware.
+- An exact-A1 systemd helper prevents runtime suspend of both levels of the
+  affected Intel LPSS/pxa2xx SPI controller. Delayed repeated probes remain
+  stable with both policies set to `on`; allowing either level to suspend
+  reproduced invalid all-zero or `0x95` reads.
 - Eight-stage clean-room enrollment and versioned template persistence work.
 - The opt-in personal verification policy has completed genuine and impostor
   smoke tests and an Omarchy lock-screen unlock.

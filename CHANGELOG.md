@@ -1,5 +1,14 @@
 # Release history
 
+## Unreleased
+
+- Add a fail-closed One-Netbook A1 systemd helper that disables runtime PM for
+  the verified Intel LPSS/pxa2xx SPI path before `fprintd`, rebinds the
+  controller when required, and restores the previous policy on removal.
+- Add fake-sysfs tests for DMI and topology gating, transactional power-policy
+  handling, native-driver precedence, and state-file validation.
+- Document the repeated all-zero/`0x95` SPI failure and its A1-only workaround.
+
 ## fte3600-v0.1.0 - 2026-08-25
 
 First experimental, source-only release of the clean-room FTE3600 / FT9361

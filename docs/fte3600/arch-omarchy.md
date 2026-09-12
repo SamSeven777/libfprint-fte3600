@@ -26,8 +26,15 @@ sudo reboot
 ```
 
 The package replaces the stock `libfprint`, installs the spidev buffer setting,
-grants the sandboxed `fprintd` service GPIO-character-device access, and
-enables the experimental personal policy. A reboot is required.
+grants the sandboxed `fprintd` service GPIO-character-device access, installs
+the exact-A1 SPI runtime-power workaround, and enables the experimental
+personal policy. A reboot is required.
+
+On the One-Netbook A1, the package starts the workaround before `fprintd`. It
+keeps the sensor's Intel LPSS parent and pxa2xx child out of runtime suspend and
+rebinds that controller once when required. The helper checks the complete
+known topology first and does nothing on other DMI profiles or when a future
+native FTE3600 kernel driver owns the device.
 
 After reboot, enroll and verify before changing any lock-screen integration:
 

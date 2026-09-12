@@ -38,6 +38,27 @@ The effective unit must allow `char-gpiochip rw`. Keep the service sandbox in
 place and do not grant broad access to all devices merely to bypass a GPIO
 configuration error.
 
+## The first open works, then SPI reads become all-zero or `0x95`
+
+This state was reproduced on the One-Netbook A1 when either the Intel LPSS
+parent or its pxa2xx SPI child was allowed to runtime-suspend. Confirm that the
+DMI-gated workaround was installed and completed before `fprintd`:
+
+```sh
+systemctl status fte3600-a1-spi-power.service --no-pager
+cat /sys/devices/pci0000:00/0000:00:1e.3/power/control
+cat /sys/devices/pci0000:00/0000:00:1e.3/pxa2xx-spi.4/power/control
+```
+
+On the verified A1 both controls should report `on` after the service starts.
+Do not copy these fixed controller paths to another computer. Reinstall the
+package and reboot if the unit is missing; if its topology check fails, attach
+the sanitized unit status to a hardware report instead of forcing a rebind.
+TLP, powertop autotuning, or another power manager can overwrite these values
+later. Disable that conflicting rule, stop `fprintd`, and restart
+`fte3600-a1-spi-power.service`; never rebind the controller while a fingerprint
+operation is active.
+
 ## Enrollment repeatedly asks for another press
 
 Lift the finger completely, pause briefly, and vary position slightly on the

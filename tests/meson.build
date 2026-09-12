@@ -382,6 +382,18 @@ if 'fte3600' in drivers
         env: envs,
     )
 
+    test('fte3600-a1-spi-power',
+        sh,
+        args: [
+            meson.current_source_dir() / 'test-fte3600-a1-spi-power.sh',
+            meson.project_source_root() / 'scripts' / 'fte3600-a1-spi-power',
+            meson.project_source_root() / 'config' / 'systemd' /
+                'fte3600-a1-spi-power.service',
+        ],
+        suite: ['unit-tests', 'no-valgrind'],
+        env: envs,
+    )
+
 endif
 
 foreach test_name: unit_tests
