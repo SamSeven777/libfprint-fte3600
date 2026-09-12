@@ -8,6 +8,9 @@ for the FocalTech fingerprint sensor exposed as `ACPI\FTE3600` in the
 enrollment, and an explicitly opt-in personal verification policy. It is not
 an official libfprint release or an upstream-supported device.
 
+This branch also includes an experimental **Medion Akoya E3224** hardware
+profile. Its end-to-end hardware validation is still in progress.
+
 > [!WARNING]
 > The verification policy has not completed independent, multi-person,
 > multi-session FAR/FRR calibration. Use it only for a local lock screen with
@@ -26,10 +29,19 @@ an official libfprint release or an upstream-supported device.
 | Hardware-tested system | Arch Linux / Omarchy |
 
 `FTE3600` is an ACPI family identifier, not a complete compatibility claim.
-The driver fails closed on every DMI/GPIO profile except the One-Netbook A1.
+The driver accepts the verified One-Netbook A1 profile and the experimental
+Medion profile below; all other DMI/GPIO profiles are rejected.
 Do not bypass this check on another computer; open a sanitized
 [hardware report](https://github.com/SamSeven777/libfprint-fte3600/issues/new?template=hardware-report.yml)
 instead.
+
+The Medion profile requires all four DMI fields to match exactly:
+`sys_vendor=MEDION`, `product_name=E3224`, `product_version=FT`, and
+`board_name=YS13G`. Its finger IRQ uses offset `0x00` on `\_SB_.GPO2`.
+The reset resource is offset `0x27` on `\_SB_.GPO1`, but its polarity has not
+been verified: the driver does not claim or drive that line and cannot use
+hardware-reset recovery on this model. If software reset cannot return the
+sensor to idle, initialization fails. See [hardware status](docs/fte3600/status.md).
 
 The dependency set supports Fedora 43+ and Ubuntu 26.04+. CI currently builds
 the driver on Fedora 43 and Ubuntu 26.04; neither distribution has been tested
@@ -40,12 +52,14 @@ this revision without a libgpiod 2.x backport.
 
 ### 1. Confirm the exact hardware profile
 
-The first three checks are read-only and must produce the verified DMI and ACPI
-identity above:
+These read-only checks must match one of the exact profiles above. Only the
+A1 profile has completed hardware validation:
 
 ```sh
 cat /sys/class/dmi/id/sys_vendor
 cat /sys/class/dmi/id/product_name
+cat /sys/class/dmi/id/product_version
+cat /sys/class/dmi/id/board_name
 grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
 ```
 
@@ -243,9 +257,9 @@ This project does not claim that Linux support for FTE3600 had no precedent:
   ACPI/SPI FT9361 implementation is independent of them.
 
 The intentionally narrow contribution here is a fully source-published,
-auditable implementation for the exact One-Netbook A1 hardware profile. Other
-FTE3600 computers are not enabled until their DMI, GPIO, SPI, and sensor
-details have been independently verified.
+auditable implementation verified on the exact One-Netbook A1 hardware profile,
+with a restricted Medion E3224 profile under test. Additional FTE3600 computers
+require individual review of their DMI, GPIO, SPI, and sensor details.
 
 ## Acknowledgements
 

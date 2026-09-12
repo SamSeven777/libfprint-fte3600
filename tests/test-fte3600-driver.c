@@ -8,12 +8,59 @@
 #include <glib.h>
 
 #include "fpi-device.h"
+#include "drivers/fte3600-gpio.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 
 GType fpi_device_fte3600_get_type (void);
+
+static void
+test_gpio_profiles (void)
+{
+  const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
+      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+  const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
+      "MEDION", "E3224", "FT", "YS13G");
+
+  g_assert_nonnull (a1);
+  g_assert_true (a1->allow_hardware_reset);
+  g_assert_cmpstr (a1->reset_controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
+  g_assert_cmpstr (a1->irq_controller_acpi_path, ==, a1->reset_controller_acpi_path);
+  g_assert_cmpuint (a1->reset_offset, ==, 0x55);
+  g_assert_cmpuint (a1->irq_offset, ==, 0x56);
+  g_assert_cmpint (fte3600_reset_line_value (a1, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
+
+  g_assert_nonnull (medion);
+  g_assert_false (medion->allow_hardware_reset);
+  g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
+  g_assert_cmpstr (medion->irq_controller_acpi_path, ==, "\\_SB_.GPO2");
+  g_assert_cmpuint (medion->reset_offset, ==, 0x27);
+  g_assert_cmpuint (medion->irq_offset, ==, 0);
+
+  /* Missing or mismatched identity must never enable the Medion routing. */
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", NULL, "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "FT", NULL));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "other", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "FT", "other"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3225", "FT", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("other", "E3224", "FT", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile (NULL, NULL, NULL, NULL));
+}
+
+static void
+test_acpi_controller_paths (void)
+{
+  g_assert_true (fte3600_acpi_path_equal ("\\_SB_.PCI0.GPI0", "\\_SB.PCI0.GPI0"));
+  g_assert_true (fte3600_acpi_path_equal ("\\_SB_.GPO2", "_SB.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal ("\\_SB_.GPO1", "\\_SB_.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal ("\\_SB_.PCI0.GPI0", "\\_SB_.GPI0"));
+  g_assert_false (fte3600_acpi_path_equal (NULL, "\\_SB_.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal (NULL, NULL));
+  g_assert_false (fte3600_acpi_path_equal ("", ""));
+}
 
 static void
 test_published_capabilities (void)
@@ -110,12 +157,15 @@ test_udev_rules_generator_output (void)
   g_assert_cmpint (exit_status, ==, 0);
   g_assert_nonnull (standard_output);
 
-  /* Assert generator output actually contains the wildcard rule */
-  line_start = strstr (standard_output, "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
+  /* The same rule must require an unbound SPI device before scheduling
+   * module loading, driver_override or bind writes. */
+  line_start = strstr (standard_output,
+                       "ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", "
+                       "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
   g_assert_nonnull (line_start);
 
   /* Extract the pattern directly from the generator output and verify semantics */
-  pattern_start = line_start + strlen ("ENV{MODALIAS}==\"");
+  pattern_start = strstr (line_start, "ENV{MODALIAS}==\"") + strlen ("ENV{MODALIAS}==\"");
   pattern_end = strchr (pattern_start, '"');
   g_assert_nonnull (pattern_end);
   extracted_pattern = g_strndup (pattern_start, pattern_end - pattern_start);
@@ -141,6 +191,8 @@ main (int   argc,
       char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fte3600-driver/gpio-profiles", test_gpio_profiles);
+  g_test_add_func ("/fte3600-driver/acpi-controller-paths", test_acpi_controller_paths);
   g_test_add_func ("/fte3600-driver/published-capabilities",
                    test_published_capabilities);
   g_test_add_func ("/fte3600-driver/udev-rule-pattern",

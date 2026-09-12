@@ -10,6 +10,16 @@
 The driver refuses an unknown DMI/GPIO profile. Other computers that expose
 the same ACPI HID are not automatically supported without a verified profile.
 
+The Medion profile additionally requires `product_version=FT` and
+`board_name=YS13G`; missing or different values are rejected. Its reset GPIO
+is never requested or driven while polarity remains unverified. A failed
+software reset therefore ends initialization without hardware recovery.
+
+Unit tests cover exact DMI selection, rejection of incomplete or mismatched
+identities, the separate controller mappings, reset policy and A1 polarity,
+ACPI path comparison, and generated udev modalias rules. These tests do not
+simulate GPIO requests or replace Medion capture/enrollment/verification tests.
+
 ## Functional status
 
 - Sensor discovery, initialization, IRQ-driven capture, cancellation, cleanup,
