@@ -93,8 +93,8 @@ Confirm that `pkg-config --modversion libgpiod` reports 2.0 or newer.
 
 GitHub's automatically generated source archive can be used for a direct Meson
 build, but not for the included Arch development `PKGBUILD`, which requires Git
-metadata. These instructions target `main`, including the A1 SPI power fix;
-the older `fte3600-v0.1.0` tag does not contain that fix or its service files.
+metadata. These instructions target `main`, including cold-boot recovery and
+the A1 SPI power workaround; the older `fte3600-v0.1.0` tag lacks both.
 
 ```sh
 git clone --branch main \
@@ -184,6 +184,13 @@ topology before changing anything and is skipped on every other computer. It
 keeps only the affected Intel LPSS parent and pxa2xx SPI
 child out of runtime suspend while the service is active; this can cause a
 small increase in idle power use.
+
+This precaution predates corrected firmware recovery. It did not fix the
+original MCU `00 00` failure, and its continued necessity with the corrected
+driver is unverified; the successful cold-boot test still had it active.
+See [troubleshooting](docs/fte3600/troubleshooting.md) for the evidence limits
+and the optional Fedora-specific SELinux GPIO policy. That policy is loaded
+only after confirming a matching AVC denial, not on every installation.
 
 Distribution packagers should turn the staged Meson install into an RPM or DEB
 instead of recommending the manual replacement above.

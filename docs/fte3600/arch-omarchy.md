@@ -36,9 +36,13 @@ personal policy. A reboot is required.
 
 On the One-Netbook A1, the package starts the workaround before `fprintd`. It
 keeps the sensor's Intel LPSS parent and pxa2xx child out of runtime suspend and
-rebinds that controller once when required. The helper checks the complete
+rebinds that controller once per service activation. The helper checks the complete
 known topology first and does nothing on other DMI profiles or when a future
 native FTE3600 kernel driver owns the device.
+
+This precaution did not solve the original MCU `00 00` fault. Its necessity
+with corrected firmware recovery remains unverified; see the evidence limits
+in [troubleshooting](troubleshooting.md).
 
 After reboot, enroll and verify before changing any lock-screen integration:
 

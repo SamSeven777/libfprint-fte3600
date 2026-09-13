@@ -89,7 +89,7 @@ Fedora 43 or newer:
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
   glib2-devel libgusb-devel libgudev-devel libgpiod-devel systemd-devel \
-  systemd cairo-devel fprintd
+  systemd cairo-devel fprintd policycoreutils
 ```
 
 Ubuntu 26.04 or newer:
@@ -158,14 +158,26 @@ Runtime installations need the supplied transport and service settings:
 - the separately installed, validated FT9361 firmware described above for
   cold-boot recovery;
 - `config/systemd/10-fte3600-gpio.conf` so sandboxed `fprintd` can open the
-  GPIO character device;
+  GPIO character device via device cgroups;
+- optionally, `config/selinux/fte3600-gpio.cil` on Fedora 43/44, only when an
+  enforcing-SELinux AVC denial confirms source type `fprintd_t` and target
+  type `gpio_device_t`. Follow the context checks in
+  [troubleshooting](troubleshooting.md#fprintd-cannot-open-gpio) before loading
+  this local module. It is not installed automatically on any distribution;
 - `scripts/fte3600-a1-spi-power`, its systemd unit, and the fprintd drop-in so
-  the verified A1's Intel LPSS/pxa2xx controller cannot enter the observed
-  broken runtime-suspend state before a fingerprint operation.
+  the verified A1's Intel LPSS/pxa2xx controller stays out of runtime suspend.
+  This retained precaution predates the corrected firmware recovery; its
+  necessity with the new driver has not been established by a controlled
+  comparison. It cannot replace firmware recovery.
 
 The SPI power service performs exact DMI, ACPI, PCI, and SPI topology checks.
 It is skipped on every non-A1 profile, and it yields to a future native kernel
 driver instead of rebinding that driver to spidev.
+
+The Fedora module grants GPIO access to `fprintd_t` on all devices labeled
+`gpio_device_t`, not just FTE3600 lines. Do not install it routinely on Arch,
+Ubuntu, or another SELinux policy. Remove a locally installed module with
+`sudo semodule -r fte3600-gpio` when uninstalling the driver.
 
 After installation, reboot. Reloading udev alone cannot change an already
 loaded spidev buffer limit or reliably re-enumerate the SPI device.

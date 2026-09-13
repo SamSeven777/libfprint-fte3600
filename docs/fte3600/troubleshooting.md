@@ -55,11 +55,42 @@ The effective unit must allow `char-gpiochip rw`. Keep the service sandbox in
 place and do not grant broad access to all devices merely to bypass a GPIO
 configuration error.
 
+If the error reports `Permission denied` on Fedora 43/44 with enforcing
+SELinux, check the audit log and current policy contexts:
+
+```sh
+sudo ausearch -m AVC,USER_AVC,SELINUX_ERR,USER_SELINUX_ERR \
+  -ts recent -c fprintd -i
+ls -lZ /dev/gpiochip*
+ps -eZ | grep '[f]printd'
+```
+
+Only if the denial and commands show source type `fprintd_t` and target type
+`gpio_device_t`, install and verify the provided optional local module:
+
+```sh
+sudo semodule -i config/selinux/fte3600-gpio.cil
+sudo semodule -lfull | grep -F fte3600-gpio
+sudo systemctl restart fprintd.service
+```
+
+Fedora assigns `gpio_device_t` to every `/dev/gpiochip*` node. The module
+therefore permits the listed operations on all GPIO character devices, not
+only FTE3600 lines; the systemd device allow-list remains in force. Do not
+disable SELinux or install this Fedora-specific module on other policies to
+bypass a denial. Arch and Ubuntu do not load it automatically. Remove it with
+`sudo semodule -r fte3600-gpio` when uninstalling the driver.
+
 ## The first open works, then SPI reads become all-zero or `0x95`
 
-This state was reproduced on the One-Netbook A1 when either the Intel LPSS
-parent or its pxa2xx SPI child was allowed to runtime-suspend. Confirm that the
-DMI-gated workaround was installed and completed before `fprintd`:
+Earlier A1 experiments associated these reads with allowing the Intel LPSS
+parent or its pxa2xx SPI child to runtime-suspend. Those experiments predated
+the corrected firmware startup path, and the helper also rebinds the SPI
+controller. They do not isolate runtime PM as an independent cause. The
+service was already active during repeated `00 00` failures, so a successful
+service status is not proof that the sensor works.
+
+The existing packages retain this DMI-gated precaution. Inspect its state:
 
 ```sh
 systemctl status fte3600-a1-spi-power.service --no-pager
@@ -68,6 +99,11 @@ cat /sys/devices/pci0000:00/0000:00:1e.3/pxa2xx-spi.4/power/control
 ```
 
 On the verified A1 both controls should report `on` after the service starts.
+Whether this precaution remains necessary with corrected firmware recovery
+is unverified: the successful cold-boot test still had the service active.
+Removing it requires a controlled new-driver on/auto comparison, followed by
+a direct Linux cold boot and real authentication without the helper. Stopping
+the service alone is not such a test; the fprintd dependency can start it again.
 Do not copy these fixed controller paths to another computer. Reinstall the
 package and reboot if the unit is missing; if its topology check fails, attach
 the sanitized unit status to a hardware report instead of forcing a rebind.

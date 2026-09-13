@@ -51,9 +51,13 @@ package. Install the owner's firmware separately as described in
 The packaged spidev configuration sets `bufsiz=32768`; at least 10,403 bytes
 are needed for recovery.
 
-The runtime-PM helper addresses the separately observed SPI-controller suspend
-problem. Its successful systemd status alone does not demonstrate a working
-sensor and it cannot replace firmware recovery.
+The runtime-PM helper predates corrected firmware recovery and also rebinds
+the SPI controller. Earlier power-policy experiments do not isolate an
+independent suspend fault; its successful status was followed by repeated
+`00 00` failures. The successful cold-boot test still had the helper active.
+It remains a precaution, not a demonstrated requirement with the new driver,
+and cannot replace firmware recovery. A controlled post-fix comparison and
+a no-helper cold boot are needed before removing it.
 
 ## Verification
 

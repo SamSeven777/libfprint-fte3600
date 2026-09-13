@@ -26,6 +26,20 @@ It does not implement arbitrary firmware updates or sensor flash/OTP writes.
 GPIO routing, hardware reset, and firmware recovery are enabled only for the
 exact verified One-Netbook A1 DMI profile; an unknown platform fails closed.
 
+## Fedora SELinux GPIO access
+
+The optional `config/selinux/fte3600-gpio.cil` module targets Fedora 43/44
+systems where an AVC denial confirms source type `fprintd_t` and target type
+`gpio_device_t`. Fedora labels all `/dev/gpiochip*` nodes `gpio_device_t`, so
+the module grants the listed operations on every GPIO character device, not
+only the controller and lines used by FTE3600. It grants nothing to other
+domains; the fprintd systemd device allow-list remains an independent limit.
+
+The module is not installed automatically, including by the Arch package.
+It is not portable policy for other SELinux distributions, and a GPIO error
+alone is not evidence that it is needed. Review the AVC denial and exact
+local contexts first, and remove the module when uninstalling the driver.
+
 ## Biometric data in memory and logs
 
 The FTE3600 image and firmware transfers are marked sensitive, so
