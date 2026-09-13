@@ -2,29 +2,16 @@
 
 ## Unreleased
 
-- Share the optional Fedora SELinux GPIO policy and read-only GPIO controller
-  discovery improvements with the experimental Medion branch. Load the policy
-  only after confirming matching local AVC denials; do not install it
-  automatically or on unrelated systems.
-- Clarify that the retained A1 runtime-PM workaround did not solve the original
-  cold-boot fault and has not been shown necessary with corrected firmware.
-- Recover FT9361 after cold boot using one size- and SHA256-pinned,
-  owner-supplied firmware image, followed by the verified startup sequence.
-  The owner confirmed cold-boot initialization and fingerprint recognition
-  on One-Netbook A1. Firmware remains separate from source and packages.
-- Require a single 10,403-byte firmware transaction, redact its payload,
-  and set the packaged spidev buffer to 32,768 bytes with a corrected checksum.
-- Bound firmware file reads and post-reset MCU polling, clean up firmware on
-  initialization errors, and cover invalid firmware inputs with generated tests.
-- Replace obsolete raw SPI probes with an open/close diagnostic and update
-  recovery, installation, and firmware-boundary documentation.
-- Add a fail-closed One-Netbook A1 systemd helper that disables runtime PM for
-  the verified Intel LPSS/pxa2xx SPI path before `fprintd`, rebinds the
-  controller once per service activation, and restores the previous policy
-  on removal.
-- Add fake-sysfs tests for DMI and topology gating, transactional power-policy
-  handling, native-driver precedence, and state-file validation.
-- Document the repeated all-zero/`0x95` SPI failure and its A1-only workaround.
+- Add bounded A1 cold-boot recovery using separately supplied, size/hash-pinned
+  firmware; protect sensitive transfers and set the SPI buffer to 32,768 bytes.
+- Keep minimum inlier and mutual-match gates at 7 as experimental settings,
+  without claiming optimality or real-population security calibration.
+- Share GPIO discovery improvements and the optional Fedora SELinux module;
+  load it only after confirming matching local AVC denials.
+- Retain the tested, exact-A1 runtime-PM helper as a precaution. It did not
+  solve the original `00 00` fault and remains unproven necessary post-fix.
+- Remove development-only synthetic calibration tools and duplicate handover
+  documentation; retain runtime/regression tests and the open/close diagnostic.
 
 ## fte3600-v0.1.0 - 2026-08-25
 

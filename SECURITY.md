@@ -1,70 +1,30 @@
-# Security policy
+# Security
 
-## Experimental authentication boundary
+## Authentication and hardware
 
-The FTE3600 transport and enrollment path are functional, but the optional
-personal verification policy has not completed independent, population-scale
-false-accept and false-reject calibration. A successful local smoke test is
-not a security-rate measurement.
+The default build exposes capture only. `-Dfte3600_personal_auth=true` enables
+experimental enrollment/verification, without independent real-world FAR/FRR
+calibration. Neither local successes nor synthetic tests establish security
+rates. Use only for local lock-screen experiments with a tested password
+fallback; keep it out of login, sudo, polkit, disk encryption, passkeys, key
+release, and unattended authentication.
 
-Builds with `-Dfte3600_personal_auth=false` expose capture only. Builds with
-`-Dfte3600_personal_auth=true` additionally expose eight-stage enrollment and
-single-template verification for local experimentation.
+Only the verified One-Netbook A1 enables hardware reset and, if needed, one
+pinned firmware upload to sensor RAM per open attempt. Arbitrary firmware updates
+and flash/OTP writes are not implemented. Unknown hardware profiles are rejected.
 
-Do not use the personal policy for login, `sudo`, polkit, disk encryption,
-passkeys, key release, or any unattended security decision. The only tested
-interactive integration is an Omarchy lock screen with an independently
-tested password fallback.
+## Data and reporting
 
-## Hardware safety
+Image and firmware SPI payloads are redacted in transfer debug logs. The driver
+wipes its main owned capture/matching/template buffers, but does not guarantee
+erasure of every temporary copy. Serialized templates persist through
+libfprint/fprintd; callers requesting diagnostic images must protect them.
 
-The driver performs volatile SPI register operations, RAM image reads, and,
-when reset recovery cannot restore idle, one upload of the owner's FT9361
-firmware to sensor RAM per open attempt. It accepts only the pinned 10,396-byte
-image with the SHA256 documented in [installation](docs/fte3600/install.md#firmware-for-cold-boot-recovery).
-It does not implement arbitrary firmware updates or sensor flash/OTP writes.
-GPIO routing, hardware reset, and firmware recovery are enabled only for the
-exact verified One-Netbook A1 DMI profile; an unknown platform fails closed.
+Use private GitHub security reporting for vulnerabilities when available.
+Public reports should contain only sanitized versions, hardware identity,
+operation, and error text with debug logging disabled. Never post fingerprint
+images/templates/descriptors, raw image-bearing SPI captures, private logs,
+vendor binaries/firmware, decompiler output, or full DSDTs.
 
-## Fedora SELinux GPIO access
-
-The optional `config/selinux/fte3600-gpio.cil` module targets Fedora 43/44
-systems where an AVC denial confirms source type `fprintd_t` and target type
-`gpio_device_t`. Fedora labels all `/dev/gpiochip*` nodes `gpio_device_t`, so
-the module grants the listed operations on every GPIO character device, not
-only the controller and lines used by FTE3600. It grants nothing to other
-domains; the fprintd systemd device allow-list remains an independent limit.
-
-The module is not installed automatically, including by the Arch package.
-It is not portable policy for other SELinux distributions, and a GPIO error
-alone is not evidence that it is needed. Review the AVC denial and exact
-local contexts first, and remove the module when uninstalling the driver.
-
-## Biometric data in memory and logs
-
-The FTE3600 image and firmware transfers are marked sensitive, so
-`FP_DEBUG_TRANSFER` logs their lengths and results but redacts both SPI
-buffers. The driver wipes its main
-raw capture, worker-image, feature, and comparison buffers, plus the in-memory
-template objects it owns, at their ownership boundaries. Serialized template
-bytes are deliberately handed to libfprint/fprintd for host-side persistence
-and are not erased by the driver after that ownership transfer. Temporary
-canonicalization/matching stack copies and image-processing-library derived
-allocations may still be released normally rather than securely erased.
-
-The explicit diagnostic capture API intentionally transfers ownership of an
-`FpImage` to its caller. A caller that requests a raw image is responsible for
-protecting and deleting it; normal enrollment and verification do not expose
-that image.
-
-## Reporting a vulnerability
-
-Use the repository's private GitHub security-advisory reporting channel when
-available. Do not attach fingerprint images, enrolled templates, raw SPI
-captures containing biometric pixels, private system logs, proprietary vendor
-binaries, or firmware to a public issue.
-
-For a public report, include only sanitized software versions, the exact DMI
-vendor/product strings, the ACPI HID, the failing operation, and a redacted
-log produced with libfprint debug logging disabled unless a maintainer asks for
-specific additional fields.
+See [implementation provenance](docs/fte3600/clean-room.md) and
+[GPIO permission troubleshooting](docs/fte3600/troubleshooting.md#fprintd-cannot-open-gpio).

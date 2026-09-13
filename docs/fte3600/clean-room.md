@@ -1,71 +1,21 @@
-# Clean-room and vendor-code boundary
+# Implementation and provenance
 
-The runtime driver is newly written LGPL-2.1-or-later code. It does not load a
-vendor DLL/ELF, embed a proprietary descriptor table, or serialize a vendor
-template. Cold-boot recovery uploads one size- and SHA256-pinned FT9361 firmware
-image supplied separately by the owner into sensor RAM. That firmware is not
-part of the source tree or package recipe; its execution remains on the
-sensor. The host matcher remains independently implemented.
+The FTE3600 driver and host matcher are independently written LGPL-2.1-or-later
+code. Windows transport analysis and A1 hardware experiments informed register
+framing and the RAM firmware startup sequence. Host code does not execute a
+vendor DLL/ELF or use the vendor's descriptor table or template format.
 
-## Runtime pipeline
+The matcher uses Gaussian/DoG features, orientation-normalized binary
+descriptors, and geometric consensus. Its sampling-pair seed is documented in
+`fte3600-brisk.h`; persisted templates have explicit format/policy versions.
+Algorithm references:
 
-```text
-FT9361 64x80 frame
-  -> clean-room two-octave Gaussian/DoG feature detection
-  -> orientation assignment and 256-bit BRISK-style descriptors
-  -> binary candidate matching
-  -> rigid rotation/translation consensus and coverage checks
-  -> versioned eight-subtemplate enrollment/verification policy
-```
+- Lowe, [SIFT](https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf), 2004.
+- Leutenegger et al., [BRISK](https://doi.org/10.1109/ICCV.2011.6126542), 2011.
+- Fischler and Bolles, [RANSAC](https://doi.org/10.1145/358669.358692), 1981.
 
-The 45-point sampling layout uses independently documented geometry. Its fixed
-256-pair table was generated from the public seed recorded in
-`fte3600-brisk.h`; it was not copied from vendor code. Persisted templates
-carry extractor and policy versions and are validated with strict bounds,
-finite-number, canonical-order, and little-endian checks.
-
-## What static interoperability research established
-
-Static analysis of the matching Windows package established that the sensor
-returns a host-processed 64x80 image and that enrollment/verification happen
-in a separate WinBio engine adapter. It also established a high-level
-DoG/orientation/binary-descriptor/geometric-consensus architecture. Those
-observations informed interoperability requirements, not copied source.
-Static transport analysis and hardware experiments also established the
-FT9361 RAM download and reset/startup sequence used for cold-boot recovery.
-
-Exact proprietary descriptor-pair ordering, template serialization, score
-weights, and the mapping from the vendor's verification level to a decision
-threshold are not part of this implementation.
-
-## Public algorithm references
-
-The implementation is independently written, but its general computer-vision
-building blocks follow these public papers:
-
-- David G. Lowe, [*Distinctive Image Features from Scale-Invariant
-  Keypoints*](https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf), IJCV 2004 —
-  scale space, Difference of Gaussians, and orientation-normalized local
-  features;
-- Stefan Leutenegger, Margarita Chli, and Roland Y. Siegwart,
-  [*BRISK: Binary Robust Invariant Scalable
-  Keypoints*](https://doi.org/10.1109/ICCV.2011.6126542), ICCV 2011 — local
-  sampling patterns and binary intensity-comparison descriptors;
-- Martin A. Fischler and Robert C. Bolles,
-  [*Random Sample Consensus*](https://doi.org/10.1145/358669.358692), CACM
-  1981 — robust geometric-consensus concepts. This implementation enumerates
-  bounded deterministic hypotheses rather than copying a RANSAC routine.
-
-No source code, trained data, thresholds, or descriptor tables were copied
-from those publications' reference implementations.
-
-## Material deliberately excluded
-
-- Windows DLL/CAT/INF files and extracted firmware;
-- vendor Linux binaries and kernel modules;
-- Ghidra projects, decompiler output, and full machine DSDTs;
-- real FTE3600 fingerprint frames, templates, descriptors, or image-bearing
-  SPI captures;
-- the unused vendor-engine loader and older correlation-matcher prototype.
-
-Public issues and pull requests must preserve this boundary.
+A1 recovery loads a separately supplied, pinned firmware image onto the sensor;
+see [installation](install.md#firmware-for-cold-boot-recovery). The repository
+and packages exclude that firmware, vendor binaries/decompiler output, and
+private FTE3600 images/templates. Existing upstream test fixtures retain their
+own provenance. See [SECURITY](../../SECURITY.md) for reporting boundaries.
