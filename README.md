@@ -16,9 +16,9 @@ capture, eight-stage enrollment, and opt-in host-side verification.
 
 The verified platform is **One-Netbook A1**, exact DMI
 `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`, with ACPI `FTE3600`.
-Capture, enrollment, verification, and a direct Linux cold boot were tested
-on Arch Linux / Omarchy. A1 cold-boot recovery needs the owner's separately
-installed firmware; no firmware is distributed here.
+Capture, enrollment, verification, and a direct Linux cold boot without the
+power workaround were tested on Arch Linux / Omarchy. A1 recovery needs the
+owner's separately installed firmware; no firmware is distributed here.
 
 Unknown DMI/GPIO profiles fail closed; `FTE3600` alone does not imply support.
 See [hardware status](docs/fte3600/status.md) before installing.
@@ -34,7 +34,7 @@ cd libfprint-fte3600
 - [Installation](docs/fte3600/install.md): dependencies, firmware, build/test,
   packaging, and safe enrollment. The Arch recipe requires a Git checkout.
 - [Troubleshooting](docs/fte3600/troubleshooting.md): cold boot, GPIO,
-  optional Fedora SELinux policy, and the retained A1 power workaround.
+  and optional Fedora SELinux policy.
 - [Optional Omarchy lock-screen setup](docs/fte3600/arch-omarchy.md).
 - [Contributing](CONTRIBUTING.md) · [Release history](CHANGELOG.md).
 

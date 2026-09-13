@@ -82,7 +82,26 @@ From the committed Git checkout (GitHub source archives lack required metadata):
 sudo reboot
 ```
 
-This replaces stock libfprint and installs the SPI/GPIO/service settings below.
+This replaces stock libfprint and installs the SPI buffer and GPIO settings below.
+
+### Upgrading an older manual installation
+
+Arch package upgrades remove the packaged power workaround, but not manual
+copies under `/etc`. Those copies can leave fprintd requiring a removed helper.
+For an earlier **manual** installation only, run this before replacing the old
+helper, with no fingerprint operation active. It restores saved power policies
+and removes only the three legacy files; retain the `10-fte3600-gpio.conf` drop-in:
+
+```sh
+sudo systemctl stop fprintd.service fte3600-a1-spi-power.service &&
+if [ -x /usr/lib/libfprint/fte3600-a1-spi-power ]; then
+  sudo /usr/lib/libfprint/fte3600-a1-spi-power stop
+fi &&
+sudo rm -f /usr/lib/libfprint/fte3600-a1-spi-power \
+  /etc/systemd/system/fte3600-a1-spi-power.service \
+  /etc/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf &&
+sudo systemctl daemon-reload
+```
 
 ### Meson build
 
@@ -95,8 +114,7 @@ meson setup build-fte3600 --prefix=/usr \
   -Dinstalled-tests=false -Dwerror=true
 meson compile -C build-fte3600
 meson test -C build-fte3600 --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
-  fte3600-a1-spi-power
+  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
 ```
 
 To opt in, configure `meson configure build-fte3600 -Dfte3600_personal_auth=true`
@@ -111,12 +129,6 @@ sudo install -Dm644 config/modprobe.d/fte3600-spidev.conf \
   /etc/modprobe.d/fte3600-spidev.conf
 sudo install -Dm644 config/systemd/10-fte3600-gpio.conf \
   /etc/systemd/system/fprintd.service.d/10-fte3600-gpio.conf
-sudo install -Dm755 scripts/fte3600-a1-spi-power \
-  /usr/lib/libfprint/fte3600-a1-spi-power
-sudo install -Dm644 config/systemd/fte3600-a1-spi-power.service \
-  /etc/systemd/system/fte3600-a1-spi-power.service
-sudo install -Dm644 config/systemd/20-fte3600-a1-spi-power.conf \
-  /etc/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf
 sudo systemctl daemon-reload
 sudo reboot
 ```
@@ -127,10 +139,6 @@ Recovery needs at least `10403` bytes; images need `5128`. Neither transfer
 may be split. The GPIO drop-in permits `char-gpiochip rw` inside fprintd's sandbox.
 For permission failures, see the optional
 [Fedora SELinux policy](troubleshooting.md#fprintd-cannot-open-gpio).
-
-The A1 power helper remains a precaution; its necessity after firmware recovery
-is unproven. It does nothing on other models. See
-[power troubleshooting](troubleshooting.md#a1-power-workaround).
 
 ## Verify
 

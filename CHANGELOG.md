@@ -8,8 +8,9 @@
   without claiming optimality or real-population security calibration.
 - Share GPIO discovery improvements and the optional Fedora SELinux module;
   load it only after confirming matching local AVC denials.
-- Retain the tested, exact-A1 runtime-PM helper as a precaution. It did not
-  solve the original `00 00` fault and remains unproven necessary post-fix.
+- Remove the A1 runtime-PM helper: 54 open/close checks, including 10 actual
+  auto/auto suspend cycles and a 30-second idle, passed without firmware upload.
+  The owner then confirmed fingerprint authentication after a no-helper cold boot.
 - Remove development-only synthetic calibration tools and duplicate handover
   documentation; retain runtime/regression tests and the open/close diagnostic.
 

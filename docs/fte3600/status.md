@@ -18,14 +18,13 @@ establish compatibility.
 
 - On one A1: discovery, capture, cancellation/cleanup, eight-stage enrollment,
   template persistence, genuine/impostor smoke tests, and Omarchy unlock.
-- The corrected standalone recovery changed `00 00` to `a5 5a`; repeated
-  driver open/close checks passed. On 2026-09-12 the owner confirmed
-  initialization and fingerprint authentication after a direct Linux cold
-  boot. The journal does not show whether that boot invoked firmware upload.
-- The A1 power helper was active both during earlier `00 00` failures and
-  during the successful cold boot. It is retained as a precaution, not a
-  demonstrated requirement with the corrected driver; see
-  [troubleshooting](troubleshooting.md).
+- The corrected standalone firmware recovery changed `00 00` to `a5 5a`.
+- On that A1, 54 corrected-driver open/close checks passed without image
+  capture or firmware upload, including 10 actual suspend/resume cycles with
+  both runtime-PM controls set to `auto` and a 30-second idle. The owner then
+  confirmed fingerprint authentication after a direct Linux cold boot without
+  the power helper. The helper has been removed; this result does not establish
+  power-management behavior on other hardware.
 
 A1 recovery permits one size- and SHA256-pinned, owner-supplied firmware
 upload per open; [installation](install.md#firmware-for-cold-boot-recovery)

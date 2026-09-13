@@ -46,24 +46,6 @@ for `fprintd_t`; the systemd allow-list still applies. It is never automatically
 loaded, including on Arch/Ubuntu. Do not disable SELinux or apply this to
 unmatched contexts. Remove it with `sudo semodule -r fte3600-gpio`.
 
-## A1 power workaround
-
-The retained helper sets both Intel LPSS/pxa2xx policies to `on` and rebinds
-the controller once per service activation. It did not fix the original cold
-boot; whether it remains necessary with corrected firmware is unverified.
-Check its state without changing it:
-
-```sh
-systemctl status fte3600-a1-spi-power.service --no-pager
-cat /sys/devices/pci0000:00/0000:00:1e.3/power/control
-cat /sys/devices/pci0000:00/0000:00:1e.3/pxa2xx-spi.4/power/control
-```
-
-Both controls should be `on` while active. A successful service status does
-not establish sensor health. Removing the workaround needs a controlled
-on/auto comparison and a cold boot without it; fprintd can automatically
-restart it. Never rebind during an active fingerprint operation.
-
 ## Enrollment and reports
 
 Lift completely between presses and vary placement slightly. Verify directly
