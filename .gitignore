@@ -10,3 +10,7 @@ packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/libfprint/
 scripts/calibrate-matcher
+firmware/*.bin
+tools/test_*
+!tools/*.c
+docs/fte3600/dll_disasm.txt
