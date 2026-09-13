@@ -15,15 +15,44 @@
 
 #include "libfprint/drivers/fte3600-brisk.h"
 
-#define DEFAULT_IDENTITIES        60
-#define DEFAULT_IMPRESSIONS_PER_ID 6
-#define MAX_IMPOSTOR_PAIRS        25000
+#define DEFAULT_IDENTITIES        100
+#define DEFAULT_IMPRESSIONS_PER_ID 8
+#define MAX_IMPOSTOR_PAIRS        30000
 
 #define DEG_TO_RAD(d) ((d) * G_PI / 180.0)
+
+typedef enum {
+  TOUCH_CANONICAL = 0,    /* Standard enrollment touch */
+  TOUCH_NORMAL_VERIFY,    /* Typical verification */
+  TOUCH_DRY_SKIN,         /* Low contrast, ridge faintness, noise */
+  TOUCH_SWEATY_SKIN,      /* High contrast, saturation */
+  TOUCH_TILTED_ANGLE,     /* Large angle rotation (+-22 deg) */
+  TOUCH_HEAVY_SHEAR,      /* High elastic stretching (+-10%) */
+  TOUCH_OFF_CENTER,       /* Large displacement (+-11px) */
+  TOUCH_NATURAL_COMPOSITE /* Mixed natural variance */
+} TouchCondition;
+
+static const gchar *
+touch_condition_name (TouchCondition c)
+{
+  switch (c)
+    {
+    case TOUCH_CANONICAL: return "Canonical Enrollment";
+    case TOUCH_NORMAL_VERIFY: return "Normal Verification";
+    case TOUCH_DRY_SKIN: return "Dry Skin (Low Contrast)";
+    case TOUCH_SWEATY_SKIN: return "Sweaty Skin (High Saturation)";
+    case TOUCH_TILTED_ANGLE: return "Tilted Angle (+-22 deg)";
+    case TOUCH_HEAVY_SHEAR: return "Heavy Shear (+-10% stretch)";
+    case TOUCH_OFF_CENTER: return "Off-Center Contact (+-11px)";
+    case TOUCH_NATURAL_COMPOSITE: return "Natural Composite";
+    default: return "Unknown";
+    }
+}
 
 typedef struct {
   guint8 pixels[FTE3600_BRISK_IMAGE_SIZE];
   Fte3600BriskFeatureSet features;
+  TouchCondition condition;
 } Impression;
 
 typedef struct {
@@ -127,18 +156,107 @@ generate_master_identity_pattern (guint32 id_seed, guint8 *output)
  * - Contrast & noise variation
  */
 static void
-synthesize_impression (const guint8 *master,
-                       guint32       seed,
-                       guint8       *destination)
+synthesize_impression (const guint8  *master,
+                       guint32        seed,
+                       TouchCondition condition,
+                       guint8        *destination)
 {
   guint32 state = seed;
-  const gdouble tx = uniform_random (&state, -7.0, 7.0);
-  const gdouble ty = uniform_random (&state, -8.0, 8.0);
-  const gdouble angle = DEG_TO_RAD (uniform_random (&state, -14.0, 14.0));
-  const gdouble stretch_x = uniform_random (&state, -0.06, 0.06);
-  const gdouble stretch_y = uniform_random (&state, -0.06, 0.06);
-  const gdouble contrast = uniform_random (&state, 0.85, 1.15);
-  const gdouble brightness = uniform_random (&state, -8.0, 8.0);
+  gdouble tx = 0.0, ty = 0.0, angle = 0.0;
+  gdouble stretch_x = 0.0, stretch_y = 0.0;
+  gdouble contrast = 1.0, brightness = 0.0, noise_amp = 2.5;
+
+  switch (condition)
+    {
+    case TOUCH_CANONICAL:
+      tx = uniform_random (&state, -3.0, 3.0);
+      ty = uniform_random (&state, -3.0, 3.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -5.0, 5.0));
+      stretch_x = uniform_random (&state, -0.02, 0.02);
+      stretch_y = uniform_random (&state, -0.02, 0.02);
+      contrast = uniform_random (&state, 0.95, 1.05);
+      brightness = uniform_random (&state, -3.0, 3.0);
+      noise_amp = 1.5;
+      break;
+
+    case TOUCH_NORMAL_VERIFY:
+      tx = uniform_random (&state, -6.0, 6.0);
+      ty = uniform_random (&state, -7.0, 7.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -12.0, 12.0));
+      stretch_x = uniform_random (&state, -0.05, 0.05);
+      stretch_y = uniform_random (&state, -0.05, 0.05);
+      contrast = uniform_random (&state, 0.85, 1.15);
+      brightness = uniform_random (&state, -6.0, 6.0);
+      noise_amp = 2.5;
+      break;
+
+    case TOUCH_DRY_SKIN:
+      tx = uniform_random (&state, -6.0, 6.0);
+      ty = uniform_random (&state, -6.0, 6.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -10.0, 10.0));
+      stretch_x = uniform_random (&state, -0.04, 0.04);
+      stretch_y = uniform_random (&state, -0.04, 0.04);
+      contrast = uniform_random (&state, 0.60, 0.78);
+      brightness = uniform_random (&state, -12.0, -4.0);
+      noise_amp = 4.5;
+      break;
+
+    case TOUCH_SWEATY_SKIN:
+      tx = uniform_random (&state, -6.0, 6.0);
+      ty = uniform_random (&state, -6.0, 6.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -10.0, 10.0));
+      stretch_x = uniform_random (&state, -0.05, 0.05);
+      stretch_y = uniform_random (&state, -0.05, 0.05);
+      contrast = uniform_random (&state, 1.25, 1.50);
+      brightness = uniform_random (&state, 8.0, 16.0);
+      noise_amp = 3.0;
+      break;
+
+    case TOUCH_TILTED_ANGLE:
+      tx = uniform_random (&state, -6.0, 6.0);
+      ty = uniform_random (&state, -6.0, 6.0);
+      angle = DEG_TO_RAD (uniform_random (&state, 15.0, 24.0) * (xorshift32 (&state) % 2 ? 1.0 : -1.0));
+      stretch_x = uniform_random (&state, -0.05, 0.05);
+      stretch_y = uniform_random (&state, -0.05, 0.05);
+      contrast = uniform_random (&state, 0.85, 1.15);
+      brightness = uniform_random (&state, -6.0, 6.0);
+      noise_amp = 2.5;
+      break;
+
+    case TOUCH_HEAVY_SHEAR:
+      tx = uniform_random (&state, -8.0, 8.0);
+      ty = uniform_random (&state, -8.0, 8.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -12.0, 12.0));
+      stretch_x = uniform_random (&state, -0.10, 0.10);
+      stretch_y = uniform_random (&state, -0.10, 0.10);
+      contrast = uniform_random (&state, 0.90, 1.20);
+      brightness = uniform_random (&state, -4.0, 4.0);
+      noise_amp = 2.5;
+      break;
+
+    case TOUCH_OFF_CENTER:
+      tx = uniform_random (&state, 8.0, 11.5) * (xorshift32 (&state) % 2 ? 1.0 : -1.0);
+      ty = uniform_random (&state, 8.0, 12.0) * (xorshift32 (&state) % 2 ? 1.0 : -1.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -10.0, 10.0));
+      stretch_x = uniform_random (&state, -0.05, 0.05);
+      stretch_y = uniform_random (&state, -0.05, 0.05);
+      contrast = uniform_random (&state, 0.85, 1.15);
+      brightness = uniform_random (&state, -6.0, 6.0);
+      noise_amp = 2.5;
+      break;
+
+    case TOUCH_NATURAL_COMPOSITE:
+    default:
+      tx = uniform_random (&state, -8.0, 8.0);
+      ty = uniform_random (&state, -8.0, 8.0);
+      angle = DEG_TO_RAD (uniform_random (&state, -15.0, 15.0));
+      stretch_x = uniform_random (&state, -0.06, 0.06);
+      stretch_y = uniform_random (&state, -0.06, 0.06);
+      contrast = uniform_random (&state, 0.80, 1.20);
+      brightness = uniform_random (&state, -8.0, 8.0);
+      noise_amp = 2.5;
+      break;
+    }
 
   const gdouble cos_a = cos (angle);
   const gdouble sin_a = sin (angle);
@@ -174,7 +292,7 @@ synthesize_impression (const guint8 *master,
 
           /* Apply contrast and noise */
           pixel = (pixel - 128.0) * contrast + 128.0 + brightness;
-          pixel += uniform_random (&state, -2.5, 2.5);
+          pixel += uniform_random (&state, -noise_amp, noise_amp);
 
           destination[y * FTE3600_BRISK_WIDTH + x] = CLAMP ((gint) floor (pixel + 0.5), 0, 255);
         }
@@ -264,7 +382,8 @@ main (int argc, char *argv[])
       for (guint j = 0; j < n_impressions; j++)
         {
           Impression *imp = &identities[i].impressions[j];
-          synthesize_impression (master, rng_seed + i * 7919 + j * 997, imp->pixels);
+          imp->condition = (TouchCondition) (j % 8);
+          synthesize_impression (master, rng_seed + i * 7919 + j * 997, imp->condition, imp->pixels);
           Fte3600BriskStatus extract_status =
             fte3600_brisk_extract (imp->pixels, sizeof (imp->pixels), &imp->features);
           if (extract_status == FTE3600_BRISK_OK)
@@ -280,6 +399,9 @@ main (int argc, char *argv[])
 
   /* Collect Genuine Pairs */
   GArray *genuine_telemetry = g_array_new (FALSE, FALSE, sizeof (MatchTelemetry));
+  guint condition_pass[8] = { 0 };
+  guint condition_total[8] = { 0 };
+
   for (guint i = 0; i < n_identities; i++)
     {
       for (guint j = 0; j < n_impressions; j++)
@@ -287,14 +409,20 @@ main (int argc, char *argv[])
           for (guint k = j + 1; k < n_impressions; k++)
             {
               MatchTelemetry t;
-              if (evaluate_pair (&identities[i].impressions[j],
-                                 &identities[i].impressions[k], &t))
-                g_array_append_val (genuine_telemetry, t);
-              else
+              gboolean ok = evaluate_pair (&identities[i].impressions[j],
+                                          &identities[i].impressions[k], &t);
+              if (!ok)
+                memset (&t, 0, sizeof (t));
+
+              g_array_append_val (genuine_telemetry, t);
+
+              /* If paired against canonical enrollment (j == 0) */
+              if (j == 0)
                 {
-                  /* Alignment rejected completely -> count as 0 inliers */
-                  memset (&t, 0, sizeof (t));
-                  g_array_append_val (genuine_telemetry, t);
+                  TouchCondition cond = identities[i].impressions[k].condition;
+                  condition_total[cond]++;
+                  if (t.current_policy_passed)
+                    condition_pass[cond]++;
                 }
             }
         }
@@ -302,16 +430,15 @@ main (int argc, char *argv[])
 
   /* Collect Impostor Pairs */
   GArray *impostor_telemetry = g_array_new (FALSE, FALSE, sizeof (MatchTelemetry));
-  guint32 pair_rng = 0x9361a1u;
   guint impostor_count = 0;
 
   for (guint i = 0; i < n_identities && impostor_count < MAX_IMPOSTOR_PAIRS; i++)
     {
       for (guint j = i + 1; j < n_identities && impostor_count < MAX_IMPOSTOR_PAIRS; j++)
         {
-          for (guint imp_a = 0; imp_a < 2; imp_a++)
+          for (guint imp_a = 0; imp_a < 3 && impostor_count < MAX_IMPOSTOR_PAIRS; imp_a++)
             {
-              for (guint imp_b = 0; imp_b < 2; imp_b++)
+              for (guint imp_b = 0; imp_b < 3 && impostor_count < MAX_IMPOSTOR_PAIRS; imp_b++)
                 {
                   MatchTelemetry t;
                   if (evaluate_pair (&identities[i].impressions[imp_a],
@@ -401,6 +528,20 @@ main (int argc, char *argv[])
   g_print ("  FRR (False Reject) : %.2f%%\n", cur_frr);
   g_print ("  Impostor Accepted  : %u / %u\n", current_imp_accepted, n_impostors);
   g_print ("  FAR (False Accept) : %.4f%%\n\n", cur_far);
+
+  g_print ("  Genuine Recognition by Touch Condition (vs Canonical Enrollment):\n");
+  for (guint c = 1; c < 8; c++)
+    {
+      if (condition_total[c] > 0)
+        {
+          gdouble pass_rate = 100.0 * (gdouble) condition_pass[c] / condition_total[c];
+          g_print ("    - %-32s : %3u / %3u (%5.1f%% pass, %5.1f%% FRR)\n",
+                   touch_condition_name ((TouchCondition) c),
+                   condition_pass[c], condition_total[c],
+                   pass_rate, 100.0 - pass_rate);
+        }
+    }
+  g_print ("\n");
 
   guint fail_inliers = 0, fail_mutual = 0, fail_ratio = 0, fail_competing = 0;
   guint fail_med_err = 0, fail_rms = 0, fail_ham = 0, fail_quads = 0, fail_cells = 0;

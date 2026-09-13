@@ -9,3 +9,4 @@ __pycache__/
 packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/libfprint/
+scripts/calibrate-matcher
