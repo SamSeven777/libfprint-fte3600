@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Recover FT9361 after cold boot using one size- and SHA256-pinned,
+  owner-supplied firmware image, followed by the verified startup sequence.
+  The owner confirmed cold-boot initialization and fingerprint recognition
+  on One-Netbook A1. Firmware remains separate from source and packages.
+- Require a single 10,403-byte firmware transaction, redact its payload,
+  and set the packaged spidev buffer to 32,768 bytes with a corrected checksum.
+- Bound firmware file reads and post-reset MCU polling, clean up firmware on
+  initialization errors, and cover invalid firmware inputs with generated tests.
+- Replace obsolete raw SPI probes with an open/close diagnostic and update
+  recovery, installation, and firmware-boundary documentation.
 - Add a fail-closed One-Netbook A1 systemd helper that disables runtime PM for
   the verified Intel LPSS/pxa2xx SPI path before `fprintd`, rebinds the
   controller when required, and restores the previous policy on removal.

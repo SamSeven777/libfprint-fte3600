@@ -6,14 +6,91 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <sys/stat.h>
 
 #include "fpi-device.h"
+#include "drivers/fte3600.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 
 GType fpi_device_fte3600_get_type (void);
+
+static void
+test_firmware_valid (void)
+{
+  const gchar *path = g_getenv ("FTE3600_TEST_FIRMWARE");
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+
+  if (!path || !*path)
+    {
+      g_test_skip ("Set FTE3600_TEST_FIRMWARE to a locally supplied FT9361 firmware file");
+      return;
+    }
+
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (firmware);
+  g_assert_cmpuint (g_bytes_get_size (firmware), ==, FT9361_FIRMWARE_SIZE);
+}
+
+static void
+test_firmware_invalid (gconstpointer user_data)
+{
+  const gsize length = GPOINTER_TO_SIZE (user_data);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *contents = g_malloc0 (MAX (length, 1));
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "invalid.bin", NULL);
+  g_assert_true (g_file_set_contents (path, contents, length, &error));
+  g_assert_no_error (error);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
+static void
+test_firmware_missing (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "missing.bin", NULL);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
+static void
+test_firmware_fifo (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "fifo", NULL);
+  g_assert_cmpint (mkfifo (path, 0600), ==, 0);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
 
 static void
 test_published_capabilities (void)
@@ -144,6 +221,20 @@ main (int   argc,
       char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fte3600-driver/firmware/valid", test_firmware_valid);
+  g_test_add_func ("/fte3600-driver/firmware/missing", test_firmware_missing);
+  g_test_add_func ("/fte3600-driver/firmware/fifo", test_firmware_fifo);
+  g_test_add_data_func ("/fte3600-driver/firmware/empty", GSIZE_TO_POINTER (0),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/truncated",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE - 1),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/oversized",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE + 1),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/wrong-checksum",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE),
+                        test_firmware_invalid);
   g_test_add_func ("/fte3600-driver/published-capabilities",
                    test_published_capabilities);
   g_test_add_func ("/fte3600-driver/udev-rule-pattern",

@@ -1,8 +1,11 @@
 # Clean-room and vendor-code boundary
 
 The runtime driver is newly written LGPL-2.1-or-later code. It does not load a
-vendor DLL/ELF, upload vendor firmware, embed a proprietary descriptor table,
-or serialize a vendor template.
+vendor DLL/ELF, embed a proprietary descriptor table, or serialize a vendor
+template. Cold-boot recovery uploads one size- and SHA256-pinned FT9361 firmware
+image supplied separately by the owner into sensor RAM. That firmware is not
+part of the source tree or package recipe; its execution remains on the
+sensor. The host matcher remains independently implemented.
 
 ## Runtime pipeline
 
@@ -28,6 +31,8 @@ returns a host-processed 64x80 image and that enrollment/verification happen
 in a separate WinBio engine adapter. It also established a high-level
 DoG/orientation/binary-descriptor/geometric-consensus architecture. Those
 observations informed interoperability requirements, not copied source.
+Static transport analysis and hardware experiments also established the
+FT9361 RAM download and reset/startup sequence used for cold-boot recovery.
 
 Exact proprietary descriptor-pair ordering, template serialization, score
 weights, and the mapping from the vendor's verification level to a decision

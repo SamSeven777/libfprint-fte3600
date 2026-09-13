@@ -15,15 +15,32 @@ fprintd-list "$USER"
 An unknown DMI profile is rejected intentionally. Do not bypass that check;
 open an issue with the sanitized evidence requested in `CONTRIBUTING.md`.
 
-## A capture says the SPI message is too large
+## A capture or firmware recovery says the SPI message is too large
 
 ```sh
 cat /sys/module/spidev/parameters/bufsiz
 ```
 
-The result must be at least 5128. Install
-`config/modprobe.d/fte3600-spidev.conf` through the package and reboot. The
-5,128-byte full-duplex image read cannot be split across chip-select cycles.
+The result must be at least 10403 for firmware recovery (5128 for images).
+Install `config/modprobe.d/fte3600-spidev.conf` through the package and reboot;
+it sets 32768. Each 10,403-byte firmware upload and 5,128-byte full-duplex image
+read must retain chip select for its entire transaction.
+
+## Cold boot fails with MCU `00 00`
+
+On the verified A1, reset recovery alone did not restore a running sensor
+after cold boot. The driver now attempts one upload of the pinned FT9361
+firmware to RAM, followed by the validated reset/startup sequence. The owner
+confirmed cold-boot initialization and fingerprint recognition with this fix.
+
+Check that the current driver is installed, the SPI buffer meets the limit
+above, and the owner's firmware is installed at
+`/usr/lib/firmware/fte3600/ft9361.bin`. Follow the
+[firmware installation instructions](install.md#firmware-for-cold-boot-recovery)
+for the exact size and SHA256. The repository and Arch package do not include
+this file. An all-zero reply by itself does not distinguish missing firmware
+from a transport or power failure; the runtime-power checks below still apply.
+Do not use the superseded FT9338 unlock sequence for FT9361 recovery.
 
 ## fprintd cannot open GPIO
 

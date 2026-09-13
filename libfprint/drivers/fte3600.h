@@ -47,6 +47,13 @@
 #define FT9361_FW_VERSION 0x30
 #define FT9361_AGC_VERSION 0x31
 
+#define FT9361_FIRMWARE_SIZE 10396
+#define FT9361_FIRMWARE_PACKET_SIZE (6 + FT9361_FIRMWARE_SIZE + 1)
+#define FT9361_FIRMWARE_SHA256 "027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f"
+
+/* Internal firmware validation; shared with the hardware-independent tests. */
+GBytes *fte3600_load_firmware (const gchar *path, GError **error);
+
 #define FT9361_REG_SENSOR_ID_HIGH 0x14
 #define FT9361_REG_SENSOR_ID_LOW 0x15
 #define FT9361_REG_FW_VERSION 0x1a

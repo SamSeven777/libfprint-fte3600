@@ -18,15 +18,19 @@ tested password fallback.
 
 ## Hardware safety
 
-The driver performs volatile SPI register operations and RAM image reads. It
-does not upload firmware or write sensor flash/OTP. GPIO routing and hardware
-reset are enabled only for the exact verified One-Netbook A1 DMI profile; an
-unknown platform fails closed.
+The driver performs volatile SPI register operations, RAM image reads, and,
+when reset recovery cannot restore idle, one upload of the owner's FT9361
+firmware to sensor RAM per open attempt. It accepts only the pinned 10,396-byte
+image with the SHA256 documented in [installation](docs/fte3600/install.md#firmware-for-cold-boot-recovery).
+It does not implement arbitrary firmware updates or sensor flash/OTP writes.
+GPIO routing, hardware reset, and firmware recovery are enabled only for the
+exact verified One-Netbook A1 DMI profile; an unknown platform fails closed.
 
 ## Biometric data in memory and logs
 
-The FTE3600 image transfer is marked sensitive, so `FP_DEBUG_TRANSFER` logs
-its lengths and result but redact both SPI buffers. The driver wipes its main
+The FTE3600 image and firmware transfers are marked sensitive, so
+`FP_DEBUG_TRANSFER` logs their lengths and results but redacts both SPI
+buffers. The driver wipes its main
 raw capture, worker-image, feature, and comparison buffers, plus the in-memory
 template objects it owns, at their ownership boundaries. Serialized template
 bytes are deliberately handed to libfprint/fprintd for host-side persistence

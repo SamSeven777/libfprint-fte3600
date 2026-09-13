@@ -17,6 +17,10 @@ Do not continue if fingerprint authentication is already wired into login,
 `sudo`, polkit, or another unattended path. Remove that integration using the
 distribution's supported PAM tool while a password fallback is still tested.
 
+Install the owner's [FT9361 firmware](install.md#firmware-for-cold-boot-recovery)
+separately before the cold-boot test; the package deliberately does not bundle
+or download it.
+
 From a committed Git checkout of this branch:
 
 ```sh

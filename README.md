@@ -59,7 +59,8 @@ cat /sys/module/spidev/parameters/bufsiz
 ```
 
 After installation and reboot, the FTE3600 SPI node must exist and the spidev
-buffer must be at least 5,128 bytes.
+buffer must be at least 10,403 bytes for cold-boot firmware recovery (5,128
+bytes for images). The supplied configuration sets it to 32,768 bytes.
 
 ### 2. Install build and runtime dependencies
 
@@ -141,6 +142,11 @@ meson test -C build-fte3600 --print-errorlogs \
 
 ### 5. Install
 
+Cold-boot recovery requires the owner's matching FT9361 firmware, installed
+separately at `/usr/lib/firmware/fte3600/ft9361.bin`. The source tree and Arch
+package do not include it. The driver checks its exact size and SHA256 before
+uploading it to sensor RAM; see [firmware installation](docs/fte3600/install.md#firmware-for-cold-boot-recovery).
+
 On the verified Arch/Omarchy system, use the checkout-based package recipe. It
 replaces the stock `libfprint`, enables the experimental personal policy, adds
 the spidev/GPIO configuration, and installs a DMI-gated One-Netbook A1 SPI
@@ -221,12 +227,15 @@ headers. Existing upstream components retain their own copyright and license
 notices.
 
 No proprietary vendor binary blob, firmware image, vendor template format, or
-vendor source code is included or loaded at runtime. Register behavior,
-transport sequencing, and the high-level host-matching architecture were
-established through interoperability analysis of the Windows package and
-direct experiments on the owner's hardware. The Linux implementation,
-descriptor table, template format, and matching code were independently
-written; see the [clean-room boundary](docs/fte3600/clean-room.md).
+vendor source code is distributed in this source tree or its package recipe.
+Cold-boot recovery loads one size- and SHA256-pinned firmware image supplied
+separately by the owner into sensor RAM. The host does not execute a vendor
+DLL or ELF. Register behavior, transport sequencing, and the high-level
+host-matching architecture were established through interoperability analysis
+of the Windows package and direct experiments on the owner's hardware. The
+Linux implementation, descriptor table, template format, and matching code
+were independently written; see the
+[clean-room boundary](docs/fte3600/clean-room.md).
 
 No private FTE3600 capture or enrolled template is included. The existing
 public upstream libfprint test fixtures remain unchanged.
