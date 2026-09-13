@@ -33,6 +33,7 @@
 #include <gudev/gudev.h>
 #include <linux/spi/spidev.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define FT9361_REG_READ_HEADER_SIZE 4
@@ -42,7 +43,9 @@
 #define FT9361_RESET_SETTLE_MS 2
 #define FT9361_HARD_RESET_PULSE_MS 5
 #define FT9361_HARD_RESET_INTERVAL_MS 10
-#define FT9361_HARD_RESET_BOOT_MS 200
+#define FT9361_HARD_RESET_BOOT_MS 160
+#define FT9361_INIT_MCU_POLL_MS 2
+#define FT9361_INIT_MCU_MAX_ATTEMPTS 20
 #define FT9361_CONFIG_DELAY_MS 2
 #define FT9361_ARM_DELAY_MS 10
 #define FT9361_ARM_TIMEOUT_MS 1000
@@ -65,6 +68,9 @@ struct _FpiDeviceFte3600
   gboolean armed;
   gboolean idle_verified;
   gboolean init_hardware_reset_attempted;
+  gboolean init_firmware_upload_attempted;
+  guint init_mcu_status_attempts;
+  GBytes *firmware_bytes;
   guint enroll_stages_passed;
 
   struct gpiod_line_request *reset_request;
@@ -100,6 +106,12 @@ enum fte3600_init_state
   FTE3600_INIT_RESET_SETTLE,
   FTE3600_INIT_READ_MCU_STATUS,
   FTE3600_INIT_CHECK_MCU_STATUS,
+  FTE3600_INIT_FW_RESET_ASSERT,
+  FTE3600_INIT_FW_RESET_HOLD,
+  FTE3600_INIT_FW_RESET_DEASSERT,
+  FTE3600_INIT_FW_SYNC,
+  FTE3600_INIT_FW_UPLOAD,
+  FTE3600_INIT_FW_UPLOAD_SETTLE,
   FTE3600_INIT_HARD_RESET_ASSERT_1,
   FTE3600_INIT_HARD_RESET_HOLD_1,
   FTE3600_INIT_HARD_RESET_DEASSERT_1,
@@ -863,6 +875,121 @@ fte3600_submit_reg_write (FpiSsm *ssm, guint8 reg, guint8 value,
   fte3600_submit_transfer (ssm, transfer, cancellable);
 }
 
+GBytes *
+fte3600_load_firmware (const gchar *path, GError **error)
+{
+  g_autofree guint8 *contents = NULL;
+  g_autofree gchar *checksum = NULL;
+  struct stat st;
+  GBytes *result = NULL;
+  gsize length = 0;
+  gint fd;
+
+  g_return_val_if_fail (path != NULL, NULL);
+
+  /* A firmware override must not make the device-open callback block on a
+   * FIFO or allocate an arbitrary file size. Inspect the opened descriptor
+   * and bound the read, including one byte to detect concurrent growth. */
+  fd = open (path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "Failed to open FT9361 firmware %s: %s", path,
+                   g_strerror (errno));
+      return NULL;
+    }
+  if (fstat (fd, &st) < 0)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "Failed to inspect FT9361 firmware %s: %s", path,
+                   g_strerror (errno));
+      goto out;
+    }
+  if (!S_ISREG (st.st_mode) || st.st_size != FT9361_FIRMWARE_SIZE)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "FT9361 firmware %s must be a regular %u-byte file",
+                   path, FT9361_FIRMWARE_SIZE);
+      goto out;
+    }
+
+  contents = g_malloc (FT9361_FIRMWARE_SIZE + 1);
+  while (length < FT9361_FIRMWARE_SIZE + 1)
+    {
+      ssize_t count = read (fd, contents + length,
+                            FT9361_FIRMWARE_SIZE + 1 - length);
+
+      if (count < 0 && errno == EINTR)
+        continue;
+      if (count < 0)
+        {
+          g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                       "Failed to read FT9361 firmware %s: %s", path,
+                       g_strerror (errno));
+          goto out;
+        }
+      if (count == 0)
+        break;
+      length += count;
+    }
+  checksum = g_compute_checksum_for_data (G_CHECKSUM_SHA256, contents, length);
+  if (length != FT9361_FIRMWARE_SIZE ||
+      g_strcmp0 (checksum, FT9361_FIRMWARE_SHA256) != 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "FT9361 firmware %s has an unexpected size or SHA256", path);
+      goto out;
+    }
+
+  fp_dbg ("Loaded verified FT9361 firmware from %s (%zu bytes)", path, length);
+  result = g_bytes_new_take (g_steal_pointer (&contents), length);
+
+out:
+  close (fd);
+  return result;
+}
+
+static void
+fte3600_submit_bootloader_sync (FpiSsm *ssm, gboolean cancellable)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+
+  transfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  fpi_spi_transfer_write (transfer, 2);
+  transfer->buffer_wr[0] = 0x55;
+  transfer->buffer_wr[1] = 0xaa;
+  fte3600_submit_transfer (ssm, transfer, cancellable);
+}
+
+static void
+fte3600_submit_firmware_packet (FpiSsm       *ssm,
+                                const guint8 *fw_data,
+                                gsize         fw_len,
+                                gboolean      cancellable)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+  gsize pkt_len = 6 + fw_len + 1;
+
+  transfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  fpi_spi_transfer_write (transfer, pkt_len);
+  transfer->buffer_wr[0] = 0x05;
+  transfer->buffer_wr[1] = 0xfa;
+  transfer->buffer_wr[2] = 0x00;
+  transfer->buffer_wr[3] = 0x00;
+  transfer->buffer_wr[4] = (fw_len >> 8) & 0xff;
+  transfer->buffer_wr[5] = fw_len & 0xff;
+  memcpy (&transfer->buffer_wr[6], fw_data, fw_len);
+  transfer->buffer_wr[6 + fw_len] = 0x00;
+  /* Keep chip select asserted for the complete packet. The full-duplex
+   * helper rejects insufficient spidev buffers instead of splitting it. */
+  fpi_spi_transfer_read (transfer, pkt_len);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  fpi_spi_transfer_set_sensitive (transfer, TRUE);
+  fte3600_submit_transfer (ssm, transfer, cancellable);
+}
+
 static void
 fte3600_reg_read_cb (FpiSpiTransfer *transfer,
                      FpDevice       *device,
@@ -1005,10 +1132,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
   guint state = fpi_ssm_get_cur_state (ssm);
   guint8 value;
 
-  /* Once reset has been asserted, always finish the complete pulse train and
-   * return the active-low line high before observing cancellation. */
-  if ((state < FTE3600_INIT_HARD_RESET_ASSERT_1
-       || state > FTE3600_INIT_HARD_RESET_BOOT)
+  /* Once reset or firmware upload has been asserted, always finish the complete
+   * pulse train and return the active-low line high before observing cancellation. */
+  if (!((state >= FTE3600_INIT_FW_RESET_ASSERT && state <= FTE3600_INIT_FW_UPLOAD_SETTLE)
+        || (state >= FTE3600_INIT_HARD_RESET_ASSERT_1 && state <= FTE3600_INIT_HARD_RESET_BOOT))
       && fte3600_fail_if_cancelled (ssm, dev))
     return;
 
@@ -1034,6 +1161,17 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_INIT_CHECK_MCU_STATUS:
       if (!fte3600_mcu_is_idle (self))
         {
+          /* Windows permits twenty status reads after hardware startup.
+           * Keep the initial soft-reset path fast, but do not upload again
+           * or fail merely because the first post-reset response is early. */
+          if (self->init_hardware_reset_attempted &&
+              ++self->init_mcu_status_attempts < FT9361_INIT_MCU_MAX_ATTEMPTS)
+            {
+              fpi_ssm_jump_to_state_delayed (
+                  ssm, FTE3600_INIT_READ_MCU_STATUS, FT9361_INIT_MCU_POLL_MS);
+              return;
+            }
+
           if (!self->init_hardware_reset_attempted
               && self->gpio_profile
               && self->gpio_profile->allow_hardware_reset)
@@ -1041,27 +1179,98 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
               self->init_hardware_reset_attempted = TRUE;
               self->armed = FALSE;
               fte3600_clear_irq_source (self);
-              fp_warn ("FT9361 soft reset returned %02x %02x; attempting "
-                       "one DMI-verified hardware recovery",
-                       self->small_rx[4], self->small_rx[5]);
-              fpi_ssm_jump_to_state (
-                  ssm, FTE3600_INIT_HARD_RESET_ASSERT_1);
+              fpi_ssm_jump_to_state (ssm, FTE3600_INIT_HARD_RESET_ASSERT_1);
+              return;
+            }
+
+          if (!self->init_firmware_upload_attempted &&
+              fte3600_firmware_upload_allowed (self->gpio_profile,
+                                               self->reset_request != NULL))
+            {
+              const gchar *custom_path = g_getenv ("FTE3600_FIRMWARE_PATH");
+              const gchar *path = custom_path && *custom_path ? custom_path :
+                                  "/usr/lib/firmware/fte3600/ft9361.bin";
+              GError *fw_error = NULL;
+
+              self->init_firmware_upload_attempted = TRUE;
+              self->armed = FALSE;
+              fte3600_clear_irq_source (self);
+
+              g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+              self->firmware_bytes = fte3600_load_firmware (path, &fw_error);
+              if (!self->firmware_bytes)
+                {
+                  fp_warn ("FT9361 MCU not running (%02x %02x) and firmware loading failed: %s",
+                           self->small_rx[4], self->small_rx[5], fw_error->message);
+                  fpi_ssm_mark_failed (ssm, fw_error);
+                  return;
+                }
+
+              fp_info ("FT9361 MCU not idle (%02x %02x); starting cold-boot firmware upload (%zu bytes)",
+                       self->small_rx[4], self->small_rx[5],
+                       g_bytes_get_size (self->firmware_bytes));
+              fpi_ssm_jump_to_state (ssm, FTE3600_INIT_FW_RESET_ASSERT);
               return;
             }
 
           fpi_ssm_mark_failed (
             ssm, fpi_device_error_new_msg (
                    FP_DEVICE_ERROR_PROTO,
-                   self->init_hardware_reset_attempted
-                     ? "FT9361 MCU did not return to idle after hardware recovery (%02x %02x)"
-                     : "FT9361 MCU did not return to idle (%02x %02x)",
+                   self->init_firmware_upload_attempted
+                     ? "FT9361 MCU did not return to idle after cold-boot firmware recovery (%02x %02x)"
+                     : self->init_hardware_reset_attempted
+                       ? "FT9361 MCU did not return to idle after hardware recovery (%02x %02x)"
+                       : "FT9361 MCU did not return to idle (%02x %02x)",
                    self->small_rx[4], self->small_rx[5]));
           return;
         }
       fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
       return;
 
+    case FTE3600_INIT_FW_RESET_ASSERT:
+      if (!fte3600_firmware_upload_allowed (self->gpio_profile,
+                                            self->reset_request != NULL))
+        {
+          fpi_ssm_mark_failed (
+              ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Firmware recovery is not verified for this platform"));
+          return;
+        }
+      fte3600_set_hardware_reset (ssm, self, TRUE);
+      return;
+
+    case FTE3600_INIT_FW_RESET_HOLD:
+      fpi_ssm_next_state_delayed (ssm, FT9361_HARD_RESET_PULSE_MS);
+      return;
+
+    case FTE3600_INIT_FW_RESET_DEASSERT:
+      fte3600_set_hardware_reset (ssm, self, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_SYNC:
+      fte3600_submit_bootloader_sync (ssm, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_UPLOAD:
+      {
+        gsize fw_size = 0;
+        const guint8 *fw_data = g_bytes_get_data (self->firmware_bytes, &fw_size);
+
+        fte3600_submit_firmware_packet (ssm, fw_data, fw_size, FALSE);
+        return;
+      }
+
+    case FTE3600_INIT_FW_UPLOAD_SETTLE:
+      g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+      fpi_ssm_jump_to_state_delayed (
+          ssm, FTE3600_INIT_HARD_RESET_ASSERT_1, FT9361_RESET_SETTLE_MS);
+      return;
+
     case FTE3600_INIT_HARD_RESET_ASSERT_1:
+      self->init_mcu_status_attempts = 0;
+      fte3600_set_hardware_reset (ssm, self, TRUE);
+      return;
+
     case FTE3600_INIT_HARD_RESET_ASSERT_2:
       fte3600_set_hardware_reset (ssm, self, TRUE);
       return;
@@ -1130,8 +1339,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_mark_failed (ssm,
                                fpi_device_error_new_msg (
                                    FP_DEVICE_ERROR_PROTO,
-                                   "Unexpected FT9361 firmware version %02x; "
-                                   "firmware upload is disabled",
+                                   "Unexpected FT9361 firmware version %02x",
                                    value));
           return;
         }
@@ -1148,8 +1356,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
         {
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                                         FP_DEVICE_ERROR_PROTO,
-                                        "Unexpected FT9361 AGC version %02x; "
-                                        "firmware upload is disabled",
+                                        "Unexpected FT9361 AGC version %02x",
                                         value));
           return;
         }
@@ -1250,6 +1457,7 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
+  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
   if (error)
     {
       self->idle_verified = FALSE;
@@ -2495,6 +2703,8 @@ fte3600_open (FpDevice *dev)
 
   self->idle_verified = FALSE;
   self->init_hardware_reset_attempted = FALSE;
+  self->init_firmware_upload_attempted = FALSE;
+  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
   ssm = fpi_ssm_new (dev, fte3600_init_handler, FTE3600_INIT_NSTATES);
   fpi_ssm_start (ssm, fte3600_init_complete);
 }
@@ -2504,6 +2714,7 @@ fte3600_close (FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
+  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
   if (self->spi_fd < 0)
     {
       fpi_device_close_complete (dev, NULL);
@@ -2652,6 +2863,7 @@ fpi_device_fte3600_finalize (GObject *object)
   fte3600_secure_clear (self->capture_rx, FT9361_CAPTURE_FRAME_SIZE);
   g_clear_pointer (&self->capture_tx, g_free);
   g_clear_pointer (&self->capture_rx, g_free);
+  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
   fte3600_clear_captured_image (self);
 
   G_OBJECT_CLASS (fpi_device_fte3600_parent_class)->finalize (object);

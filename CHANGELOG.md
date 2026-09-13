@@ -2,12 +2,18 @@
 
 ## Unreleased
 
-- Add a fail-closed One-Netbook A1 systemd helper that disables runtime PM for
-  the verified Intel LPSS/pxa2xx SPI path before `fprintd`, rebinds the
-  controller when required, and restores the previous policy on removal.
-- Add fake-sysfs tests for DMI and topology gating, transactional power-policy
-  handling, native-driver precedence, and state-file validation.
-- Document the repeated all-zero/`0x95` SPI failure and its A1-only workaround.
+- Add bounded A1 cold-boot recovery using separately supplied, size/hash-pinned
+  firmware; protect sensitive transfers and set the SPI buffer to 32,768 bytes.
+- Keep minimum inlier and mutual-match gates at 7 as experimental settings,
+  without claiming optimality or real-population security calibration.
+- Share GPIO discovery improvements and the optional Fedora SELinux module;
+  load it only after confirming matching local AVC denials.
+- Retain the tested, exact-A1 runtime-PM helper as a precaution. It did not
+  solve the original `00 00` fault and remains unproven necessary post-fix.
+- Preserve the experimental exact Medion DMI profile and separate GPIO
+  controllers; hardware-reset and firmware recovery remain disabled.
+- Remove development-only synthetic calibration tools and duplicate handover
+  documentation; retain runtime/regression tests and the open/close diagnostic.
 
 ## fte3600-v0.1.0 - 2026-08-25
 

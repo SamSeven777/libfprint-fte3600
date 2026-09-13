@@ -26,6 +26,7 @@ typedef struct
   guint        reset_offset;
   gboolean     reset_active_low;
   gboolean     allow_hardware_reset;
+  gboolean     allow_firmware_upload;
   const gchar *irq_controller_acpi_path;
   guint        irq_offset;
 } Fte3600GpioProfile;
@@ -40,6 +41,7 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .reset_offset = 0x55,
     .reset_active_low = TRUE,
     .allow_hardware_reset = TRUE,
+    .allow_firmware_upload = TRUE,
     .irq_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .irq_offset = 0x56,
   },
@@ -52,10 +54,19 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .reset_offset = 0x27,
     .reset_active_low = TRUE,
     .allow_hardware_reset = FALSE, /* Safety gate: disabled until polarity is confirmed */
+    .allow_firmware_upload = FALSE, /* Requires verified reset and firmware compatibility */
     .irq_controller_acpi_path = "\\_SB_.GPO2",
     .irq_offset = 0x00,
   },
 };
+
+static inline gboolean
+fte3600_firmware_upload_allowed (const Fte3600GpioProfile *profile,
+                                 gboolean                  reset_claimed)
+{
+  return profile != NULL && profile->allow_hardware_reset &&
+         profile->allow_firmware_upload && reset_claimed;
+}
 
 static inline enum gpiod_line_value
 fte3600_reset_line_value (const Fte3600GpioProfile *profile,

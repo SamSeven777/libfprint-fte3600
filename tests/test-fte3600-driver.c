@@ -6,8 +6,11 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <sys/stat.h>
 
 #include "fpi-device.h"
+#include "drivers/fte3600.h"
 #include "drivers/fte3600-gpio.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
@@ -15,6 +18,80 @@
 #endif
 
 GType fpi_device_fte3600_get_type (void);
+
+static void
+test_firmware_valid (void)
+{
+  const gchar *path = g_getenv ("FTE3600_TEST_FIRMWARE");
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+
+  if (!path || !*path)
+    {
+      g_test_skip ("Set FTE3600_TEST_FIRMWARE to a locally supplied FT9361 firmware file");
+      return;
+    }
+
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (firmware);
+  g_assert_cmpuint (g_bytes_get_size (firmware), ==, FT9361_FIRMWARE_SIZE);
+}
+
+static void
+test_firmware_invalid (gconstpointer user_data)
+{
+  const gsize length = GPOINTER_TO_SIZE (user_data);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *contents = g_malloc0 (MAX (length, 1));
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "invalid.bin", NULL);
+  g_assert_true (g_file_set_contents (path, contents, length, &error));
+  g_assert_no_error (error);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
+static void
+test_firmware_missing (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "missing.bin", NULL);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
+static void
+test_firmware_fifo (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) firmware = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
+  g_autofree gchar *path = NULL;
+
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "fifo", NULL);
+  g_assert_cmpint (mkfifo (path, 0600), ==, 0);
+  firmware = fte3600_load_firmware (path, &error);
+  g_assert_null (firmware);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
 
 static void
 test_gpio_profiles (void)
@@ -26,6 +103,7 @@ test_gpio_profiles (void)
 
   g_assert_nonnull (a1);
   g_assert_true (a1->allow_hardware_reset);
+  g_assert_true (a1->allow_firmware_upload);
   g_assert_cmpstr (a1->reset_controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
   g_assert_cmpstr (a1->irq_controller_acpi_path, ==, a1->reset_controller_acpi_path);
   g_assert_cmpuint (a1->reset_offset, ==, 0x55);
@@ -35,6 +113,7 @@ test_gpio_profiles (void)
 
   g_assert_nonnull (medion);
   g_assert_false (medion->allow_hardware_reset);
+  g_assert_false (medion->allow_firmware_upload);
   g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
   g_assert_cmpstr (medion->irq_controller_acpi_path, ==, "\\_SB_.GPO2");
   g_assert_cmpuint (medion->reset_offset, ==, 0x27);
@@ -48,6 +127,33 @@ test_gpio_profiles (void)
   g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3225", "FT", "YS13G"));
   g_assert_null (fte3600_lookup_gpio_profile ("other", "E3224", "FT", "YS13G"));
   g_assert_null (fte3600_lookup_gpio_profile (NULL, NULL, NULL, NULL));
+}
+
+static void
+test_firmware_platform_gate (void)
+{
+  const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
+      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+  const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
+      "MEDION", "E3224", "FT", "YS13G");
+  Fte3600GpioProfile restricted;
+
+  g_assert_nonnull (a1);
+  g_assert_nonnull (medion);
+  g_assert_true (fte3600_firmware_upload_allowed (a1, TRUE));
+  g_assert_false (fte3600_firmware_upload_allowed (a1, FALSE));
+  g_assert_false (fte3600_firmware_upload_allowed (medion, FALSE));
+  g_assert_false (fte3600_firmware_upload_allowed (medion, TRUE));
+  g_assert_false (fte3600_firmware_upload_allowed (NULL, TRUE));
+
+  /* Verifying reset on another profile must not implicitly permit firmware
+   * upload. Conversely, firmware permission alone must not permit reset. */
+  restricted = *medion;
+  restricted.allow_hardware_reset = TRUE;
+  g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
+  restricted = *medion;
+  restricted.allow_firmware_upload = TRUE;
+  g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
 }
 
 static void
@@ -191,7 +297,22 @@ main (int   argc,
       char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fte3600-driver/firmware/valid", test_firmware_valid);
+  g_test_add_func ("/fte3600-driver/firmware/missing", test_firmware_missing);
+  g_test_add_func ("/fte3600-driver/firmware/fifo", test_firmware_fifo);
+  g_test_add_data_func ("/fte3600-driver/firmware/empty", GSIZE_TO_POINTER (0),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/truncated",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE - 1),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/oversized",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE + 1),
+                        test_firmware_invalid);
+  g_test_add_data_func ("/fte3600-driver/firmware/wrong-checksum",
+                        GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE),
+                        test_firmware_invalid);
   g_test_add_func ("/fte3600-driver/gpio-profiles", test_gpio_profiles);
+  g_test_add_func ("/fte3600-driver/firmware/platform-gate", test_firmware_platform_gate);
   g_test_add_func ("/fte3600-driver/acpi-controller-paths", test_acpi_controller_paths);
   g_test_add_func ("/fte3600-driver/published-capabilities",
                    test_published_capabilities);

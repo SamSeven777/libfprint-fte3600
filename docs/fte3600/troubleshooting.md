@@ -1,45 +1,31 @@
 # Troubleshooting
 
-## The device is not listed
+## Device missing or initialization fails
 
-Confirm the exact hardware profile and device nodes:
+Check the exact [hardware profile](status.md), then:
 
 ```sh
-cat /sys/class/dmi/id/sys_vendor
-cat /sys/class/dmi/id/product_name
-grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
 ls -l /dev/spidev* /dev/gpiochip*
-fprintd-list "$USER"
-```
-
-An unknown DMI profile is rejected intentionally. Do not bypass that check;
-open an issue with the sanitized evidence requested in `CONTRIBUTING.md`.
-
-## A capture says the SPI message is too large
-
-```sh
 cat /sys/module/spidev/parameters/bufsiz
-```
-
-The result must be at least 5128. Install
-`config/modprobe.d/fte3600-spidev.conf` through the package and reboot. The
-5,128-byte full-duplex image read cannot be split across chip-select cycles.
-
-## fprintd cannot open GPIO
-
-Check the installed service drop-in and restart after fixing the package:
-
-```sh
-systemctl cat fprintd.service
 systemctl status fprintd.service --no-pager
 ```
 
-The effective unit must allow `char-gpiochip rw`. Keep the service sandbox in
-place and do not grant broad access to all devices merely to bypass a GPIO
-configuration error.
+Device nodes may appear only after installation and reboot. The supplied SPI
+limit is `32768`: A1 recovery needs `10403`, images `5128`.
 
-If the error reports `Permission denied` on Fedora 43/44 with enforcing
-SELinux, check the audit log and current policy contexts:
+For A1 MCU `00 00`, check the current driver and
+[validated firmware](install.md#firmware-for-cold-boot-recovery). All-zero reads
+alone do not distinguish missing firmware from transport/power failure.
+
+Medion reset and firmware upload remain disabled pending hardware validation;
+installing A1 firmware does not enable them. Do not bypass the profile checks.
+
+## fprintd cannot open GPIO
+
+`systemctl cat fprintd.service` must include `DeviceAllow=char-gpiochip rw`
+from the supplied GPIO drop-in.
+
+On Fedora 43/44 with enforcing SELinux and `Permission denied`, inspect:
 
 ```sh
 sudo ausearch -m AVC,USER_AVC,SELINUX_ERR,USER_SELINUX_ERR \
@@ -48,8 +34,8 @@ ls -lZ /dev/gpiochip*
 ps -eZ | grep '[f]printd'
 ```
 
-Only if the denial and commands show source type `fprintd_t` and target type
-`gpio_device_t`, install and verify the provided local policy module:
+Only if the AVC confirms source `fprintd_t`, target `gpio_device_t`, and the
+matching GPIO denial, load the optional module from the repository root:
 
 ```sh
 sudo semodule -i config/selinux/fte3600-gpio.cil
@@ -57,18 +43,18 @@ sudo semodule -lfull | grep -F fte3600-gpio
 sudo systemctl restart fprintd.service
 ```
 
-Fedora assigns `gpio_device_t` to every `/dev/gpiochip*` node. The module
-therefore permits `fprintd_t` to perform the listed operations on all GPIO
-character devices, not only the FTE3600 lines; the systemd device allow-list
-still remains in force. Do not install this Fedora-specific module on another
-SELinux policy without reviewing its types. Remove it with
-`sudo semodule -r fte3600-gpio` when uninstalling the driver.
+`semodule` comes from Fedora's `policycoreutils` package. The module permits
+`getattr/open/read/write/ioctl` on **all** GPIO devices labeled `gpio_device_t`
+for `fprintd_t`; the systemd allow-list still applies. It is never automatically
+loaded, including on Arch/Ubuntu. Do not disable SELinux or apply this to
+unmatched contexts. Remove it with `sudo semodule -r fte3600-gpio`.
 
-## The first open works, then SPI reads become all-zero or `0x95`
+## A1 power workaround
 
-This state was reproduced on the One-Netbook A1 when either the Intel LPSS
-parent or its pxa2xx SPI child was allowed to runtime-suspend. Confirm that the
-DMI-gated workaround was installed and completed before `fprintd`:
+The retained helper sets both Intel LPSS/pxa2xx policies to `on` and rebinds
+the controller once per service activation. It did not fix the original cold
+boot; whether it remains necessary with corrected firmware is unverified.
+Check its state without changing it:
 
 ```sh
 systemctl status fte3600-a1-spi-power.service --no-pager
@@ -76,43 +62,16 @@ cat /sys/devices/pci0000:00/0000:00:1e.3/power/control
 cat /sys/devices/pci0000:00/0000:00:1e.3/pxa2xx-spi.4/power/control
 ```
 
-On the verified A1 both controls should report `on` after the service starts.
-Do not copy these fixed controller paths to another computer. Reinstall the
-package and reboot if the unit is missing; if its topology check fails, attach
-the sanitized unit status to a hardware report instead of forcing a rebind.
-TLP, powertop autotuning, or another power manager can overwrite these values
-later. Disable that conflicting rule, stop `fprintd`, and restart
-`fte3600-a1-spi-power.service`; never rebind the controller while a fingerprint
-operation is active.
+Both controls should be `on` while active. A successful service status does
+not establish sensor health. Removing the workaround needs a controlled
+on/auto comparison and a cold boot without it; fprintd can automatically
+restart it. Never rebind during an active fingerprint operation.
 
-## Enrollment repeatedly asks for another press
+## Enrollment and reports
 
-Lift the finger completely, pause briefly, and vary position slightly on the
-next press. Low contrast, too few features, a duplicate placement, or an
-inconsistent finger are deliberately rejected. Do not weaken the matcher to
-make enrollment complete.
+Lift completely between presses and vary placement slightly. Verify directly
+with `fprintd-verify` before [Omarchy setup](arch-omarchy.md).
 
-## Omarchy does not show fingerprint unlock
-
-First confirm `fprintd-verify` succeeds. Then check that
-`/etc/pam.d/omarchy-lock-fingerprint` exists and restart only the shell:
-
-```sh
-omarchy restart shell
-omarchy system lock
-```
-
-Do not use the general Omarchy fingerprint setup command with this package.
-
-## Collect a safe log
-
-Start with versions and non-biometric state:
-
-```sh
-uname -a
-pkg-config --modversion libfprint-2 libgpiod
-systemctl status fprintd.service --no-pager
-```
-
-Before posting, redact usernames, hostnames, serial numbers, paths, and any
-binary dump. Never upload a fingerprint image, template, or raw capture.
+Report software versions, the failing operation, and sanitized DMI/ACPI/error
+text. Keep debug logging disabled; omit images, templates, raw captures,
+firmware, vendor binaries, serial numbers, usernames, and private logs.

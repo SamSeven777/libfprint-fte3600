@@ -25,7 +25,7 @@ source=(
 sha256sums=(
   SKIP
   'f0fce5dd6685227aa22c54e045fd5ba518631a9afc2c2467fbbbae765f43df26'
-  '71445336251cd3d18566ff2c86871c5ce229e3307eb47c05a1b5fd4df87d239b'
+  '4ba92238b116e3d9f931d0f8c56f8ed929f261ddaad97049bd79b4febd7e18a9'
 )
 
 # Upstream libfprint development snapshot from which the FTE3600 work starts.
@@ -82,4 +82,7 @@ package() {
   install -Dm644 \
     "$srcdir/libfprint/config/systemd/20-fte3600-a1-spi-power.conf" \
     "$pkgdir/usr/lib/systemd/system/fprintd.service.d/20-fte3600-a1-spi-power.conf"
+
+  # Firmware is supplied separately by the device owner. Never silently
+  # bundle an ignored local blob into an otherwise reproducible package.
 }
