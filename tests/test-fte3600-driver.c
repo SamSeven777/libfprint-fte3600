@@ -11,6 +11,7 @@
 
 #include "fpi-device.h"
 #include "drivers/fte3600.h"
+#include "drivers/fte3600-gpio.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
@@ -93,30 +94,77 @@ test_firmware_fifo (void)
 }
 
 static void
-test_dmi_profile_lookup (void)
+test_gpio_profiles (void)
 {
-  const Fte3600GpioProfile *profile;
+  const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
+      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+  const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
+      "MEDION", "E3224", "FT", "YS13G");
 
-  /* Verified One-Netbook A1 profile must match */
-  profile = fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1");
-  g_assert_nonnull (profile);
-  g_assert_cmpstr (profile->sys_vendor, ==, "ONE-NETBOOK TECHNOLOGY CO., LTD.");
-  g_assert_cmpstr (profile->product_name, ==, "A1");
-  g_assert_cmpstr (profile->controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
-  g_assert_cmpuint (profile->reset_offset, ==, 0x55);
-  g_assert_cmpuint (profile->irq_offset, ==, 0x56);
+  g_assert_nonnull (a1);
+  g_assert_true (a1->allow_hardware_reset);
+  g_assert_true (a1->allow_firmware_upload);
+  g_assert_cmpstr (a1->reset_controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
+  g_assert_cmpstr (a1->irq_controller_acpi_path, ==, a1->reset_controller_acpi_path);
+  g_assert_cmpuint (a1->reset_offset, ==, 0x55);
+  g_assert_cmpuint (a1->irq_offset, ==, 0x56);
+  g_assert_cmpint (fte3600_reset_line_value (a1, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
 
-  /* Unknown or unverified DMI platforms must be rejected (return NULL) */
-  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224"));
-  g_assert_null (fte3600_lookup_gpio_profile ("LENOVO", "ThinkPad"));
-  g_assert_null (fte3600_lookup_gpio_profile ("Dell Inc.", "XPS 13"));
-  g_assert_null (fte3600_lookup_gpio_profile ("HP", "Spectre"));
-  g_assert_null (fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", "A2"));
-  g_assert_null (fte3600_lookup_gpio_profile ("Other", "A1"));
-  g_assert_null (fte3600_lookup_gpio_profile ("", ""));
-  g_assert_null (fte3600_lookup_gpio_profile (NULL, "A1"));
-  g_assert_null (fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", NULL));
-  g_assert_null (fte3600_lookup_gpio_profile (NULL, NULL));
+  g_assert_nonnull (medion);
+  g_assert_true (medion->allow_hardware_reset);
+  g_assert_true (medion->allow_firmware_upload);
+  g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
+  g_assert_cmpstr (medion->irq_controller_acpi_path, ==, "\\_SB_.GPO2");
+  g_assert_cmpuint (medion->reset_offset, ==, 0x27);
+  g_assert_cmpuint (medion->irq_offset, ==, 0);
+
+  /* Missing or mismatched identity must never enable the Medion routing. */
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", NULL, "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "FT", NULL));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "other", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", "FT", "other"));
+  g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3225", "FT", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile ("other", "E3224", "FT", "YS13G"));
+  g_assert_null (fte3600_lookup_gpio_profile (NULL, NULL, NULL, NULL));
+}
+
+static void
+test_firmware_platform_gate (void)
+{
+  const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
+      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+  const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
+      "MEDION", "E3224", "FT", "YS13G");
+  Fte3600GpioProfile restricted;
+
+  g_assert_nonnull (a1);
+  g_assert_nonnull (medion);
+  g_assert_true (fte3600_firmware_upload_allowed (a1, TRUE));
+  g_assert_false (fte3600_firmware_upload_allowed (a1, FALSE));
+  g_assert_false (fte3600_firmware_upload_allowed (medion, FALSE));
+  g_assert_true (fte3600_firmware_upload_allowed (medion, TRUE));
+  g_assert_false (fte3600_firmware_upload_allowed (NULL, TRUE));
+
+  /* If either reset or firmware is restricted, upload must be forbidden. */
+  restricted = *medion;
+  restricted.allow_hardware_reset = FALSE;
+  g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
+  restricted = *medion;
+  restricted.allow_firmware_upload = FALSE;
+  g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
+}
+
+static void
+test_acpi_controller_paths (void)
+{
+  g_assert_true (fte3600_acpi_path_equal ("\\_SB_.PCI0.GPI0", "\\_SB.PCI0.GPI0"));
+  g_assert_true (fte3600_acpi_path_equal ("\\_SB_.GPO2", "_SB.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal ("\\_SB_.GPO1", "\\_SB_.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal ("\\_SB_.PCI0.GPI0", "\\_SB_.GPI0"));
+  g_assert_false (fte3600_acpi_path_equal (NULL, "\\_SB_.GPO2"));
+  g_assert_false (fte3600_acpi_path_equal (NULL, NULL));
+  g_assert_false (fte3600_acpi_path_equal ("", ""));
 }
 
 static void
@@ -263,10 +311,11 @@ main (int   argc,
   g_test_add_data_func ("/fte3600-driver/firmware/wrong-checksum",
                         GSIZE_TO_POINTER (FT9361_FIRMWARE_SIZE),
                         test_firmware_invalid);
+  g_test_add_func ("/fte3600-driver/gpio-profiles", test_gpio_profiles);
+  g_test_add_func ("/fte3600-driver/firmware/platform-gate", test_firmware_platform_gate);
+  g_test_add_func ("/fte3600-driver/acpi-controller-paths", test_acpi_controller_paths);
   g_test_add_func ("/fte3600-driver/published-capabilities",
                    test_published_capabilities);
-  g_test_add_func ("/fte3600-driver/dmi-profile-lookup",
-                   test_dmi_profile_lookup);
   g_test_add_func ("/fte3600-driver/udev-rule-pattern",
                    test_udev_rule_pattern);
   g_test_add_func ("/fte3600-driver/udev-rules-generator-output",

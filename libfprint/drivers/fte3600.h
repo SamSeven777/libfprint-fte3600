@@ -54,19 +54,6 @@
 /* Internal firmware validation; shared with the hardware-independent tests. */
 GBytes *fte3600_load_firmware (const gchar *path, GError **error);
 
-typedef struct
-{
-  const gchar *sys_vendor;
-  const gchar *product_name;
-  const gchar *controller_acpi_path;
-  guint        reset_offset;
-  guint        irq_offset;
-} Fte3600GpioProfile;
-
-/* Profile lookup for DMI-gated probe filtering. */
-const Fte3600GpioProfile *fte3600_lookup_gpio_profile (const gchar *sys_vendor,
-                                                      const gchar *product_name);
-
 #define FT9361_REG_SENSOR_ID_HIGH 0x14
 #define FT9361_REG_SENSOR_ID_LOW 0x15
 #define FT9361_REG_FW_VERSION 0x1a
