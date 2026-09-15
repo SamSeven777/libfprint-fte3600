@@ -58,7 +58,10 @@ on_device_closed (FpDevice *dev, GAsyncResult *res, void *user_data)
   fp_device_close_finish (dev, res, &error);
 
   if (error)
-    g_warning ("Failed closing device %s", error->message);
+    {
+      g_warning ("Failed closing device %s", error->message);
+      capture_data->ret_value = EXIT_FAILURE;
+    }
 
   g_main_loop_quit (capture_data->loop);
 }
@@ -83,7 +86,7 @@ dev_capture_cb (FpDevice     *dev,
 {
   g_autoptr(GError) error = NULL;
   CaptureData *capture_data = user_data;
-  FpImage *image = NULL;
+  g_autoptr(FpImage) image = NULL;
 
   g_clear_object (&capture_data->cancellable);
 
@@ -95,7 +98,8 @@ dev_capture_cb (FpDevice     *dev,
       return;
     }
 
-  save_image_to_pgm (image, capture_data->filename);
+  if (save_image_to_pgm (image, capture_data->filename))
+    capture_data->ret_value = EXIT_SUCCESS;
 
   capture_quit (dev, capture_data);
 }
