@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Optional example for the uncalibrated personal policy. This service is used
+# only by Omarchy's separate lock-screen fingerprint flow; password auth stays
+# in Omarchy's independent password PAM context.
+auth       optional                    pam_faildelay.so delay=2000000
+auth       required                    pam_fprintd.so max-tries=1 timeout=10
+account    include                     system-local-login
