@@ -314,6 +314,12 @@ unit_tests = [
     'fpi-assembling',
 ]
 
+if have_spi
+    unit_tests += [
+        'fpi-spi-transfer',
+    ]
+endif
+
 if 'virtual_image' in drivers
     unit_tests += [
         'fp-context',
