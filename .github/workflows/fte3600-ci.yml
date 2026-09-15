@@ -1,0 +1,41 @@
+name: FTE3600
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fedora:
+    name: Fedora 43
+    runs-on: ubuntu-latest
+    container: fedora:43
+    steps:
+      - name: Install dependencies
+        run: >-
+          dnf install -y git gcc gcc-c++ meson ninja-build
+          pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
+          libgpiod-devel systemd systemd-devel cairo-devel
+      - uses: actions/checkout@v6
+      - name: Build both authentication policies
+        run: ./scripts/check-fte3600.sh
+
+  ubuntu:
+    name: Ubuntu 26.04
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates git meson ninja-build pkg-config \
+            libglib2.0-dev libgusb-dev libgudev-1.0-dev libgpiod-dev \
+            libudev-dev systemd-dev libcairo2-dev
+      - uses: actions/checkout@v6
+      - name: Build both authentication policies
+        run: ./scripts/check-fte3600.sh
