@@ -16,6 +16,12 @@
  * GpioIo pin 0x55 and the GpioInt pin 0x56 (Edge, ActiveHigh), both on
  * \_SB.PCI0.GPI0.
  */
+typedef enum
+{
+  FTE3600_RECOVERY_RECIPE_A1,
+  FTE3600_RECOVERY_RECIPE_MEDION_VENDOR,
+} Fte3600RecoveryRecipe;
+
 typedef struct
 {
   const gchar *sys_vendor;
@@ -27,6 +33,7 @@ typedef struct
   gboolean     reset_active_low;
   gboolean     allow_hardware_reset;
   gboolean     allow_firmware_upload;
+  Fte3600RecoveryRecipe recovery_recipe;
   const gchar *irq_controller_acpi_path;
   guint        irq_offset;
 } Fte3600GpioProfile;
@@ -42,6 +49,7 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .reset_active_low = TRUE,
     .allow_hardware_reset = TRUE,
     .allow_firmware_upload = TRUE,
+    .recovery_recipe = FTE3600_RECOVERY_RECIPE_A1,
     .irq_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .irq_offset = 0x56,
   },
@@ -55,6 +63,7 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .reset_active_low = TRUE,
     .allow_hardware_reset = TRUE,
     .allow_firmware_upload = TRUE,
+    .recovery_recipe = FTE3600_RECOVERY_RECIPE_MEDION_VENDOR,
     .irq_controller_acpi_path = "\\_SB_.GPO2",
     .irq_offset = 0x00,
   },
@@ -72,9 +81,18 @@ static inline enum gpiod_line_value
 fte3600_reset_line_value (const Fte3600GpioProfile *profile,
                           gboolean                  asserted)
 {
-  g_assert (profile != NULL);
+  gboolean active_low;
+  const gchar *env_override;
 
-  if (profile->reset_active_low)
+  g_assert (profile != NULL);
+  active_low = profile->reset_active_low;
+
+  env_override = g_getenv ("FTE3600_RESET_ACTIVE_LOW");
+  if (env_override && *env_override)
+    active_low = (g_strcmp0 (env_override, "1") == 0 ||
+                  g_ascii_strcasecmp (env_override, "true") == 0);
+
+  if (active_low)
     return asserted ? GPIOD_LINE_VALUE_INACTIVE : GPIOD_LINE_VALUE_ACTIVE;
   else
     return asserted ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;

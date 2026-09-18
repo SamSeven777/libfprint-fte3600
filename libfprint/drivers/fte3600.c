@@ -55,6 +55,8 @@
 #define FT9361_MAX_FALSE_IRQS 8
 #define FT9361_MAX_IRQ_DRAIN_BATCHES 8
 #define FT9361_IMAGE_PPMM 20.0
+#define FT9361_FW_PRE_WRITE_DELAY_MS 20
+#define FT9361_FW_BOOT_MS 50
 
 
 
@@ -111,6 +113,12 @@ enum fte3600_init_state
   FTE3600_INIT_FW_RESET_HOLD,
   FTE3600_INIT_FW_RESET_DEASSERT,
   FTE3600_INIT_FW_SYNC,
+  FTE3600_INIT_FW_PRE_WRITE_1,
+  FTE3600_INIT_FW_PRE_WRITE_2,
+  FTE3600_INIT_FW_PRE_WRITE_3,
+  FTE3600_INIT_FW_PRE_WRITE_4,
+  FTE3600_INIT_FW_PRE_WRITE_5,
+  FTE3600_INIT_FW_PRE_WRITE_DELAY,
   FTE3600_INIT_FW_UPLOAD,
   FTE3600_INIT_FW_UPLOAD_SETTLE,
   FTE3600_INIT_HARD_RESET_ASSERT_1,
@@ -964,6 +972,22 @@ fte3600_submit_bootloader_sync (FpiSsm *ssm, gboolean cancellable)
 }
 
 static void
+fte3600_submit_bootloader_reg_write (FpiSsm *ssm, guint8 reg, guint8 value,
+                                     gboolean cancellable)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+
+  transfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  fpi_spi_transfer_write (transfer, 4);
+  transfer->buffer_wr[0] = 0x09;
+  transfer->buffer_wr[1] = 0xf6;
+  transfer->buffer_wr[2] = reg;
+  transfer->buffer_wr[3] = value;
+  fte3600_submit_transfer (ssm, transfer, cancellable);
+}
+
+static void
 fte3600_submit_firmware_packet (FpiSsm       *ssm,
                                 const guint8 *fw_data,
                                 gsize         fw_len,
@@ -1165,7 +1189,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
           /* Windows permits twenty status reads after hardware startup.
            * Keep the initial soft-reset path fast, but do not upload again
            * or fail merely because the first post-reset response is early. */
-          if (self->init_hardware_reset_attempted &&
+          if ((self->init_hardware_reset_attempted ||
+               (self->init_firmware_upload_attempted &&
+                self->gpio_profile &&
+                self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)) &&
               ++self->init_mcu_status_attempts < FT9361_INIT_MCU_MAX_ATTEMPTS)
             {
               fpi_ssm_jump_to_state_delayed (
@@ -1252,6 +1279,36 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       fte3600_submit_bootloader_sync (ssm, FALSE);
       return;
 
+    case FTE3600_INIT_FW_PRE_WRITE_1:
+      if (self->gpio_profile &&
+          self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
+        {
+          fte3600_submit_bootloader_reg_write (ssm, 0xc8, 0xff, FALSE);
+          return;
+        }
+      fpi_ssm_jump_to_state (ssm, FTE3600_INIT_FW_UPLOAD);
+      return;
+
+    case FTE3600_INIT_FW_PRE_WRITE_2:
+      fte3600_submit_bootloader_reg_write (ssm, 0xca, 0xff, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_PRE_WRITE_3:
+      fte3600_submit_bootloader_reg_write (ssm, 0xcb, 0xff, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_PRE_WRITE_4:
+      fte3600_submit_bootloader_reg_write (ssm, 0xb9, 0xbf, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_PRE_WRITE_5:
+      fte3600_submit_bootloader_reg_write (ssm, 0xb9, 0xff, FALSE);
+      return;
+
+    case FTE3600_INIT_FW_PRE_WRITE_DELAY:
+      fpi_ssm_next_state_delayed (ssm, FT9361_FW_PRE_WRITE_DELAY_MS);
+      return;
+
     case FTE3600_INIT_FW_UPLOAD:
       {
         gsize fw_size = 0;
@@ -1263,6 +1320,14 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_INIT_FW_UPLOAD_SETTLE:
       g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+      if (self->gpio_profile &&
+          self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
+        {
+          self->init_mcu_status_attempts = 0;
+          fpi_ssm_jump_to_state_delayed (
+              ssm, FTE3600_INIT_READ_MCU_STATUS, FT9361_FW_BOOT_MS);
+          return;
+        }
       fpi_ssm_jump_to_state_delayed (
           ssm, FTE3600_INIT_HARD_RESET_ASSERT_1, FT9361_RESET_SETTLE_MS);
       return;

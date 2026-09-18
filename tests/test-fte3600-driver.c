@@ -104,6 +104,7 @@ test_gpio_profiles (void)
   g_assert_nonnull (a1);
   g_assert_true (a1->allow_hardware_reset);
   g_assert_true (a1->allow_firmware_upload);
+  g_assert_cmpint (a1->recovery_recipe, ==, FTE3600_RECOVERY_RECIPE_A1);
   g_assert_cmpstr (a1->reset_controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
   g_assert_cmpstr (a1->irq_controller_acpi_path, ==, a1->reset_controller_acpi_path);
   g_assert_cmpuint (a1->reset_offset, ==, 0x55);
@@ -114,10 +115,20 @@ test_gpio_profiles (void)
   g_assert_nonnull (medion);
   g_assert_true (medion->allow_hardware_reset);
   g_assert_true (medion->allow_firmware_upload);
+  g_assert_cmpint (medion->recovery_recipe, ==, FTE3600_RECOVERY_RECIPE_MEDION_VENDOR);
   g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
   g_assert_cmpstr (medion->irq_controller_acpi_path, ==, "\\_SB_.GPO2");
   g_assert_cmpuint (medion->reset_offset, ==, 0x27);
   g_assert_cmpuint (medion->irq_offset, ==, 0);
+
+  /* Test environment variable override for reset line polarity */
+  g_setenv ("FTE3600_RESET_ACTIVE_LOW", "0", TRUE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_ACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_setenv ("FTE3600_RESET_ACTIVE_LOW", "1", TRUE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
+  g_unsetenv ("FTE3600_RESET_ACTIVE_LOW");
 
   /* Missing or mismatched identity must never enable the Medion routing. */
   g_assert_null (fte3600_lookup_gpio_profile ("MEDION", "E3224", NULL, "YS13G"));
