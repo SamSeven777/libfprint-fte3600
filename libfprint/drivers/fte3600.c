@@ -1202,7 +1202,8 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
           if (!self->init_hardware_reset_attempted
               && self->gpio_profile
-              && self->gpio_profile->allow_hardware_reset)
+              && self->gpio_profile->allow_hardware_reset
+              && self->gpio_profile->recovery_recipe != FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
             {
               self->init_hardware_reset_attempted = TRUE;
               self->armed = FALSE;
@@ -1268,8 +1269,14 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_FW_RESET_HOLD:
-      fpi_ssm_next_state_delayed (ssm, FT9361_HARD_RESET_PULSE_MS);
-      return;
+      {
+        guint hold_ms = FT9361_HARD_RESET_PULSE_MS;
+        if (self->gpio_profile &&
+            self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
+          hold_ms = 20;
+        fpi_ssm_next_state_delayed (ssm, hold_ms);
+        return;
+      }
 
     case FTE3600_INIT_FW_RESET_DEASSERT:
       fte3600_set_hardware_reset (ssm, self, FALSE);
@@ -1325,7 +1332,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
         {
           self->init_mcu_status_attempts = 0;
           fpi_ssm_jump_to_state_delayed (
-              ssm, FTE3600_INIT_READ_MCU_STATUS, FT9361_FW_BOOT_MS);
+              ssm, FTE3600_INIT_WRITE_CONFIG_01, FT9361_RESET_SETTLE_MS);
           return;
         }
       fpi_ssm_jump_to_state_delayed (
@@ -1479,6 +1486,15 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
                        value));
           return;
         }
+      if (self->init_firmware_upload_attempted &&
+          self->gpio_profile &&
+          self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
+        {
+          self->init_mcu_status_attempts = 0;
+          fpi_ssm_jump_to_state_delayed (
+              ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS, FT9361_CONFIG_DELAY_MS);
+          return;
+        }
       fpi_ssm_next_state (ssm);
       return;
 
@@ -1497,6 +1513,13 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_INIT_FINAL_CHECK_MCU_STATUS:
       if (!fte3600_mcu_is_idle (self))
         {
+          if (++self->init_mcu_status_attempts < FT9361_INIT_MCU_MAX_ATTEMPTS)
+            {
+              fpi_ssm_jump_to_state_delayed (
+                  ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS,
+                  FT9361_INIT_MCU_POLL_MS);
+              return;
+            }
           fpi_ssm_mark_failed (
               ssm, fpi_device_error_new_msg (
                        FP_DEVICE_ERROR_PROTO,
@@ -1505,7 +1528,19 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
                        self->small_rx[4], self->small_rx[5]));
           return;
         }
+      if (self->idle_verified)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_DONE);
+          return;
+        }
       self->idle_verified = TRUE;
+      if (self->init_firmware_upload_attempted &&
+          self->gpio_profile &&
+          self->gpio_profile->recovery_recipe == FTE3600_RECOVERY_RECIPE_MEDION_VENDOR)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+          return;
+        }
       fpi_ssm_next_state (ssm);
       return;
 
