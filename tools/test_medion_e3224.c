@@ -1,5 +1,6 @@
 /*
  * Dedicated Hardware Diagnostic & Firmware Recovery Test for Medion Akoya E3224
+ * Comprehensive pin matrix, power rail, and SPI bus probe
  * SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
@@ -20,21 +21,27 @@
 
 #define FW_SIZE 10396
 #define FW_SHA "027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f"
-#define MEDION_RESET_PIN 0x27  /* Pin 39 decimal on \\_SB.GPO1 */
 
-static struct gpiod_line_request *reset_request = NULL;
+#define PIN_GPO1_RESET 0x27  /* Pin 39 on \\_SB.GPO1 */
+#define PIN_GPO2_AUX   0x00  /* Pin 0 on \\_SB.GPO2 */
+
+static struct gpiod_line_request *req_gpo1 = NULL;
+static struct gpiod_line_request *req_gpo2 = NULL;
 static int spi_fd = -1;
-static int cleanup_raw_level = 1;
+static int cur_pin39_val = 1;
+static int cur_pin0_val = 1;
 
 static void cleanup (void)
 {
-  if (reset_request)
+  if (req_gpo1)
     {
-      gpiod_line_request_set_value (
-          reset_request, MEDION_RESET_PIN,
-          cleanup_raw_level ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE);
-      gpiod_line_request_release (reset_request);
-      reset_request = NULL;
+      gpiod_line_request_release (req_gpo1);
+      req_gpo1 = NULL;
+    }
+  if (req_gpo2)
+    {
+      gpiod_line_request_release (req_gpo2);
+      req_gpo2 = NULL;
     }
   if (spi_fd >= 0)
     {
@@ -88,6 +95,53 @@ static void check_dmi (gboolean force)
   g_free (product);
 }
 
+static void wake_device_power (const char *path)
+{
+  gchar *ctrl_path = g_build_filename (path, "power", "control", NULL);
+  gchar *stat_path = g_build_filename (path, "power", "runtime_status", NULL);
+  gchar *status = NULL;
+
+  if (g_file_test (ctrl_path, G_FILE_TEST_EXISTS))
+    {
+      g_file_set_contents (ctrl_path, "on\n", -1, NULL);
+      g_file_get_contents (stat_path, &status, NULL, NULL);
+      if (status)
+        g_strstrip (status);
+      printf ("  Power: %s -> 'on' (status: %s)\n", path, status ? status : "unknown");
+      g_free (status);
+    }
+  g_free (ctrl_path);
+  g_free (stat_path);
+}
+
+static void awaken_spi_subsystem (void)
+{
+  printf ("--- Checking and Awakening SPI Power Management ---\n");
+  /* Intel LPSS SPI controller PCI nodes */
+  wake_device_power ("/sys/bus/pci/devices/0000:00:19.0");
+  wake_device_power ("/sys/devices/pci0000:00/0000:00:19.0/pxa2xx-spi.12");
+  wake_device_power ("/sys/devices/pci0000:00/0000:00:19.0/pxa2xx-spi.12/spi_master/spi1/spi-FTE3600:00");
+  wake_device_power ("/sys/bus/spi/devices/spi-FTE3600:00");
+  printf ("----------------------------------------------------\n\n");
+}
+
+static gboolean acpi_path_matches (const gchar *node_path, const gchar *target)
+{
+  if (!node_path || !target)
+    return FALSE;
+
+  const gchar *target_suffix = strrchr (target, '.');
+  target_suffix = target_suffix ? target_suffix + 1 : target;
+
+  if (g_str_has_suffix (node_path, target_suffix))
+    return TRUE;
+
+  if (g_strcmp0 (node_path, target) == 0)
+    return TRUE;
+
+  return FALSE;
+}
+
 static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
 {
   const gchar *subsystems[] = { "gpio", NULL };
@@ -115,8 +169,7 @@ static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
       if (g_file_get_contents (path_file, &node_path, NULL, NULL))
         {
           g_strchomp (node_path);
-          if (g_str_has_suffix (node_path, "GPO1") ||
-              g_strcmp0 (node_path, target_acpi_path) == 0)
+          if (acpi_path_matches (node_path, target_acpi_path))
             {
               result = g_strdup (dev_file);
               break;
@@ -127,13 +180,13 @@ static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
   return result;
 }
 
-static void spi_xfer (const void *tx, void *rx, size_t len)
+static void spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
 {
   struct spi_ioc_transfer t = {
     .tx_buf = (uintptr_t) tx,
     .rx_buf = (uintptr_t) rx,
     .len = len,
-    .speed_hz = 1000000,
+    .speed_hz = speed_hz ? speed_hz : 1000000,
     .bits_per_word = 8,
   };
   int rc = ioctl (spi_fd, SPI_IOC_MESSAGE (1), &t);
@@ -141,63 +194,131 @@ static void spi_xfer (const void *tx, void *rx, size_t len)
     {
       fprintf (stderr, "SPI transfer failed: len=%zu, rc=%d (%s)\n", len, rc,
                rc < 0 ? strerror (errno) : "short transfer");
-      exit (1);
     }
 }
 
-static void read_status_and_id (const char *tag)
+static void set_spi_mode (uint8_t mode)
+{
+  require (ioctl (spi_fd, SPI_IOC_WR_MODE, &mode) == 0, "set SPI mode");
+}
+
+static gboolean probe_status_and_id (const char *tag, uint32_t speed_hz)
 {
   uint8_t tx_status[6] = { 0x10, 0xef, 0x20, 0x00, 0x00, 0x00 };
   uint8_t rx_status[6] = { 0 };
   uint8_t tx_id[6] = { 0x10, 0xef, 0x14, 0x00, 0x00, 0x00 };
   uint8_t rx_id[6] = { 0 };
 
-  spi_xfer (tx_status, rx_status, sizeof (tx_status));
-  spi_xfer (tx_id, rx_id, sizeof (tx_id));
+  spi_xfer (tx_status, rx_status, sizeof (tx_status), speed_hz);
+  spi_xfer (tx_id, rx_id, sizeof (tx_id), speed_hz);
 
-  printf ("  [%-18s] Status 0x20 RX: %02x %02x %02x %02x [%02x %02x]  |  ID 0x14 RX: %02x %02x %02x %02x [%02x %02x]\n",
+  gboolean has_nonzero = FALSE;
+  for (int i = 0; i < 6; i++)
+    {
+      if (rx_status[i] != 0x00 && rx_status[i] != 0xff)
+        has_nonzero = TRUE;
+      if (rx_id[i] != 0x00 && rx_id[i] != 0xff)
+        has_nonzero = TRUE;
+    }
+
+  const char *mark = "";
+  if (rx_id[4] == 0x40 && rx_id[5] == 0x50)
+    mark = " >>> [MATCH! FT9361 SENSOR ID 0x40 0x50 DETECTED!] <<<";
+  else if (rx_status[4] == 0xa5 && rx_status[5] == 0x5a)
+    mark = " >>> [MATCH! FT9361 MCU IDLE (a5 5a) DETECTED!] <<<";
+  else if (has_nonzero)
+    mark = " *** [NON-ZERO SPI DATA RECEIVED!] ***";
+
+  printf ("  [%-24s] Status 0x20: %02x %02x %02x %02x [%02x %02x]  |  ID 0x14: %02x %02x %02x %02x [%02x %02x]%s\n",
           tag,
           rx_status[0], rx_status[1], rx_status[2], rx_status[3], rx_status[4], rx_status[5],
-          rx_id[0], rx_id[1], rx_id[2], rx_id[3], rx_id[4], rx_id[5]);
+          rx_id[0], rx_id[1], rx_id[2], rx_id[3], rx_id[4], rx_id[5],
+          mark);
+
+  return has_nonzero || (rx_id[4] == 0x40 && rx_id[5] == 0x50);
 }
 
-static void set_raw_reset (int high)
+static void set_pin39 (int high)
 {
-  enum gpiod_line_value val = high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
-  require (gpiod_line_request_set_value (reset_request, MEDION_RESET_PIN, val) == 0,
-           "set reset line level");
+  cur_pin39_val = high;
+  if (req_gpo1)
+    {
+      enum gpiod_line_value val = high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
+      gpiod_line_request_set_value (req_gpo1, PIN_GPO1_RESET, val);
+    }
 }
 
-static void pulse_reset (int release_level, int assert_level, unsigned hold_ms)
+static void set_pin0 (int high)
 {
-  set_raw_reset (assert_level);
+  cur_pin0_val = high;
+  if (req_gpo2)
+    {
+      enum gpiod_line_value val = high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
+      gpiod_line_request_set_value (req_gpo2, PIN_GPO2_AUX, val);
+    }
+}
+
+static void pulse_pin39 (int current_level, unsigned hold_ms)
+{
+  set_pin39 (!current_level);
   g_usleep (hold_ms * 1000);
-  set_raw_reset (release_level);
-  cleanup_raw_level = release_level;
+  set_pin39 (current_level);
+}
+
+static void pulse_pin0 (int current_level, unsigned hold_ms)
+{
+  set_pin0 (!current_level);
+  g_usleep (hold_ms * 1000);
+  set_pin0 (current_level);
 }
 
 static void write_bootloader_reg (uint8_t reg, uint8_t val)
 {
   uint8_t tx[4] = { 0x09, 0xf6, reg, val };
-  spi_xfer (tx, NULL, sizeof (tx));
+  spi_xfer (tx, NULL, sizeof (tx), 1000000);
+}
+
+static void dump_system_gpio_info (void)
+{
+  printf ("\n=== System GPIO Information ===\n");
+  for (int i = 0; i < 8; i++)
+    {
+      g_autofree gchar *chip_dev = g_strdup_printf ("/dev/gpiochip%d", i);
+      if (!g_file_test (chip_dev, G_FILE_TEST_EXISTS))
+        continue;
+      struct gpiod_chip *c = gpiod_chip_open (chip_dev);
+      if (!c)
+        continue;
+      struct gpiod_chip_info *info = gpiod_chip_get_info (c);
+      if (info)
+        {
+          printf ("  %s: label='%s', num_lines=%zu\n", chip_dev,
+                  gpiod_chip_info_get_label (info),
+                  gpiod_chip_info_get_num_lines (info));
+          gpiod_chip_info_free (info);
+        }
+      gpiod_chip_close (c);
+    }
+  printf ("===============================\n\n");
 }
 
 int main (int argc, char **argv)
 {
   gboolean force = FALSE;
-  gboolean probe_polarities = FALSE;
+  gboolean probe_matrix = FALSE;
   gboolean vendor_recover = FALSE;
   gboolean a1_recover = FALSE;
   const char *firmware_file = NULL;
   const char *spi_dev = "/dev/spidev1.0";
-  int polarity_mode = 0; /* 0 = probe both, 1 = active-low (release 1), 2 = active-high (release 0) */
+  int override_p39 = 1;
+  int override_p0 = 1;
 
   for (int i = 1; i < argc; i++)
     {
       if (!strcmp (argv[i], "--force"))
         force = TRUE;
-      else if (!strcmp (argv[i], "--probe-polarities"))
-        probe_polarities = TRUE;
+      else if (!strcmp (argv[i], "--probe-matrix") || !strcmp (argv[i], "--probe-polarities"))
+        probe_matrix = TRUE;
       else if (!strcmp (argv[i], "--test-vendor-recovery") && i + 1 < argc)
         {
           vendor_recover = TRUE;
@@ -208,36 +329,38 @@ int main (int argc, char **argv)
           a1_recover = TRUE;
           firmware_file = argv[++i];
         }
-      else if (!strcmp (argv[i], "--active-low"))
-        polarity_mode = 1;
-      else if (!strcmp (argv[i], "--active-high"))
-        polarity_mode = 2;
       else if (!strcmp (argv[i], "--spi") && i + 1 < argc)
         spi_dev = argv[++i];
+      else if (!strcmp (argv[i], "--pin39") && i + 1 < argc)
+        override_p39 = atoi (argv[++i]);
+      else if (!strcmp (argv[i], "--pin0") && i + 1 < argc)
+        override_p0 = atoi (argv[++i]);
       else
         {
           printf ("Usage: %s [OPTIONS]\n", argv[0]);
           printf ("Options:\n");
-          printf ("  --probe-polarities           Test raw line levels (1 vs 0) and observe MISO response\n");
-          printf ("  --test-vendor-recovery <fw>  Run Windows sequence: 5 unlock writes + 10KB upload + wait 50ms (no reset)\n");
-          printf ("  --test-a1-recovery <fw>      Run A1 sequence: direct upload + dual reset pulses\n");
-          printf ("  --active-low                 Assume Active-Low (1 = normal/release, 0 = reset pulse)\n");
-          printf ("  --active-high                Assume Active-High (0 = normal/release, 1 = reset pulse)\n");
+          printf ("  --probe-matrix               Test all GPIO pin combinations (Pin39 and Pin0), SPI modes and speeds\n");
+          printf ("  --test-vendor-recovery <fw>  Run official Windows sequence (5 writes + 10KB upload + autonomous boot)\n");
+          printf ("  --test-a1-recovery <fw>      Run A1 sequence (upload + dual hardware reset pulses)\n");
+          printf ("  --pin39 <0|1>                Set GPO1 Pin 39 baseline level (default: 1)\n");
+          printf ("  --pin0 <0|1>                 Set GPO2 Pin 0 baseline level (default: 1)\n");
           printf ("  --spi <device>               SPI device path (default: /dev/spidev1.0)\n");
           printf ("  --force                      Bypass DMI verification\n");
           return 1;
         }
     }
 
-  if (!probe_polarities && !vendor_recover && !a1_recover)
-    probe_polarities = TRUE;
+  if (!probe_matrix && !vendor_recover && !a1_recover)
+    probe_matrix = TRUE;
 
   signal (SIGINT, sig_handler);
   signal (SIGTERM, sig_handler);
   atexit (cleanup);
 
-  printf ("=== Medion Akoya E3224 FTE3600 Hardware Diagnostic Tool ===\n");
+  printf ("=== Medion Akoya E3224 Comprehensive Hardware Probe & Diagnostic Tool ===\n");
   check_dmi (force);
+  awaken_spi_subsystem ();
+  dump_system_gpio_info ();
 
   /* Check SPI bufsiz */
   gchar *bufsiz_str = NULL;
@@ -252,97 +375,139 @@ int main (int argc, char **argv)
       g_free (bufsiz_str);
     }
 
-  /* Resolve GPO1 controller */
-  g_autofree gchar *gpiochip = find_gpiochip_for_acpi ("\\_SB_.GPO1");
-  if (!gpiochip)
-    {
-      fprintf (stderr, "ERROR: Could not find GPIO controller for \\_SB_.GPO1\n");
-      return 1;
-    }
-  printf ("Resolved Reset GPIO controller: %s (Pin 0x27 / 39)\n", gpiochip);
+  /* Resolve GPIO controllers */
+  g_autofree gchar *chip_gpo1 = find_gpiochip_for_acpi ("\\_SB_.GPO1");
+  g_autofree gchar *chip_gpo2 = find_gpiochip_for_acpi ("\\_SB_.GPO2");
+
+  printf ("Resolved GPO1 (Pin 39): %s\n", chip_gpo1 ? chip_gpo1 : "NOT FOUND (will fallback)");
+  printf ("Resolved GPO2 (Pin 0) : %s\n", chip_gpo2 ? chip_gpo2 : "NOT FOUND (will fallback)");
+
+  /* Fallback: if not found, use /dev/gpiochip0 and /dev/gpiochip2 */
+  if (!chip_gpo1 && g_file_test ("/dev/gpiochip0", G_FILE_TEST_EXISTS))
+    chip_gpo1 = g_strdup ("/dev/gpiochip0");
+  if (!chip_gpo2 && g_file_test ("/dev/gpiochip2", G_FILE_TEST_EXISTS))
+    chip_gpo2 = g_strdup ("/dev/gpiochip2");
 
   /* Open SPI device */
   spi_fd = open (spi_dev, O_RDWR | O_CLOEXEC);
   require (spi_fd >= 0, "open SPI device");
-  uint8_t mode = SPI_MODE_0, bits = 8, lsb = 0;
-  require (ioctl (spi_fd, SPI_IOC_WR_MODE, &mode) == 0, "set SPI mode 0");
+  set_spi_mode (SPI_MODE_0);
+  uint8_t bits = 8, lsb = 0;
   require (ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) == 0, "set SPI 8-bit");
   require (ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb) == 0, "set SPI MSB-first");
-  printf ("SPI device %s configured successfully (Mode 0, 8-bit, 1MHz)\n\n", spi_dev);
+  printf ("SPI device %s opened successfully\n\n", spi_dev);
 
-  /* Claim GPIO reset line */
-  struct gpiod_chip *chip = gpiod_chip_open (gpiochip);
-  require (chip != NULL, "open gpiochip");
-  struct gpiod_line_settings *settings = gpiod_line_settings_new ();
-  struct gpiod_line_config *config = gpiod_line_config_new ();
-  require (settings && config, "allocate GPIO settings");
-
-  gpiod_line_settings_set_direction (settings, GPIOD_LINE_DIRECTION_OUTPUT);
-  gpiod_line_settings_set_output_value (settings, GPIOD_LINE_VALUE_ACTIVE); /* default high */
-  unsigned offset = MEDION_RESET_PIN;
-  require (gpiod_line_config_add_line_settings (config, &offset, 1, settings) == 0, "configure pin 39");
-
-  reset_request = gpiod_chip_request_lines (chip, NULL, config);
-  require (reset_request != NULL, "request line 39 on GPO1");
-  gpiod_line_settings_free (settings);
-  gpiod_line_config_free (config);
-  gpiod_chip_close (chip);
-
-  /* --- MODE 1: PROBE POLARITIES --- */
-  if (probe_polarities)
+  /* Request GPO1 Pin 39 */
+  if (chip_gpo1)
     {
-      printf ("------------------------------------------------------------\n");
-      printf ("TEST 1: Hypothesis A (Active-Low: Release=HIGH, Reset=LOW)\n");
-      printf ("------------------------------------------------------------\n");
-      set_raw_reset (1);
-      g_usleep (20000);
-      read_status_and_id ("Raw High (Release)");
+      struct gpiod_chip *chip = gpiod_chip_open (chip_gpo1);
+      if (chip)
+        {
+          struct gpiod_line_settings *s = gpiod_line_settings_new ();
+          struct gpiod_line_config *c = gpiod_line_config_new ();
+          gpiod_line_settings_set_direction (s, GPIOD_LINE_DIRECTION_OUTPUT);
+          gpiod_line_settings_set_output_value (s, GPIOD_LINE_VALUE_ACTIVE);
+          unsigned off = PIN_GPO1_RESET;
+          if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)
+            req_gpo1 = gpiod_chip_request_lines (chip, NULL, c);
+          gpiod_line_settings_free (s);
+          gpiod_line_config_free (c);
+          gpiod_chip_close (chip);
+          if (req_gpo1)
+            printf ("Successfully claimed Pin 39 on %s\n", chip_gpo1);
+          else
+            fprintf (stderr, "WARNING: Could not claim Pin 39 on %s: %s\n", chip_gpo1, strerror (errno));
+        }
+    }
 
-      printf ("Pulsing reset low for 10ms...\n");
-      pulse_reset (1, 0, 10);
-      g_usleep (50000);
-      read_status_and_id ("After Pulse to Low");
+  /* Request GPO2 Pin 0 */
+  if (chip_gpo2)
+    {
+      struct gpiod_chip *chip = gpiod_chip_open (chip_gpo2);
+      if (chip)
+        {
+          struct gpiod_line_settings *s = gpiod_line_settings_new ();
+          struct gpiod_line_config *c = gpiod_line_config_new ();
+          gpiod_line_settings_set_direction (s, GPIOD_LINE_DIRECTION_OUTPUT);
+          gpiod_line_settings_set_output_value (s, GPIOD_LINE_VALUE_ACTIVE);
+          unsigned off = PIN_GPO2_AUX;
+          if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)
+            req_gpo2 = gpiod_chip_request_lines (chip, NULL, c);
+          gpiod_line_settings_free (s);
+          gpiod_line_config_free (c);
+          gpiod_chip_close (chip);
+          if (req_gpo2)
+            printf ("Successfully claimed Pin 0 on %s\n", chip_gpo2);
+          else
+            fprintf (stderr, "WARNING: Could not claim Pin 0 on %s: %s\n", chip_gpo2, strerror (errno));
+        }
+    }
 
-      printf ("\n------------------------------------------------------------\n");
-      printf ("TEST 2: Hypothesis B (Active-High: Release=LOW, Reset=HIGH)\n");
-      printf ("------------------------------------------------------------\n");
-      set_raw_reset (0);
-      g_usleep (20000);
-      read_status_and_id ("Raw Low (Release)");
+  /* --- MODE 1: MATRIX SWEEP --- */
+  if (probe_matrix)
+    {
+      printf ("\n============================================================\n");
+      printf ("PHASE 1: GPIO Matrix Level Sweep (Pin 39 & Pin 0)\n");
+      printf ("============================================================\n");
 
-      printf ("Pulsing reset high for 10ms...\n");
-      pulse_reset (0, 1, 10);
-      g_usleep (50000);
-      read_status_and_id ("After Pulse to High");
+      int states[4][2] = {
+        { 1, 1 },  /* Default active */
+        { 1, 0 },  /* Pin 39 high, Pin 0 low */
+        { 0, 1 },  /* Pin 39 low,  Pin 0 high */
+        { 0, 0 },  /* Both low */
+      };
 
-      /* Soft-reset test */
-      printf ("\n------------------------------------------------------------\n");
-      printf ("TEST 3: Soft Reset Commands (0x70) under both states\n");
-      printf ("------------------------------------------------------------\n");
-      set_raw_reset (1);
-      uint8_t cmd_soft = 0x70;
-      spi_xfer (&cmd_soft, NULL, 1);
-      g_usleep (5000);
-      spi_xfer (&cmd_soft, NULL, 1);
-      g_usleep (5000);
-      read_status_and_id ("Soft-reset (Raw=1)");
+      for (int s = 0; s < 4; s++)
+        {
+          int p39 = states[s][0];
+          int p0 = states[s][1];
+          printf ("\n------------------------------------------------------------\n");
+          printf ("State [%d/4]: Pin 39 = %d, Pin 0 = %d\n", s + 1, p39, p0);
+          printf ("------------------------------------------------------------\n");
 
-      set_raw_reset (0);
-      spi_xfer (&cmd_soft, NULL, 1);
-      g_usleep (5000);
-      spi_xfer (&cmd_soft, NULL, 1);
-      g_usleep (5000);
-      read_status_and_id ("Soft-reset (Raw=0)");
+          set_pin39 (p39);
+          set_pin0 (p0);
+          g_usleep (30000); /* 30ms power/settle */
+
+          set_spi_mode (SPI_MODE_0);
+          probe_status_and_id ("Mode 0 (1MHz)", 1000000);
+
+          set_spi_mode (SPI_MODE_3);
+          probe_status_and_id ("Mode 3 (1MHz)", 1000000);
+
+          set_spi_mode (SPI_MODE_0);
+          probe_status_and_id ("Mode 0 (500kHz)", 500000);
+
+          /* Test pulse on Pin 39 */
+          pulse_pin39 (p39, 10);
+          g_usleep (20000);
+          probe_status_and_id ("After Pulse Pin 39", 1000000);
+
+          /* Test pulse on Pin 0 */
+          pulse_pin0 (p0, 10);
+          g_usleep (20000);
+          probe_status_and_id ("After Pulse Pin 0", 1000000);
+
+          /* Soft-reset commands */
+          uint8_t soft = 0x70;
+          spi_xfer (&soft, NULL, 1, 1000000);
+          g_usleep (5000);
+          spi_xfer (&soft, NULL, 1, 1000000);
+          g_usleep (5000);
+          probe_status_and_id ("After Soft Reset (0x70)", 1000000);
+        }
     }
 
   /* --- MODE 2: VENDOR RECOVERY SEQUENCE --- */
   if (vendor_recover)
     {
-      int release_lvl = (polarity_mode == 2) ? 0 : 1;
-      int assert_lvl = (polarity_mode == 2) ? 1 : 0;
       printf ("\n============================================================\n");
-      printf ("Running Vendor Recovery (Release=%d, Assert=%d)\n", release_lvl, assert_lvl);
+      printf ("Running Vendor Recovery (Baseline Pin39=%d, Pin0=%d)\n", override_p39, override_p0);
       printf ("============================================================\n");
+
+      set_pin39 (override_p39);
+      set_pin0 (override_p0);
+      g_usleep (30000);
 
       g_autofree gchar *fw_buf = NULL;
       gsize fw_len = 0;
@@ -350,13 +515,13 @@ int main (int argc, char **argv)
       require (fw_len == FW_SIZE, "verify firmware size (10396 bytes)");
 
       /* 1. Pulse reset to enter bootloader */
-      pulse_reset (release_lvl, assert_lvl, 10);
+      pulse_pin39 (override_p39, 10);
       g_usleep (20000);
-      read_status_and_id ("Pre-Sync Status");
+      probe_status_and_id ("Pre-Sync Status", 1000000);
 
       /* 2. Sync */
       uint8_t sync[2] = { 0x55, 0xaa };
-      spi_xfer (sync, NULL, sizeof (sync));
+      spi_xfer (sync, NULL, sizeof (sync), 1000000);
       printf ("Sent Bootloader Sync (0x55 0xaa)\n");
 
       /* 3. Five vendor register writes */
@@ -379,7 +544,7 @@ int main (int argc, char **argv)
       packet[5] = FW_SIZE & 0xff;
       memcpy (packet + 6, fw_buf, FW_SIZE);
       packet[6 + FW_SIZE] = 0x00;
-      spi_xfer (packet, NULL, FW_SIZE + 7);
+      spi_xfer (packet, NULL, FW_SIZE + 7, 1000000);
       g_free (packet);
 
       /* 5. Wait 50ms without hardware reset */
@@ -392,7 +557,7 @@ int main (int argc, char **argv)
         {
           uint8_t tx_poll[6] = { 0x10, 0xef, 0x20, 0, 0, 0 };
           uint8_t rx_poll[6] = { 0 };
-          spi_xfer (tx_poll, rx_poll, sizeof (tx_poll));
+          spi_xfer (tx_poll, rx_poll, sizeof (tx_poll), 1000000);
           printf ("  Poll #%02u: Status = %02x %02x\n", attempt, rx_poll[4], rx_poll[5]);
           if (rx_poll[4] == 0xa5 && rx_poll[5] == 0x5a)
             {
@@ -411,21 +576,23 @@ int main (int argc, char **argv)
   /* --- MODE 3: A1-STYLE RECOVERY --- */
   if (a1_recover)
     {
-      int release_lvl = (polarity_mode == 2) ? 0 : 1;
-      int assert_lvl = (polarity_mode == 2) ? 1 : 0;
       printf ("\n============================================================\n");
-      printf ("Running A1-style Recovery (Release=%d, Assert=%d)\n", release_lvl, assert_lvl);
+      printf ("Running A1-style Recovery (Baseline Pin39=%d, Pin0=%d)\n", override_p39, override_p0);
       printf ("============================================================\n");
+
+      set_pin39 (override_p39);
+      set_pin0 (override_p0);
+      g_usleep (30000);
 
       g_autofree gchar *fw_buf = NULL;
       gsize fw_len = 0;
       require (g_file_get_contents (firmware_file, &fw_buf, &fw_len, NULL), "read firmware");
 
-      pulse_reset (release_lvl, assert_lvl, 10);
+      pulse_pin39 (override_p39, 10);
       g_usleep (20000);
 
       uint8_t sync[2] = { 0x55, 0xaa };
-      spi_xfer (sync, NULL, sizeof (sync));
+      spi_xfer (sync, NULL, sizeof (sync), 1000000);
 
       uint8_t *packet = g_malloc (FW_SIZE + 7);
       packet[0] = 0x05;
@@ -436,19 +603,19 @@ int main (int argc, char **argv)
       packet[5] = FW_SIZE & 0xff;
       memcpy (packet + 6, fw_buf, FW_SIZE);
       packet[6 + FW_SIZE] = 0x00;
-      spi_xfer (packet, NULL, FW_SIZE + 7);
+      spi_xfer (packet, NULL, FW_SIZE + 7, 1000000);
       g_free (packet);
 
       printf ("Firmware uploaded. Executing A1 dual reset pulses...\n");
-      pulse_reset (release_lvl, assert_lvl, 5);
+      pulse_pin39 (override_p39, 5);
       g_usleep (10000);
-      pulse_reset (release_lvl, assert_lvl, 5);
+      pulse_pin39 (override_p39, 5);
       g_usleep (160000);
 
       uint8_t soft = 0x70;
-      spi_xfer (&soft, NULL, 1);
+      spi_xfer (&soft, NULL, 1, 1000000);
       g_usleep (5000);
-      spi_xfer (&soft, NULL, 1);
+      spi_xfer (&soft, NULL, 1, 1000000);
       g_usleep (5000);
 
       gboolean success = FALSE;
@@ -456,7 +623,7 @@ int main (int argc, char **argv)
         {
           uint8_t tx_poll[6] = { 0x10, 0xef, 0x20, 0, 0, 0 };
           uint8_t rx_poll[6] = { 0 };
-          spi_xfer (tx_poll, rx_poll, sizeof (tx_poll));
+          spi_xfer (tx_poll, rx_poll, sizeof (tx_poll), 1000000);
           printf ("  Poll #%02u: Status = %02x %02x\n", attempt, rx_poll[4], rx_poll[5]);
           if (rx_poll[4] == 0xa5 && rx_poll[5] == 0x5a)
             {
@@ -472,6 +639,6 @@ int main (int argc, char **argv)
         printf ("\n>>> FAILED: FT9361 MCU did not return idle under A1 Recovery <<<\n");
     }
 
-  printf ("\nDiagnostic test complete. GPIO line released safely.\n");
+  printf ("\nDiagnostic test complete. GPIO lines released.\n");
   return 0;
 }
