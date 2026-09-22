@@ -55,3 +55,27 @@ error differently in the virtual environment (by means of
 
 
 [umockdev]: https://github.com/martinpitt/umockdev
+
+FTE3600 lifecycle tests
+----------------------
+
+`test-fte3600-lifecycle` exercises the production FTE3600 driver through the
+public asynchronous device API (using its synchronous convenience wrappers).
+Link-time wrappers replace SPI ioctls, GPIO requests/events and platform
+discovery; the real SPI worker threads, state machines and cancellation paths
+are retained. The image payload is an arithmetic pattern, not biometric data.
+No sensor, root access or firmware file is required.
+
+The tests cover capture and repeated open/close, cancellation during IRQ wait
+and image transfer, transfer and cleanup failures, and release/recovery after
+SPI configuration, GPIO request and sensor-ID errors. Personal-auth builds also
+test enrollment cancellation. Each scenario checks that descriptors and GPIO
+requests are released; interrupted capture is followed by another capture on
+the same device to detect stale state.
+
+This branch does not include the downstream installation/check scripts.
+Configure separate build directories with `-Ddrivers=fte3600` and
+`-Dfte3600_personal_auth=false` / `true`, then run
+`meson test -C BUILD --suite=unit-tests --print-errorlogs` for each.
+To select only the lifecycle test, use its registered name:
+`meson test -C BUILD fte3600-lifecycle --print-errorlogs`.
