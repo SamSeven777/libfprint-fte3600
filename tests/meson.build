@@ -412,6 +412,21 @@ if 'fte3600' in drivers
         env: envs,
     )
 
+    fte3600_ipa_test = executable('test-fte3600-ipa',
+        sources: [
+            'test-fte3600-ipa.c',
+            '../libfprint/drivers/fte3600-ipa.c',
+        ],
+        dependencies: [glib_dep, mathlib_dep],
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-ipa',
+        fte3600_ipa_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
 endif
 
 foreach test_name: unit_tests
