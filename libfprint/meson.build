@@ -125,6 +125,7 @@ driver_sources = {
     'fte3600' : files(
         'drivers/fte3600.c',
         'drivers/fte3600-brisk.c',
+        'drivers/fte3600-ipa.c',
         'drivers/fte3600-template.c',
     ),
     'nb1010' : files('drivers/nb1010.c'),
