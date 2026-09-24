@@ -17,6 +17,15 @@
 #endif
 
 static void
+assert_policy_result (const Fte3600IpaMatchResult *result, gboolean expected)
+{
+  g_assert_cmpint (result->diagnostic_policy_passed, ==, expected);
+  g_assert_cmpint (fpi_fte3600_ipa_result_meets_policy (result), ==, expected);
+  g_assert_cmpint (result->authentication_accepted, ==,
+                   expected && FTE3600_ENABLE_IPA_AUTH);
+}
+
+static void
 make_fingerprint_pattern (guint8 *image, guint seed_variant)
 {
   static const struct
@@ -127,7 +136,7 @@ static void
 test_ipa_parameter_validation (void)
 {
   guint8 image[FTE3600_IPA_IMAGE_SIZE];
-  Fte3600IpaFeatureSet features;
+  Fte3600IpaFeatureSet features = { 0 };
   Fte3600IpaMatchResult result;
 
   memset (image, 128, sizeof (image));
@@ -202,7 +211,7 @@ test_ipa_self_match (void)
   g_assert_cmpuint (result.n_matched_pairs, ==, feat.n_minutiae);
   g_assert_cmpuint (result.n_supported_inliers, >=, FTE3600_IPA_POLICY_MIN_INLIERS);
   g_assert_cmpfloat (result.consensus_score, >=, FTE3600_IPA_POLICY_MIN_SCORE);
-  g_assert_true (result.authentication_accepted);
+  assert_policy_result (&result, TRUE);
   g_assert_true (fpi_fte3600_ipa_result_meets_policy (&result));
 }
 
@@ -231,7 +240,7 @@ test_ipa_translation_invariance (void)
 
   g_assert_cmpuint (result.n_supported_inliers, >=, FTE3600_IPA_POLICY_MIN_INLIERS);
   g_assert_cmpfloat (result.consensus_score, >=, FTE3600_IPA_POLICY_MIN_SCORE);
-  g_assert_true (result.authentication_accepted);
+  assert_policy_result (&result, TRUE);
 }
 
 static void
@@ -270,7 +279,7 @@ test_ipa_rotation_invariance (void)
 
       g_assert_cmpuint (result.n_supported_inliers, >=, FTE3600_IPA_POLICY_MIN_INLIERS);
       g_assert_cmpfloat (result.consensus_score, >=, FTE3600_IPA_POLICY_MIN_SCORE);
-      g_assert_true (result.authentication_accepted);
+      assert_policy_result (&result, TRUE);
     }
 }
 
@@ -297,8 +306,8 @@ test_ipa_impostor_rejection (void)
                   result.n_matched_pairs, result.n_supported_inliers,
                   result.consensus_score, result.authentication_accepted);
 
-  /* Impostor must be rejected with 0% FAR */
-  g_assert_false (result.authentication_accepted);
+  /* One synthetic nonmatching pair is a regression check, not a FAR study. */
+  assert_policy_result (&result, FALSE);
   g_assert_false (fpi_fte3600_ipa_result_meets_policy (&result));
 }
 
@@ -334,10 +343,128 @@ test_ipa_execution_speed (void)
   g_test_message ("Performance: 2D-IPA extract = %.2f us (%.3f ms), match = %.2f us (%.3f ms)",
                   extract_us, extract_us / 1000.0, match_us, match_us / 1000.0);
 
-  /* Extraction must be well below 5 ms (benchmark was ~0.09 ms) */
-  g_assert_cmpfloat (extract_us, <, 5000.0);
-  /* Matching must be well below 1 ms (benchmark was ~0.10 ms) */
-  g_assert_cmpfloat (match_us, <, 1000.0);
+  /* Timing is informational: slow, instrumented and loaded systems must
+   * still be able to run correctness tests. */
+}
+
+static void
+test_projection_orthonormal (void)
+{
+  for (guint row = 0; row < FTE3600_IPA_DESC_DIM; row++)
+    for (guint other = 0; other < FTE3600_IPA_DESC_DIM; other++)
+      {
+        gdouble dot = 0.0;
+        for (guint col = 0; col < FTE3600_IPA_DESC_DIM; col++)
+          dot += fpi_fte3600_ipa_projection_coefficient (row, col) *
+                 fpi_fte3600_ipa_projection_coefficient (other, col);
+        g_assert_cmpfloat_with_epsilon (dot, row == other ? 1.0 : 0.0, 0.00001);
+      }
+}
+
+static void
+test_rigid_feature_rotation (void)
+{
+  static const gfloat coordinates[6][2] = {
+    { 21, 30 }, { 32, 27 }, { 42, 33 }, { 22, 46 }, { 32, 52 }, { 43, 45 }
+  };
+  static const gfloat angles[] = { 0.6f, -0.75f, 2.0f, -2.2f };
+  Fte3600IpaFeatureSet query = { 0 };
+
+  query.extractor_schema_version = FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION;
+  query.n_minutiae = G_N_ELEMENTS (coordinates);
+  for (guint i = 0; i < query.n_minutiae; i++)
+    {
+      query.minutiae[i].x = coordinates[i][0];
+      query.minutiae[i].y = coordinates[i][1];
+      query.minutiae[i].theta = 0.1f * i;
+      query.minutiae[i].desc[i] = 1.0f;
+    }
+  g_assert_true (fpi_fte3600_ipa_validate_feature_set (&query));
+  for (guint a = 0; a < G_N_ELEMENTS (angles); a++)
+    {
+      Fte3600IpaFeatureSet reference = query;
+      const gfloat angle = angles[a];
+      Fte3600IpaMatchResult result;
+
+      for (guint i = 0; i < query.n_minutiae; i++)
+        {
+          const gfloat x = query.minutiae[i].x - 32.0f;
+          const gfloat y = query.minutiae[i].y - 40.0f;
+          reference.minutiae[i].x = cosf (angle) * x - sinf (angle) * y + 32.0f;
+          reference.minutiae[i].y = sinf (angle) * x + cosf (angle) * y + 40.0f;
+          reference.minutiae[i].theta = query.minutiae[i].theta + angle;
+          if (i & 1)
+            reference.minutiae[i].theta += (gfloat) M_PI;
+          reference.minutiae[i].theta = atan2f (sinf (reference.minutiae[i].theta),
+                                                 cosf (reference.minutiae[i].theta));
+        }
+      g_assert_cmpint (fpi_fte3600_ipa_match (&query, &reference, &result), ==, FTE3600_IPA_OK);
+      g_assert_cmpuint (result.n_supported_inliers, ==, query.n_minutiae);
+      assert_policy_result (&result, TRUE);
+      g_assert_cmpint (fpi_fte3600_ipa_match (&reference, &query, &result), ==, FTE3600_IPA_OK);
+      assert_policy_result (&result, TRUE);
+    }
+}
+
+typedef struct
+{
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet expected;
+} ExtractThreadData;
+
+static gpointer
+extract_thread (gpointer user_data)
+{
+  const ExtractThreadData *data = user_data;
+
+  for (guint i = 0; i < 30; i++)
+    {
+      Fte3600IpaFeatureSet actual;
+      g_assert_cmpint (fpi_fte3600_ipa_extract (data->image, sizeof (data->image), &actual),
+                       ==, FTE3600_IPA_OK);
+      g_assert_cmpmem (&actual, sizeof (actual), &data->expected, sizeof (data->expected));
+    }
+  return NULL;
+}
+
+static void
+test_parallel_extract (void)
+{
+  ExtractThreadData first, second;
+
+  make_fingerprint_pattern (first.image, 0);
+  make_fingerprint_pattern (second.image, 1);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (first.image, sizeof (first.image), &first.expected),
+                   ==, FTE3600_IPA_OK);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (second.image, sizeof (second.image), &second.expected),
+                   ==, FTE3600_IPA_OK);
+  GThread *a = g_thread_new ("ipa-first", extract_thread, &first);
+  GThread *b = g_thread_new ("ipa-second", extract_thread, &second);
+  g_thread_join (a);
+  g_thread_join (b);
+}
+
+static void
+test_feature_validation (void)
+{
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet features;
+  Fte3600IpaMatchResult result;
+
+  make_fingerprint_pattern (image, 0);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &features), ==, FTE3600_IPA_OK);
+  g_assert_true (fpi_fte3600_ipa_validate_feature_set (&features));
+  Fte3600IpaFeatureSet invalid = features;
+  invalid.n_minutiae = FTE3600_IPA_MAX_MINUTIAE + 1;
+  g_assert_false (fpi_fte3600_ipa_validate_feature_set (&invalid));
+  g_assert_cmpint (fpi_fte3600_ipa_match (&invalid, &features, &result), ==, FTE3600_IPA_ERR_PARAM);
+  g_assert_false (result.authentication_accepted);
+  invalid = features;
+  invalid.minutiae[0].x = -1.0f;
+  g_assert_false (fpi_fte3600_ipa_validate_feature_set (&invalid));
+  invalid = features;
+  invalid.extractor_schema_version++;
+  g_assert_false (fpi_fte3600_ipa_validate_feature_set (&invalid));
 }
 
 int
@@ -353,6 +480,10 @@ main (int   argc,
   g_test_add_func ("/fte3600-ipa/rotation-invariance", test_ipa_rotation_invariance);
   g_test_add_func ("/fte3600-ipa/impostor-rejection", test_ipa_impostor_rejection);
   g_test_add_func ("/fte3600-ipa/execution-speed", test_ipa_execution_speed);
+  g_test_add_func ("/fte3600-ipa/projection-orthonormal", test_projection_orthonormal);
+  g_test_add_func ("/fte3600-ipa/rigid-feature-rotation", test_rigid_feature_rotation);
+  g_test_add_func ("/fte3600-ipa/parallel-extract", test_parallel_extract);
+  g_test_add_func ("/fte3600-ipa/feature-validation", test_feature_validation);
 
   return g_test_run ();
 }

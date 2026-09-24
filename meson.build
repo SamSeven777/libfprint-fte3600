@@ -225,6 +225,12 @@ if get_option('fte3600_personal_auth')
     endif
     fte3600_personal_auth_cflags += '-DFTE3600_ENABLE_PERSONAL_AUTH=1'
 endif
+if get_option('fte3600_ipa_auth')
+    if not get_option('fte3600_personal_auth')
+        error('fte3600_ipa_auth requires fte3600_personal_auth=true')
+    endif
+    fte3600_personal_auth_cflags += '-DFTE3600_ENABLE_IPA_AUTH=1'
+endif
 
 if drivers == all_drivers or drivers == default_drivers
     default_drivers_are_enabled = true
@@ -383,4 +389,5 @@ pkgconfig.generate(
 summary({
     'Drivers': drivers,
     'FTE3600 personal authentication': get_option('fte3600_personal_auth'),
+    'FTE3600 experimental IPA authentication': get_option('fte3600_ipa_auth'),
 }, section: 'Drivers')

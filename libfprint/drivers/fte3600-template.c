@@ -57,6 +57,43 @@ template_secure_clear (gpointer data,
     *bytes++ = 0;
 }
 
+static void
+canonical_subtemplate_clear (CanonicalSubtemplate *sample)
+{
+  template_secure_clear (sample, sizeof (*sample));
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CanonicalSubtemplate, canonical_subtemplate_clear)
+
+typedef CanonicalSubtemplate CanonicalGallery[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+
+static void
+canonical_gallery_clear (CanonicalGallery *gallery)
+{
+  template_secure_clear (gallery, sizeof (*gallery));
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CanonicalGallery, canonical_gallery_clear)
+
+typedef struct
+{
+  gsize size;
+  guint8 data[];
+} TemplateWireBuffer;
+
+static void
+template_wire_buffer_free (gpointer pointer)
+{
+  TemplateWireBuffer *buffer = pointer;
+
+  if (buffer == NULL)
+    return;
+  template_secure_clear (buffer->data, buffer->size);
+  g_free (buffer);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (TemplateWireBuffer, template_wire_buffer_free)
+
 G_STATIC_ASSERT (sizeof (gfloat) == 4);
 G_STATIC_ASSERT (FLT_RADIX == 2);
 G_STATIC_ASSERT (FLT_MANT_DIG == 24);
@@ -87,6 +124,29 @@ G_STATIC_ASSERT (FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE ==
                  (FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE +
                   FTE3600_IPA_MAX_MINUTIAE *
                   FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE));
+G_STATIC_ASSERT (FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE ==
+                 FTE3600_TEMPLATE_V2_CURRENT_MAX_WIRE_SIZE +
+                 FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE - FTE3600_TEMPLATE_WIRE_HEADER_SIZE);
+
+gboolean
+fpi_fte3600_engine_mode_parse (const gchar *value,
+                              Fte3600EngineMode *mode)
+{
+  if (mode == NULL)
+    return FALSE;
+  if (value == NULL)
+    *mode = FTE3600_ENABLE_IPA_AUTH ? FTE3600_ENGINE_MODE_DUAL_FUSION :
+                                   FTE3600_ENGINE_MODE_BRISK_ONLY;
+  else if (g_ascii_strcasecmp (value, "brisk") == 0)
+    *mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
+  else if (g_ascii_strcasecmp (value, "ipa") == 0)
+    *mode = FTE3600_ENGINE_MODE_IPA_ONLY;
+  else if (g_ascii_strcasecmp (value, "dual") == 0)
+    *mode = FTE3600_ENGINE_MODE_DUAL_FUSION;
+  else
+    return FALSE;
+  return TRUE;
+}
 
 static gboolean
 template_rounding_guard_enter (TemplateRoundingGuard *guard)
@@ -317,6 +377,49 @@ match_is_better (const Fte3600BriskMatchResult *candidate,
   return candidate->rms_error < current->rms_error;
 }
 
+static gint
+ipa_point_compare (const void *first, const void *second)
+{
+  const Fte3600IpaMinutia *a = first;
+  const Fte3600IpaMinutia *b = second;
+
+  if (a->x != b->x)
+    return a->x < b->x ? -1 : 1;
+  if (a->y != b->y)
+    return a->y < b->y ? -1 : 1;
+  if (a->theta != b->theta)
+    return a->theta < b->theta ? -1 : 1;
+  for (guint d = 0; d < FTE3600_IPA_DESC_DIM; d++)
+    if (a->desc[d] != b->desc[d])
+      return a->desc[d] < b->desc[d] ? -1 : 1;
+  return 0;
+}
+
+static gboolean
+canonicalize_ipa_feature_set (const Fte3600IpaFeatureSet *source,
+                              Fte3600IpaFeatureSet *canonical)
+{
+  memset (canonical, 0, sizeof (*canonical));
+  if (!fpi_fte3600_ipa_validate_feature_set (source) || source->n_minutiae < 3)
+    return FALSE;
+  *canonical = *source;
+  for (guint i = 0; i < canonical->n_minutiae; i++)
+    {
+      Fte3600IpaMinutia *point = &canonical->minutiae[i];
+
+      if (point->x == 0.0f) point->x = 0.0f;
+      if (point->y == 0.0f) point->y = 0.0f;
+      if (point->theta == 0.0f) point->theta = 0.0f;
+      if (point->theta == FTE3600_IPA_ORIENTATION_LIMIT)
+        point->theta = -FTE3600_IPA_ORIENTATION_LIMIT;
+      for (guint d = 0; d < FTE3600_IPA_DESC_DIM; d++)
+        if (point->desc[d] == 0.0f) point->desc[d] = 0.0f;
+    }
+  qsort (canonical->minutiae, canonical->n_minutiae,
+         sizeof (canonical->minutiae[0]), ipa_point_compare);
+  return TRUE;
+}
+
 static Fte3600TemplateStatus
 validation_to_status (FeatureSetValidation validation)
 {
@@ -372,7 +475,7 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
                                         Fte3600BriskMatchResult      *nearest_match)
 {
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
-  CanonicalSubtemplate candidate;
+  g_auto(CanonicalSubtemplate) candidate = { 0 };
   FeatureSetValidation validation;
   gboolean have_nearest = FALSE;
   gboolean duplicate = FALSE;
@@ -393,9 +496,10 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
   if (templ->n_subtemplates > FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
-  if (ipa_features != NULL && ipa_features->n_minutiae >= 3)
+  if (ipa_features != NULL)
     {
-      candidate.ipa_features = *ipa_features;
+      if (!canonicalize_ipa_feature_set (ipa_features, &candidate.ipa_features))
+        return FTE3600_TEMPLATE_INVALID_WIRE;
       candidate.has_ipa = TRUE;
     }
 
@@ -467,7 +571,8 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
                              GBytes               **wire)
 {
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
-  CanonicalSubtemplate sorted[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  g_auto(CanonicalGallery) sorted = { 0 };
+  g_autoptr(TemplateWireBuffer) buffer = NULL;
   gsize total_size = FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   guint8 *data;
   gsize offset;
@@ -490,34 +595,44 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
         return validation_to_status (validation);
 
       sorted[i].has_ipa = templ->subtemplates[i].has_ipa;
-      sorted[i].ipa_features = templ->subtemplates[i].ipa_features;
       if (sorted[i].has_ipa)
-        has_any_ipa = TRUE;
+        {
+          if (!canonicalize_ipa_feature_set (&templ->subtemplates[i].ipa_features,
+                                             &sorted[i].ipa_features))
+            return FTE3600_TEMPLATE_INVALID_WIRE;
+          has_any_ipa = TRUE;
+        }
 
       total_size += TEMPLATE_SUBTEMPLATE_HEADER_SIZE +
                     sorted[i].features.n_features *
                     FTE3600_TEMPLATE_FEATURE_RECORD_SIZE;
       if (sorted[i].has_ipa)
-        total_size += FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE +
-                      sorted[i].ipa_features.n_minutiae *
+        total_size += sorted[i].ipa_features.n_minutiae *
                       FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE;
     }
+  if (has_any_ipa)
+    total_size += FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE - FTE3600_TEMPLATE_WIRE_HEADER_SIZE +
+                  FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES * FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE;
   qsort (sorted, G_N_ELEMENTS (sorted), sizeof (sorted[0]),
          subtemplate_compare);
   for (guint i = 1; i < G_N_ELEMENTS (sorted); i++)
     if (subtemplate_compare (&sorted[i - 1], &sorted[i]) == 0)
       return FTE3600_TEMPLATE_RETRY_DUPLICATE;
 
-  gsize max_allowed = has_any_ipa ? FTE3600_TEMPLATE_V2_CURRENT_MAX_WIRE_SIZE :
+  gsize max_allowed = has_any_ipa ? FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE :
                                     FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
   if (total_size > max_allowed || total_size > G_MAXUINT32)
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
-  data = g_malloc0 (total_size);
+  buffer = g_malloc0 (sizeof (*buffer) + total_size);
+  buffer->size = total_size;
+  data = buffer->data;
   memcpy (data, template_magic, sizeof (template_magic));
-  put_uint16_le (&data[8], has_any_ipa ? FTE3600_TEMPLATE_WIRE_VERSION_V2 :
+  put_uint16_le (&data[8], has_any_ipa ? FTE3600_TEMPLATE_WIRE_VERSION_V3 :
                                          FTE3600_TEMPLATE_WIRE_VERSION_V1);
-  put_uint16_le (&data[10], FTE3600_TEMPLATE_WIRE_HEADER_SIZE);
+  const gsize header_size = has_any_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
+                                       FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+  put_uint16_le (&data[10], header_size);
   put_uint32_le (&data[12], total_size);
   put_uint16_le (&data[16], TEMPLATE_MODEL_ID);
   put_uint16_le (&data[18], FTE3600_BRISK_WIDTH);
@@ -528,9 +643,15 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
   put_uint16_le (&data[28], FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION);
   put_uint16_le (&data[30], FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   if (has_any_ipa)
-    put_uint32_le (&data[32], 0x01); /* Dual-Engine IPA flag */
+    {
+      put_uint32_le (&data[32], 0x01);
+      put_uint16_le (&data[40], FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION);
+      put_uint16_le (&data[42], FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION);
+      put_uint16_le (&data[44], FTE3600_IPA_AUTHENTICATION_POLICY_VERSION);
+      put_uint16_le (&data[46], FTE3600_TEMPLATE_FUSION_POLICY_VERSION);
+    }
 
-  offset = FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+  offset = header_size;
   for (guint sample = 0; sample < G_N_ELEMENTS (sorted); sample++)
     {
       const Fte3600BriskFeatureSet *features = &sorted[sample].features;
@@ -538,6 +659,8 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
                                   features->n_features *
                                   FTE3600_TEMPLATE_FEATURE_RECORD_SIZE;
 
+      if (offset > total_size || record_size > total_size - offset)
+        return FTE3600_TEMPLATE_INVALID_WIRE;
       put_uint32_le (&data[offset], record_size);
       put_uint16_le (&data[offset + 4], features->n_features);
       put_uint16_le (&data[offset + 6], sorted[sample].physical_count);
@@ -559,6 +682,8 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
           guint n_pts = sorted[sample].has_ipa ? sorted[sample].ipa_features.n_minutiae : 0;
           guint32 ipa_rec_size = FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE +
                                  n_pts * FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE;
+          if (offset > total_size || ipa_rec_size > total_size - offset)
+            return FTE3600_TEMPLATE_INVALID_WIRE;
           put_uint32_le (&data[offset], ipa_rec_size);
           put_uint16_le (&data[offset + 4], (guint16) n_pts);
           put_uint16_le (&data[offset + 6], 0); /* reserved */
@@ -578,8 +703,11 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
             }
         }
     }
-  g_assert (offset == total_size);
-  *wire = g_bytes_new_take (data, total_size);
+  if (offset != total_size)
+    return FTE3600_TEMPLATE_INVALID_WIRE;
+  *wire = g_bytes_new_with_free_func (data, total_size,
+                                     template_wire_buffer_free,
+                                     g_steal_pointer (&buffer));
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -588,45 +716,41 @@ validate_header (const guint8 *data,
                  gsize         size)
 {
   if (size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-      size > FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE ||
+      size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE ||
       memcmp (data, template_magic, sizeof (template_magic)) != 0)
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
-  guint16 wire_ver = get_uint16_le (&data[8]);
+  const guint16 wire_ver = get_uint16_le (&data[8]);
   if (wire_ver != FTE3600_TEMPLATE_WIRE_VERSION_V1 &&
-      wire_ver != FTE3600_TEMPLATE_WIRE_VERSION_V2)
+      wire_ver != FTE3600_TEMPLATE_WIRE_VERSION_V3)
     return FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA;
 
-  guint32 flags = get_uint32_le (&data[32]);
-  if (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V1 && flags != 0)
-    return FTE3600_TEMPLATE_INVALID_WIRE;
-  if (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V2 && (flags & ~0x01u) != 0)
-    return FTE3600_TEMPLATE_INVALID_WIRE;
-  if (get_uint32_le (&data[36]) != 0)
-    return FTE3600_TEMPLATE_INVALID_WIRE;
-
-  if (get_uint16_le (&data[10]) != FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
+  const gboolean has_ipa = wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V3;
+  const gsize header_size = has_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
+                                     FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+  const gsize max_size = has_ipa ? FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE :
+                                  FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
+  if (size < header_size || size > max_size ||
+      get_uint16_le (&data[10]) != header_size ||
       get_uint32_le (&data[12]) != size ||
       get_uint16_le (&data[16]) != TEMPLATE_MODEL_ID ||
       get_uint16_le (&data[18]) != FTE3600_BRISK_WIDTH ||
       get_uint16_le (&data[20]) != FTE3600_BRISK_HEIGHT ||
       get_uint16_le (&data[22]) != FTE3600_TEMPLATE_FEATURE_RECORD_SIZE ||
-      get_uint16_le (&data[30]) != FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
+      get_uint16_le (&data[30]) != FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ||
+      get_uint32_le (&data[32]) != (has_ipa ? 1u : 0u) ||
+      get_uint32_le (&data[36]) != 0)
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  if (get_uint16_le (&data[24]) !=
-      FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION)
+  if (get_uint16_le (&data[24]) != FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION ||
+      (has_ipa && get_uint16_le (&data[40]) != FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION))
     return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
-  if (get_uint16_le (&data[26]) !=
-      FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION ||
-      get_uint16_le (&data[28]) !=
-      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION)
+  if (get_uint16_le (&data[26]) != FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION ||
+      get_uint16_le (&data[28]) != FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ||
+      (has_ipa &&
+       (get_uint16_le (&data[42]) != FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION ||
+        get_uint16_le (&data[44]) != FTE3600_IPA_AUTHENTICATION_POLICY_VERSION ||
+        get_uint16_le (&data[46]) != FTE3600_TEMPLATE_FUSION_POLICY_VERSION)))
     return FTE3600_TEMPLATE_UNSUPPORTED_POLICY;
-
-  gsize max_allowed = (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V2) ?
-                      FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE :
-                      FTE3600_TEMPLATE_MAX_WIRE_SIZE;
-  if (size > max_allowed)
-    return FTE3600_TEMPLATE_INVALID_WIRE;
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -638,10 +762,11 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
   const guint8 *data;
   gsize size;
-  gsize offset = FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+  gsize offset;
   g_autoptr(Fte3600Template) decoded = NULL;
   Fte3600TemplateStatus status;
   guint16 wire_ver;
+  gboolean has_any_ipa = FALSE;
 
   if (templ != NULL)
     *templ = NULL;
@@ -656,13 +781,14 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   if (status != FTE3600_TEMPLATE_OK)
     return status;
   wire_ver = get_uint16_le (&data[8]);
+  offset = get_uint16_le (&data[10]);
 
   decoded = fpi_fte3600_template_new ();
   for (guint sample = 0;
        sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
     {
-      CanonicalSubtemplate parsed;
-      CanonicalSubtemplate canonical;
+      g_auto(CanonicalSubtemplate) parsed = { 0 };
+      g_auto(CanonicalSubtemplate) canonical = { 0 };
       guint32 record_size;
       guint feature_count;
       guint stored_physical_count;
@@ -719,14 +845,15 @@ fpi_fte3600_template_decode (GBytes                    *wire,
                                &canonical) >= 0)
         return FTE3600_TEMPLATE_INVALID_WIRE;
 
-      if (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V2)
+      if (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V3)
         {
           if (offset > size || size - offset < FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE)
             return FTE3600_TEMPLATE_INVALID_WIRE;
           guint32 ipa_rec_size = get_uint32_le (&data[offset]);
           guint16 ipa_feature_count = get_uint16_le (&data[offset + 4]);
           guint16 ipa_reserved = get_uint16_le (&data[offset + 6]);
-          if (ipa_reserved != 0 || ipa_feature_count > FTE3600_IPA_MAX_MINUTIAE)
+          if (ipa_reserved != 0 || ipa_feature_count > FTE3600_IPA_MAX_MINUTIAE ||
+              (ipa_feature_count > 0 && ipa_feature_count < 3))
             return FTE3600_TEMPLATE_INVALID_WIRE;
           gsize expected_ipa_size = FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE +
                                     (gsize) ipa_feature_count * FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE;
@@ -735,10 +862,11 @@ fpi_fte3600_template_decode (GBytes                    *wire,
           offset += FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE;
 
           canonical.has_ipa = (ipa_feature_count >= 3);
-          canonical.ipa_features.n_minutiae = ipa_feature_count;
+          parsed.ipa_features.extractor_schema_version = FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION;
+          parsed.ipa_features.n_minutiae = ipa_feature_count;
           for (guint k = 0; k < ipa_feature_count; k++)
             {
-              Fte3600IpaMinutia *m = &canonical.ipa_features.minutiae[k];
+              Fte3600IpaMinutia *m = &parsed.ipa_features.minutiae[k];
               guint32 x_bits = get_uint32_le (&data[offset]);
               guint32 y_bits = get_uint32_le (&data[offset + 4]);
               guint32 th_bits = get_uint32_le (&data[offset + 8]);
@@ -753,18 +881,32 @@ fpi_fte3600_template_decode (GBytes                    *wire,
               for (guint d = 0; d < FTE3600_IPA_DESC_DIM; d++)
                 {
                   guint32 d_bits = get_uint32_le (&data[offset]);
+                  if (d_bits == 0x80000000u)
+                    return FTE3600_TEMPLATE_INVALID_WIRE;
                   m->desc[d] = float_from_bits (d_bits);
                   if (!isfinite (m->desc[d]))
                     return FTE3600_TEMPLATE_INVALID_WIRE;
                   offset += 4;
                 }
             }
+          if (canonical.has_ipa)
+            {
+              if (!canonicalize_ipa_feature_set (&parsed.ipa_features,
+                                                 &canonical.ipa_features))
+                return FTE3600_TEMPLATE_INVALID_WIRE;
+              for (guint k = 0; k < ipa_feature_count; k++)
+                if (ipa_point_compare (&parsed.ipa_features.minutiae[k],
+                                       &canonical.ipa_features.minutiae[k]) != 0)
+                  return FTE3600_TEMPLATE_INVALID_WIRE;
+              has_any_ipa = TRUE;
+            }
         }
 
       decoded->subtemplates[sample] = canonical;
       decoded->n_subtemplates++;
     }
-  if (offset != size)
+  if (offset != size ||
+      (wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V3 && !has_any_ipa))
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
@@ -783,8 +925,10 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
                                         Fte3600TemplateCompareResult *result)
 {
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
-  CanonicalSubtemplate canonical_query;
+  g_auto(CanonicalSubtemplate) canonical_query = { 0 };
   gboolean have_best = FALSE;
+  gboolean have_brisk = FALSE;
+  gboolean have_ipa = FALSE;
 
   if (result != NULL)
     {
@@ -797,29 +941,36 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
 
   if (templ == NULL || result == NULL || !fpi_fte3600_template_is_ready (templ) ||
       (purpose != FTE3600_TEMPLATE_LOAD_DIAGNOSTIC &&
-       purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION))
+       purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION) ||
+      (mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
+       mode != FTE3600_ENGINE_MODE_IPA_ONLY &&
+       mode != FTE3600_ENGINE_MODE_DUAL_FUSION))
     return FTE3600_TEMPLATE_INVALID_WIRE;
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
-      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
+      (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0 ||
+       (mode != FTE3600_ENGINE_MODE_BRISK_ONLY && !FTE3600_ENABLE_IPA_AUTH)))
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
 
-  if (query_brisk != NULL)
+  if (mode != FTE3600_ENGINE_MODE_IPA_ONLY && query_brisk != NULL)
     {
       const FeatureSetValidation validation =
         canonicalize_feature_set (query_brisk, &canonical_query);
-      if (validation != FEATURE_SET_VALID)
+      if (validation != FEATURE_SET_VALID &&
+          validation != FEATURE_SET_INSUFFICIENT)
         return validation_to_status (validation);
-    }
-  else if (mode != FTE3600_ENGINE_MODE_IPA_ONLY)
-    {
-      return FTE3600_TEMPLATE_INVALID_WIRE;
+      have_brisk = validation == FEATURE_SET_VALID;
     }
 
-  if (mode == FTE3600_ENGINE_MODE_IPA_ONLY &&
-      (query_ipa == NULL || query_ipa->n_minutiae < 3))
+  if (mode != FTE3600_ENGINE_MODE_BRISK_ONLY && query_ipa != NULL)
     {
-      return FTE3600_TEMPLATE_INVALID_WIRE;
+      if (!fpi_fte3600_ipa_validate_feature_set (query_ipa))
+        return FTE3600_TEMPLATE_INVALID_WIRE;
+      have_ipa = query_ipa->n_minutiae >= 3;
     }
+  if ((mode == FTE3600_ENGINE_MODE_BRISK_ONLY && !have_brisk) ||
+      (mode == FTE3600_ENGINE_MODE_IPA_ONLY && !have_ipa) ||
+      (mode == FTE3600_ENGINE_MODE_DUAL_FUSION && !have_brisk && !have_ipa))
+    return FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES;
 
   for (guint i = 0; i < templ->n_subtemplates; i++)
     {
@@ -830,7 +981,7 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
       result->n_compared++;
 
       /* 1. BRISK evaluation (run if in BRISK or DUAL mode and query_brisk is present) */
-      if (mode != FTE3600_ENGINE_MODE_IPA_ONLY && query_brisk != NULL)
+      if (have_brisk)
         {
           (void) fpi_fte3600_brisk_match (&canonical_query.features,
                                           &templ->subtemplates[i].features, &match);
@@ -848,8 +999,7 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
         }
 
       /* 2. 2D-IPA evaluation (run if in IPA or DUAL mode and query_ipa is present) */
-      if (mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
-          query_ipa != NULL && query_ipa->n_minutiae >= 3 && templ->subtemplates[i].has_ipa)
+      if (have_ipa && templ->subtemplates[i].has_ipa)
         {
           Fte3600IpaMatchResult ipa_res = { 0 };
           if (fpi_fte3600_ipa_match (query_ipa, &templ->subtemplates[i].ipa_features, &ipa_res) == FTE3600_IPA_OK)
@@ -882,10 +1032,12 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
               break;
 
             case FTE3600_ENGINE_MODE_DUAL_FUSION:
-            default:
               if (brisk_ok || ipa_ok)
                 result->authentication_accepted = TRUE;
               break;
+
+            default:
+              g_assert_not_reached ();
             }
         }
     }

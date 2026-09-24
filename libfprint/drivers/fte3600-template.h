@@ -14,12 +14,17 @@
 
 G_BEGIN_DECLS
 
-/* Wire v1 is canonical BRISK-only. Wire v2 adds 2D-IPA minutiae records
- * for unified Dual-Engine Biometric Fusion (BRISK OR 2D-IPA). */
+/* Wire v1 remains canonical BRISK-only. The experimental unversioned IPA
+ * wire v2 is rejected. Wire v3 adds IPA schema/policy/fusion versions in a
+ * 48-byte header, followed by a BRISK record and an IPA record for EACH
+ * sample (including an empty IPA record when unavailable). */
 #define FTE3600_TEMPLATE_WIRE_VERSION_V1 1
 #define FTE3600_TEMPLATE_WIRE_VERSION_V2 2
+#define FTE3600_TEMPLATE_WIRE_VERSION_V3 3
 #define FTE3600_TEMPLATE_WIRE_VERSION FTE3600_TEMPLATE_WIRE_VERSION_V1
 #define FTE3600_TEMPLATE_WIRE_HEADER_SIZE 40
+#define FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE 48
+#define FTE3600_TEMPLATE_FUSION_POLICY_VERSION 1
 #define FTE3600_TEMPLATE_FEATURE_RECORD_SIZE 44
 #define FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE 8
 #define FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE 140
@@ -30,6 +35,8 @@ G_BEGIN_DECLS
 #define FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE 56424
 #define FTE3600_TEMPLATE_V2_CURRENT_MAX_WIRE_SIZE 101288
 #define FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE 151912
+#define FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE 101296
+#define FTE3600_TEMPLATE_V3_MAX_WIRE_SIZE 151920
 
 typedef enum {
   FTE3600_TEMPLATE_OK,
@@ -57,6 +64,12 @@ typedef enum {
   FTE3600_ENGINE_MODE_IPA_ONLY    = 1,
   FTE3600_ENGINE_MODE_DUAL_FUSION = 2,
 } Fte3600EngineMode;
+
+/* NULL selects BRISK unless the separate IPA authentication opt-in is built.
+ * Unknown modes fail closed. Diagnostic callers can explicitly select all
+ * three modes; authentication additionally checks the build-time gates. */
+gboolean fpi_fte3600_engine_mode_parse (const gchar *value,
+                                       Fte3600EngineMode *mode);
 
 typedef struct
 {

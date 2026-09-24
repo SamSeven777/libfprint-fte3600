@@ -113,17 +113,23 @@ test_fte3600:
     - .standard_job
   parallel:
     matrix:
-      - FTE3600_AUTH: ['false', 'true']
+      - FTE3600_AUTH: ['false']
+        FTE3600_IPA_AUTH: ['false']
+      - FTE3600_AUTH: ['true']
+        FTE3600_IPA_AUTH: ['false', 'true']
   script:
     - >-
       meson setup _build --werror -Ddrivers=fte3600
       -Dfte3600_personal_auth=$FTE3600_AUTH
+      -Dfte3600_ipa_auth=$FTE3600_IPA_AUTH
       -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
       -Db_sanitize=address,undefined
     - >-
-      meson test -C _build --print-errorlogs
-      fte3600-driver fte3600-lifecycle fte3600-brisk fte3600-template
-      fpi-spi-transfer fpi-ssm fpi-device
+      meson test -C _build --print-errorlogs --suite=unit-tests
+    - >-
+      if [ "$FTE3600_AUTH" = true ]; then
+        meson test -C _build --benchmark --print-errorlogs benchmark-fte3600;
+      fi
   artifacts:
     when: always
     reports:
