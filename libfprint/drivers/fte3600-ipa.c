@@ -294,7 +294,9 @@ ipa_forward_attention (Fte3600IpaFeatureSet *set)
 }
 
 Fte3600IpaStatus
-fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet *features)
+fpi_fte3600_ipa_extract (const guint8         *image,
+                         gsize                 length,
+                         Fte3600IpaFeatureSet *features)
 {
   if (image == NULL || features == NULL || length < FTE3600_IPA_IMAGE_SIZE)
     return FTE3600_IPA_ERR_PARAM;
@@ -303,6 +305,8 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
 
   const int width = FTE3600_IPA_WIDTH;
   const int height = FTE3600_IPA_HEIGHT;
+  const int margin = 6;
+  const gfloat harris_thresh = 180.0f;
 
   static gfloat s_gx[FTE3600_IPA_IMAGE_SIZE];
   static gfloat s_gy[FTE3600_IPA_IMAGE_SIZE];
@@ -324,9 +328,9 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
                    2 * (image[(y + 1) * width + x] - image[(y - 1) * width + x]) +
                    (image[(y + 1) * width + (x + 1)] - image[(y - 1) * width + (x + 1)]);
 
-          int idx = y * width + x;
-          s_gx[idx] = (gfloat) gx;
-          s_gy[idx] = (gfloat) gy;
+          int p_idx = y * width + x;
+          s_gx[p_idx] = (gfloat) gx;
+          s_gy[p_idx] = (gfloat) gy;
         }
     }
 
@@ -348,14 +352,14 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
                   sum_xy += gx * gy;
                 }
             }
-          int idx = y * width + x;
-          s_sxx[idx] = sum_xx / 25.0f;
-          s_syy[idx] = sum_yy / 25.0f;
-          s_sxy[idx] = sum_xy / 25.0f;
+          int p_idx = y * width + x;
+          s_sxx[p_idx] = sum_xx / 25.0f;
+          s_syy[p_idx] = sum_yy / 25.0f;
+          s_sxy[p_idx] = sum_xy / 25.0f;
 
-          gfloat det = s_sxx[idx] * s_syy[idx] - s_sxy[idx] * s_sxy[idx];
-          gfloat trace = s_sxx[idx] + s_syy[idx];
-          s_harris[idx] = det - 0.04f * (trace * trace);
+          gfloat det = s_sxx[p_idx] * s_syy[p_idx] - s_sxy[p_idx] * s_sxy[p_idx];
+          gfloat trace = s_sxx[p_idx] + s_syy[p_idx];
+          s_harris[p_idx] = det - 0.04f * (trace * trace);
         }
     }
 
@@ -365,16 +369,16 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
     int x, y;
     gfloat theta;
   } Candidate;
-  Candidate candidates[120];
+  Candidate candidates[250];
   int n_cands = 0;
 
-  for (int y = 8; y < height - 8; y++)
+  for (int y = margin; y < height - margin; y++)
     {
-      for (int x = 8; x < width - 8; x++)
+      for (int x = margin; x < width - margin; x++)
         {
-          int idx = y * width + x;
-          gfloat val = s_harris[idx];
-          if (val <= 300.0f)
+          int p_idx = y * width + x;
+          gfloat val = s_harris[p_idx];
+          if (val <= harris_thresh)
             continue;
 
           int is_local_max = 1;
@@ -391,9 +395,9 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
                 }
             }
 
-          if (is_local_max && n_cands < 120)
+          if (is_local_max && n_cands < 250)
             {
-              gfloat theta = 0.5f * atan2f (2.0f * s_sxy[idx], s_sxx[idx] - s_syy[idx]) + (M_PI * 0.5f);
+              gfloat theta = 0.5f * atan2f (2.0f * s_sxy[p_idx], s_sxx[p_idx] - s_syy[p_idx]) + (M_PI * 0.5f);
               while (theta > M_PI) theta -= 2.0f * M_PI;
               while (theta < -M_PI) theta += 2.0f * M_PI;
 
@@ -468,6 +472,13 @@ fpi_fte3600_ipa_extract (const guint8 *image, gsize length, Fte3600IpaFeatureSet
   return (features->n_minutiae >= 3) ? FTE3600_IPA_OK : FTE3600_IPA_ERR_TOO_FEW_POINTS;
 }
 
+static inline gfloat
+diff_angle_pi (gfloat th1, gfloat th2)
+{
+  gfloat d2 = 2.0f * (th1 - th2);
+  return 0.5f * atan2f (sinf (d2), cosf (d2));
+}
+
 Fte3600IpaStatus
 fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
                        const Fte3600IpaFeatureSet *reference,
@@ -513,15 +524,23 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
     {
       int best_j = -1;
       gfloat best_sim = -1.0f;
+      gfloat second_sim = -1.0f;
       for (guint j = 0; j < M; j++)
         {
           if (S[i][j] > best_sim)
             {
+              second_sim = best_sim;
               best_sim = S[i][j];
               best_j = j;
             }
+          else if (S[i][j] > second_sim)
+            {
+              second_sim = S[i][j];
+            }
         }
-      if (best_j >= 0 && best_sim > 0.40f)
+
+      /* MNN with Lowe's ratio margin check (margin >= 0.01) */
+      if (best_j >= 0 && best_sim >= 0.36f && (best_sim - second_sim >= 0.01f))
         {
           int rev_i = -1;
           gfloat rev_sim = -1.0f;
@@ -544,11 +563,10 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
     }
 
   result->n_matched_pairs = n_matches;
-  if (n_matches < 3)
+  if (n_matches < 4)
     return FTE3600_IPA_OK;
 
-  gfloat topo_score = 0.0f;
-  guint supported_inliers = 0;
+  int supported[FTE3600_IPA_MAX_MINUTIAE] = { 0 };
 
   for (guint m1 = 0; m1 < n_matches; m1++)
     {
@@ -571,29 +589,100 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
           gfloat d2 = sqrtf (dx2 * dx2 + dy2 * dy2);
 
           gfloat max_d = d1 > d2 ? d1 : d2;
-          if (fabsf (d1 - d2) <= (4.0f + 0.10f * max_d))
-            {
-              gfloat dth1 = q_ctx.minutiae[i1].theta - q_ctx.minutiae[i2].theta;
-              gfloat dth2 = r_ctx.minutiae[j1].theta - r_ctx.minutiae[j2].theta;
-              gfloat dth_diff = fabsf (atan2f (sinf (dth1 - dth2), cosf (dth1 - dth2)));
-              if (dth_diff < 0.60f)
-                support_count++;
-            }
+          if (fabsf (d1 - d2) > (4.0f + 0.12f * max_d))
+            continue;
+
+          gfloat dth1 = q_ctx.minutiae[i1].theta - q_ctx.minutiae[i2].theta;
+          gfloat dth2 = r_ctx.minutiae[j1].theta - r_ctx.minutiae[j2].theta;
+          gfloat dth_diff = fabsf (atan2f (sinf (dth1 - dth2), cosf (dth1 - dth2)));
+          if (dth_diff > 0.60f)
+            continue;
+
+          /* SE(2) Vector Bearing Consistency Check */
+          gfloat b1 = atan2f (dy1, dx1);
+          gfloat b2 = atan2f (dy2, dx2);
+          gfloat delta_bearing = atan2f (sinf (b1 - b2), cosf (b1 - b2));
+          gfloat rot1 = diff_angle_pi (r_ctx.minutiae[j1].theta, q_ctx.minutiae[i1].theta);
+          gfloat rot2 = diff_angle_pi (q_ctx.minutiae[i2].theta, r_ctx.minutiae[j2].theta);
+          gfloat delta_rot = 0.5f * (rot1 + rot2);
+          gfloat bearing_error = fabsf (atan2f (sinf (delta_bearing - delta_rot), cosf (delta_bearing - delta_rot)));
+          if (bearing_error <= 0.40f)
+            support_count++;
         }
 
       if (support_count >= 2)
+        supported[m1] = 1;
+    }
+
+  /* Fast Global Rigid Cluster Verification (Reprojection <= 4.5 px) */
+  guint max_cluster_inliers = 0;
+  gfloat best_sim_sum = 0.0f;
+  guint best_inlier_indices[FTE3600_IPA_MAX_MINUTIAE];
+  guint n_best = 0;
+
+  for (guint m1 = 0; m1 < n_matches; m1++)
+    {
+      if (!supported[m1]) continue;
+      guint i1 = matches[m1].i, j1 = matches[m1].j;
+      gfloat rot = diff_angle_pi (r_ctx.minutiae[j1].theta, q_ctx.minutiae[i1].theta);
+      gfloat cos_r = cosf (rot), sin_r = sinf (rot);
+
+      gfloat tx = r_ctx.minutiae[j1].x - (cos_r * q_ctx.minutiae[i1].x - sin_r * q_ctx.minutiae[i1].y);
+      gfloat ty = r_ctx.minutiae[j1].y - (sin_r * q_ctx.minutiae[i1].x + cos_r * q_ctx.minutiae[i1].y);
+
+      guint cluster_inl = 0;
+      gfloat cluster_sim = 0.0f;
+      guint cur_indices[FTE3600_IPA_MAX_MINUTIAE];
+
+      for (guint m2 = 0; m2 < n_matches; m2++)
         {
-          supported_inliers++;
-          topo_score += matches[m1].sim;
+          if (!supported[m2]) continue;
+          guint i2 = matches[m2].i, j2 = matches[m2].j;
+          gfloat pred_x = cos_r * q_ctx.minutiae[i2].x - sin_r * q_ctx.minutiae[i2].y + tx;
+          gfloat pred_y = sin_r * q_ctx.minutiae[i2].x + cos_r * q_ctx.minutiae[i2].y + ty;
+          gfloat err = hypotf (r_ctx.minutiae[j2].x - pred_x, r_ctx.minutiae[j2].y - pred_y);
+          if (err <= 4.5f)
+            {
+              cur_indices[cluster_inl] = m2;
+              cluster_inl++;
+              cluster_sim += matches[m2].sim;
+            }
+        }
+      if (cluster_inl > max_cluster_inliers ||
+          (cluster_inl == max_cluster_inliers && cluster_sim > best_sim_sum))
+        {
+          max_cluster_inliers = cluster_inl;
+          best_sim_sum = cluster_sim;
+          n_best = cluster_inl;
+          for (guint k = 0; k < cluster_inl; k++)
+            best_inlier_indices[k] = cur_indices[k];
         }
     }
 
-  result->n_supported_inliers = supported_inliers;
-  if (supported_inliers >= FTE3600_IPA_POLICY_MIN_INLIERS)
+  if (max_cluster_inliers >= 4)
     {
-      gfloat score = topo_score / (gfloat) (supported_inliers + 3);
-      if (score > 1.0f) score = 1.0f;
-      result->consensus_score = score;
+      gfloat min_x = 999.0f, max_x = -999.0f, min_y = 999.0f, max_y = -999.0f;
+      for (guint k = 0; k < n_best; k++)
+        {
+          guint p_idx = best_inlier_indices[k];
+          gfloat x = q_ctx.minutiae[matches[p_idx].i].x;
+          gfloat y = q_ctx.minutiae[matches[p_idx].i].y;
+          if (x < min_x) min_x = x;
+          if (x > max_x) max_x = x;
+          if (y < min_y) min_y = y;
+          if (y > max_y) max_y = y;
+        }
+      result->x_span = max_x - min_x;
+      result->y_span = max_y - min_y;
+      result->consensus_score = best_sim_sum / (gfloat) (max_cluster_inliers + 1);
+      if (result->consensus_score > 1.0f)
+        result->consensus_score = 1.0f;
+      result->n_supported_inliers = max_cluster_inliers;
+    }
+  else
+    {
+      result->n_supported_inliers = max_cluster_inliers;
+      result->consensus_score = 0.0f;
     }
 
   result->authentication_accepted = fpi_fte3600_ipa_result_meets_policy (result);
@@ -605,6 +694,18 @@ fpi_fte3600_ipa_result_meets_policy (const Fte3600IpaMatchResult *result)
 {
   if (result == NULL)
     return FALSE;
-  return (result->n_supported_inliers >= FTE3600_IPA_POLICY_MIN_INLIERS &&
-          result->consensus_score >= FTE3600_IPA_POLICY_MIN_SCORE);
+
+  /* Gate 1: 5 or more rigid consensus inliers */
+  if (result->n_supported_inliers >= FTE3600_IPA_POLICY_RELAXED_INLIERS &&
+      result->consensus_score >= FTE3600_IPA_POLICY_RELAXED_SCORE)
+    return TRUE;
+
+  /* Gate 2: 4 rigid inliers with spatial dispersion */
+  if (result->n_supported_inliers >= FTE3600_IPA_POLICY_MIN_INLIERS &&
+      result->consensus_score >= FTE3600_IPA_POLICY_MIN_SCORE &&
+      result->x_span >= FTE3600_IPA_POLICY_MIN_SPAN_X &&
+      result->y_span >= FTE3600_IPA_POLICY_MIN_SPAN_Y)
+    return TRUE;
+
+  return FALSE;
 }
