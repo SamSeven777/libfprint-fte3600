@@ -13,9 +13,9 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-#define IPA_GAMMA_DIST  0.002f
+#define IPA_GAMMA_DIST 0.002f
 #define IPA_GAMMA_ANGLE 0.80f
-#define IPA_INV_SQRT_D  0.1767767f /* 1.0 / sqrt(32) */
+#define IPA_INV_SQRT_D 0.1767767f  /* 1.0 / sqrt(32) */
 
 /* Schema v2 adds local contrast normalization and sub-pixel locations to
  * the v1 design. Both use a complete, reproducible orthonormal H32 transform for
@@ -41,14 +41,14 @@ ipa_secure_clear (gpointer data, gsize size)
 
 typedef struct
 {
-  gfloat gx[FTE3600_IPA_IMAGE_SIZE];
-  gfloat gy[FTE3600_IPA_IMAGE_SIZE];
-  gfloat sxx[FTE3600_IPA_IMAGE_SIZE];
-  gfloat syy[FTE3600_IPA_IMAGE_SIZE];
-  gfloat sxy[FTE3600_IPA_IMAGE_SIZE];
-  gfloat harris[FTE3600_IPA_IMAGE_SIZE];
-  guint8 norm_image[FTE3600_IPA_IMAGE_SIZE];
-  gint32 sat1[FTE3600_IPA_HEIGHT + 1][FTE3600_IPA_WIDTH + 1];
+  gfloat  gx[FTE3600_IPA_IMAGE_SIZE];
+  gfloat  gy[FTE3600_IPA_IMAGE_SIZE];
+  gfloat  sxx[FTE3600_IPA_IMAGE_SIZE];
+  gfloat  syy[FTE3600_IPA_IMAGE_SIZE];
+  gfloat  sxy[FTE3600_IPA_IMAGE_SIZE];
+  gfloat  harris[FTE3600_IPA_IMAGE_SIZE];
+  guint8  norm_image[FTE3600_IPA_IMAGE_SIZE];
+  gint32  sat1[FTE3600_IPA_HEIGHT + 1][FTE3600_IPA_WIDTH + 1];
   guint32 sat2[FTE3600_IPA_HEIGHT + 1][FTE3600_IPA_WIDTH + 1];
 } IpaExtractWorkspace;
 
@@ -113,6 +113,7 @@ static inline void
 normalize_desc (gfloat *v, int dim)
 {
   gfloat sum_sq = 0.0f;
+
   for (int i = 0; i < dim; i++)
     sum_sq += v[i] * v[i];
   gfloat norm = sqrtf (sum_sq);
@@ -258,10 +259,10 @@ ipa_forward_attention (Fte3600IpaFeatureSet *set)
 }
 
 static void
-normalize_image_contrast (const guint8 *src,
-                          guint8       *dst,
-                          int           width,
-                          int           height,
+normalize_image_contrast (const guint8        *src,
+                          guint8              *dst,
+                          int                  width,
+                          int                  height,
                           IpaExtractWorkspace *workspace)
 {
   const int r = 6; /* 13x13 local window (~1.5 ridge wavelengths) */
@@ -392,7 +393,8 @@ fpi_fte3600_ipa_extract (const guint8         *image,
     }
 
   /* 3. Non-Maximum Suppression (7x7 window) with Sub-Pixel Refinement */
-  typedef struct {
+  typedef struct
+  {
     gfloat score;
     gfloat x, y;
     gfloat theta;
@@ -421,7 +423,8 @@ fpi_fte3600_ipa_extract (const guint8         *image,
             {
               for (int dx = -3; dx <= 3; dx++)
                 {
-                  if (dy == 0 && dx == 0) continue;
+                  if (dy == 0 && dx == 0)
+                    continue;
                   if (workspace->harris[(y + dy) * width + (x + dx)] > val)
                     {
                       is_local_max = 0;
@@ -433,8 +436,10 @@ fpi_fte3600_ipa_extract (const guint8         *image,
           if (is_local_max && n_cands < 250)
             {
               gfloat theta = 0.5f * atan2f (2.0f * workspace->sxy[p_idx], workspace->sxx[p_idx] - workspace->syy[p_idx]) + (M_PI * 0.5f);
-              while (theta > M_PI) theta -= 2.0f * M_PI;
-              while (theta < -M_PI) theta += 2.0f * M_PI;
+              while (theta > M_PI)
+                theta -= 2.0f * M_PI;
+              while (theta < -M_PI)
+                theta += 2.0f * M_PI;
 
               /* Sub-pixel quadratic peak interpolation */
               gfloat h_xm = workspace->harris[y * width + (x - 1)];
@@ -492,10 +497,14 @@ fpi_fte3600_ipa_extract (const guint8         *image,
     {
       int cell_x = (int) candidates[i].x / 16;
       int cell_y = (int) candidates[i].y / 16;
-      if (cell_x < 0) cell_x = 0;
-      if (cell_x >= 4) cell_x = 3;
-      if (cell_y < 0) cell_y = 0;
-      if (cell_y >= 5) cell_y = 4;
+      if (cell_x < 0)
+        cell_x = 0;
+      if (cell_x >= 4)
+        cell_x = 3;
+      if (cell_y < 0)
+        cell_y = 0;
+      if (cell_y >= 5)
+        cell_y = 4;
 
       if (cell_counts[cell_x][cell_y] < 2)
         {
@@ -576,6 +585,7 @@ static inline gfloat
 diff_angle_pi (gfloat th1, gfloat th2)
 {
   gfloat d2 = 2.0f * (th1 - th2);
+
   return 0.5f * atan2f (sinf (d2), cosf (d2));
 }
 
@@ -615,8 +625,9 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
         }
     }
 
-  typedef struct {
-    guint i, j;
+  typedef struct
+  {
+    guint  i, j;
     gfloat sim;
   } MatchPair;
   MatchPair matches[FTE3600_IPA_MAX_MINUTIAE];
@@ -678,7 +689,8 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
 
       for (guint m2 = 0; m2 < n_matches; m2++)
         {
-          if (m1 == m2) continue;
+          if (m1 == m2)
+            continue;
           guint i2 = matches[m2].i;
           guint j2 = matches[m2].j;
 
@@ -709,7 +721,7 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
           /* Both rotations map reference to query. Average axial angles on
            * the doubled circle rather than cancelling opposite directions. */
           gfloat delta_rot = 0.5f * atan2f (sinf (2.0f * rot1) + sinf (2.0f * rot2),
-                                          cosf (2.0f * rot1) + cosf (2.0f * rot2));
+                                            cosf (2.0f * rot1) + cosf (2.0f * rot2));
           gfloat bearing_error = fabsf (diff_angle_pi (delta_bearing, delta_rot));
           if (bearing_error <= 0.40f)
             support_count++;
@@ -728,7 +740,8 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
   /* 1. Evaluate single-minutia rotation hypotheses */
   for (guint m1 = 0; m1 < n_matches; m1++)
     {
-      if (!supported[m1]) continue;
+      if (!supported[m1])
+        continue;
       guint i1 = matches[m1].i, j1 = matches[m1].j;
       /* Ridge orientations are axial. Test both directed rotations so that
        * an equivalent theta + pi does not discard the true rigid transform. */
@@ -748,7 +761,8 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
 
           for (guint m2 = 0; m2 < n_matches; m2++)
             {
-              if (!supported[m2]) continue;
+              if (!supported[m2])
+                continue;
               guint i2 = matches[m2].i, j2 = matches[m2].j;
               gfloat pred_x = cos_r * q_ctx.minutiae[i2].x - sin_r * q_ctx.minutiae[i2].y + tx;
               gfloat pred_y = sin_r * q_ctx.minutiae[i2].x + cos_r * q_ctx.minutiae[i2].y + ty;
@@ -775,12 +789,14 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
   /* 2. Evaluate two-point spatial vector rotation hypotheses */
   for (guint m1 = 0; m1 < n_matches; m1++)
     {
-      if (!supported[m1]) continue;
+      if (!supported[m1])
+        continue;
       guint i1 = matches[m1].i, j1 = matches[m1].j;
 
       for (guint m2 = m1 + 1; m2 < n_matches; m2++)
         {
-          if (!supported[m2]) continue;
+          if (!supported[m2])
+            continue;
           guint i2 = matches[m2].i, j2 = matches[m2].j;
 
           gfloat dx1 = q_ctx.minutiae[i2].x - q_ctx.minutiae[i1].x;
@@ -822,7 +838,8 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
 
           for (guint m3 = 0; m3 < n_matches; m3++)
             {
-              if (!supported[m3]) continue;
+              if (!supported[m3])
+                continue;
               guint i3 = matches[m3].i, j3 = matches[m3].j;
               gfloat pred_x = cos_r * q_ctx.minutiae[i3].x - sin_r * q_ctx.minutiae[i3].y + tx;
               gfloat pred_y = sin_r * q_ctx.minutiae[i3].x + cos_r * q_ctx.minutiae[i3].y + ty;
@@ -854,10 +871,14 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
           guint p_idx = best_inlier_indices[k];
           gfloat x = q_ctx.minutiae[matches[p_idx].i].x;
           gfloat y = q_ctx.minutiae[matches[p_idx].i].y;
-          if (x < min_x) min_x = x;
-          if (x > max_x) max_x = x;
-          if (y < min_y) min_y = y;
-          if (y > max_y) max_y = y;
+          if (x < min_x)
+            min_x = x;
+          if (x > max_x)
+            max_x = x;
+          if (y < min_y)
+            min_y = y;
+          if (y > max_y)
+            max_y = y;
         }
       result->x_span = max_x - min_x;
       result->y_span = max_y - min_y;

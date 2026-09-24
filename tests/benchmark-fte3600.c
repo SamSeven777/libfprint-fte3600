@@ -19,7 +19,8 @@
 static void
 generate_synthetic_fingerprint (guint8 *image, guint seed)
 {
-  static const struct {
+  static const struct
+  {
     gdouble x, y, sigma, amplitude;
   } spots[] = {
     { 17, 18, 1.5,  58 }, { 29, 17, 2.2, -54 },
@@ -84,9 +85,9 @@ warp_fingerprint (const guint8 *src, guint8 *dst, gdouble angle, gdouble tx, gdo
 }
 
 static gboolean
-extract_both (const guint8 *image,
+extract_both (const guint8           *image,
               Fte3600BriskFeatureSet *brisk,
-              Fte3600IpaFeatureSet *ipa)
+              Fte3600IpaFeatureSet   *ipa)
 {
   if (fpi_fte3600_brisk_extract (image, FTE3600_BRISK_IMAGE_SIZE, brisk) != FTE3600_BRISK_OK ||
       fpi_fte3600_ipa_extract (image, FTE3600_BRISK_IMAGE_SIZE, ipa) != FTE3600_IPA_OK)
@@ -104,9 +105,10 @@ main (void)
   const gchar *conditions[] = { "self", "translation", "rotation", "different synthetic pattern" };
   Fte3600BriskFeatureSet brisk[4];
   Fte3600IpaFeatureSet ipa[4];
-  g_autoptr (Fte3600Template) templ = fpi_fte3600_template_new ();
-  g_autoptr (Fte3600Template) decoded = NULL;
-  g_autoptr (GBytes) wire = NULL;
+
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(GBytes) wire = NULL;
   const Fte3600EngineMode modes[] = {
     FTE3600_ENGINE_MODE_BRISK_ONLY,
 #if FTE3600_ENABLE_IPA_AUTH
@@ -172,7 +174,7 @@ main (void)
   if (fpi_fte3600_template_encode (templ, &wire) != FTE3600_TEMPLATE_OK ||
       wire == NULL ||
       fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
-                                  &decoded) != FTE3600_TEMPLATE_OK ||
+                                   &decoded) != FTE3600_TEMPLATE_OK ||
       decoded == NULL)
     {
       fprintf (stderr, "Synthetic gallery encode/decode failed\n");

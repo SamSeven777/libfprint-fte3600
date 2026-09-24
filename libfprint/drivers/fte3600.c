@@ -60,8 +60,8 @@ static inline gboolean
 fte3600_acpi_path_equal (const gchar *path_a,
                          const gchar *path_b)
 {
-  g_auto (GStrv) parts_a = NULL;
-  g_auto (GStrv) parts_b = NULL;
+  g_auto(GStrv) parts_a = NULL;
+  g_auto(GStrv) parts_b = NULL;
   guint len_a, len_b;
 
   if (!path_a || !path_b || !*path_a || !*path_b)
@@ -2245,17 +2245,17 @@ fte3600_verify_worker (GTask        *task,
     goto out;
 
   if (!fpi_fte3600_engine_mode_parse (g_getenv ("FP_FTE3600_MATCHER"),
-                                     &job->engine_mode))
+                                      &job->engine_mode))
     {
       g_task_return_error (task, fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_NOT_SUPPORTED, "Unknown FTE3600 matcher mode"));
+                             FP_DEVICE_ERROR_NOT_SUPPORTED, "Unknown FTE3600 matcher mode"));
       goto out;
     }
   if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY && !FTE3600_ENABLE_IPA_AUTH)
     {
       g_task_return_error (task, fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_NOT_SUPPORTED,
-        "IPA authentication requires its separate experimental build opt-in"));
+                             FP_DEVICE_ERROR_NOT_SUPPORTED,
+                             "IPA authentication requires its separate experimental build opt-in"));
       goto out;
     }
 
@@ -2278,13 +2278,17 @@ fte3600_verify_worker (GTask        *task,
 
   if (job->extract_status == FTE3600_BRISK_INVALID_ARGUMENT ||
       job->ipa_extract_status == FTE3600_IPA_ERR_PARAM)
-    job->compare_status = FTE3600_TEMPLATE_INVALID_WIRE;
+    {
+      job->compare_status = FTE3600_TEMPLATE_INVALID_WIRE;
+    }
   else
-    job->compare_status = fpi_fte3600_template_compare_with_mode (
-      job->verify_template,
-      job->extract_status == FTE3600_BRISK_OK ? &brisk_features : NULL,
-      p_ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
-      job->engine_mode, &job->comparison);
+    {
+      job->compare_status = fpi_fte3600_template_compare_with_mode (
+        job->verify_template,
+        job->extract_status == FTE3600_BRISK_OK ? &brisk_features : NULL,
+        p_ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+        job->engine_mode, &job->comparison);
+    }
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
 
@@ -2350,9 +2354,9 @@ fte3600_verify_complete (GObject      *source_object,
   if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
     {
       fte3600_verify_report_retry (self,
-        job->engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY &&
-        job->extract_status == FTE3600_BRISK_LOW_CONTRAST ?
-          FP_DEVICE_RETRY_GENERAL : FP_DEVICE_RETRY_CENTER_FINGER);
+                                   job->engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY &&
+                                   job->extract_status == FTE3600_BRISK_LOW_CONTRAST ?
+                                   FP_DEVICE_RETRY_GENERAL : FP_DEVICE_RETRY_CENTER_FINGER);
       return;
     }
 
