@@ -293,6 +293,71 @@ ipa_forward_attention (Fte3600IpaFeatureSet *set)
     memcpy (set->minutiae[i].desc, updated_desc[i], sizeof (gfloat) * FTE3600_IPA_DESC_DIM);
 }
 
+static void
+normalize_image_contrast (const guint8 *src,
+                          guint8       *dst,
+                          int           width,
+                          int           height)
+{
+  static gint32 s_sat1[FTE3600_IPA_HEIGHT + 1][FTE3600_IPA_WIDTH + 1];
+  static guint32 s_sat2[FTE3600_IPA_HEIGHT + 1][FTE3600_IPA_WIDTH + 1];
+  const int r = 6; /* 13x13 local window (~1.5 ridge wavelengths) */
+
+  for (int x = 0; x <= width; x++)
+    {
+      s_sat1[0][x] = 0;
+      s_sat2[0][x] = 0;
+    }
+
+  for (int y = 0; y < height; y++)
+    {
+      s_sat1[y + 1][0] = 0;
+      s_sat2[y + 1][0] = 0;
+      gint32 row_sum1 = 0;
+      guint32 row_sum2 = 0;
+      for (int x = 0; x < width; x++)
+        {
+          gint32 val = (gint32) src[y * width + x] - 128;
+          row_sum1 += val;
+          row_sum2 += (guint32) (val * val);
+          s_sat1[y + 1][x + 1] = s_sat1[y][x + 1] + row_sum1;
+          s_sat2[y + 1][x + 1] = s_sat2[y][x + 1] + row_sum2;
+        }
+    }
+
+  for (int y = 0; y < height; y++)
+    {
+      int y0 = (y - r < 0) ? 0 : y - r;
+      int y1 = (y + r >= height) ? height - 1 : y + r;
+      for (int x = 0; x < width; x++)
+        {
+          int x0 = (x - r < 0) ? 0 : x - r;
+          int x1 = (x + r >= width) ? width - 1 : x + r;
+          int area = (x1 - x0 + 1) * (y1 - y0 + 1);
+
+          gint32 sum1 = s_sat1[y1 + 1][x1 + 1] - s_sat1[y0][x1 + 1] - s_sat1[y1 + 1][x0] + s_sat1[y0][x0];
+          guint32 sum2 = s_sat2[y1 + 1][x1 + 1] - s_sat2[y0][x1 + 1] - s_sat2[y1 + 1][x0] + s_sat2[y0][x0];
+
+          gfloat mean = (gfloat) sum1 / (gfloat) area;
+          gfloat variance = ((gfloat) sum2 / (gfloat) area) - (mean * mean);
+          gfloat std_dev = variance > 0.0f ? sqrtf (variance) : 0.0f;
+
+          int p_idx = y * width + x;
+          gint32 cur_val = (gint32) src[p_idx] - 128;
+
+          if (std_dev < 1.0f)
+            {
+              dst[p_idx] = 128;
+            }
+          else
+            {
+              gfloat norm_val = 128.0f + 36.0f * ((gfloat) cur_val - mean) / (std_dev + 4.0f);
+              dst[p_idx] = (guint8) CLAMP ((int) roundf (norm_val), 0, 255);
+            }
+        }
+    }
+}
+
 Fte3600IpaStatus
 fpi_fte3600_ipa_extract (const guint8         *image,
                          gsize                 length,
@@ -314,19 +379,23 @@ fpi_fte3600_ipa_extract (const guint8         *image,
   static gfloat s_syy[FTE3600_IPA_IMAGE_SIZE];
   static gfloat s_sxy[FTE3600_IPA_IMAGE_SIZE];
   static gfloat s_harris[FTE3600_IPA_IMAGE_SIZE];
+  static guint8 s_norm_image[FTE3600_IPA_IMAGE_SIZE];
 
-  /* 1. Sobel Gradients */
+  /* 0. Integral Image Local Contrast Normalization */
+  normalize_image_contrast (image, s_norm_image, width, height);
+
+  /* 1. Sobel Gradients on Contrast-Normalized Frame */
   for (int y = 1; y < height - 1; y++)
     {
       for (int x = 1; x < width - 1; x++)
         {
-          int gx = (image[(y - 1) * width + (x + 1)] - image[(y - 1) * width + (x - 1)]) +
-                   2 * (image[y * width + (x + 1)] - image[y * width + (x - 1)]) +
-                   (image[(y + 1) * width + (x + 1)] - image[(y + 1) * width + (x - 1)]);
+          int gx = (s_norm_image[(y - 1) * width + (x + 1)] - s_norm_image[(y - 1) * width + (x - 1)]) +
+                   2 * (s_norm_image[y * width + (x + 1)] - s_norm_image[y * width + (x - 1)]) +
+                   (s_norm_image[(y + 1) * width + (x + 1)] - s_norm_image[(y + 1) * width + (x - 1)]);
 
-          int gy = (image[(y + 1) * width + (x - 1)] - image[(y - 1) * width + (x - 1)]) +
-                   2 * (image[(y + 1) * width + x] - image[(y - 1) * width + x]) +
-                   (image[(y + 1) * width + (x + 1)] - image[(y - 1) * width + (x + 1)]);
+          int gy = (s_norm_image[(y + 1) * width + (x - 1)] - s_norm_image[(y - 1) * width + (x - 1)]) +
+                   2 * (s_norm_image[(y + 1) * width + x] - s_norm_image[(y - 1) * width + x]) +
+                   (s_norm_image[(y + 1) * width + (x + 1)] - s_norm_image[(y - 1) * width + (x + 1)]);
 
           int p_idx = y * width + x;
           s_gx[p_idx] = (gfloat) gx;
@@ -363,10 +432,10 @@ fpi_fte3600_ipa_extract (const guint8         *image,
         }
     }
 
-  /* 3. Non-Maximum Suppression (7x7 window) */
+  /* 3. Non-Maximum Suppression (7x7 window) with Sub-Pixel Refinement */
   typedef struct {
     gfloat score;
-    int x, y;
+    gfloat x, y;
     gfloat theta;
   } Candidate;
   Candidate candidates[250];
@@ -408,9 +477,32 @@ fpi_fte3600_ipa_extract (const guint8         *image,
               while (theta > M_PI) theta -= 2.0f * M_PI;
               while (theta < -M_PI) theta += 2.0f * M_PI;
 
+              /* Sub-pixel quadratic peak interpolation */
+              gfloat h_xm = s_harris[y * width + (x - 1)];
+              gfloat h_xp = s_harris[y * width + (x + 1)];
+              gfloat h_ym = s_harris[(y - 1) * width + x];
+              gfloat h_yp = s_harris[(y + 1) * width + x];
+
+              gfloat denom_x = 2.0f * (h_xm - 2.0f * val + h_xp);
+              gfloat denom_y = 2.0f * (h_ym - 2.0f * val + h_yp);
+
+              gfloat delta_x = 0.0f;
+              gfloat delta_y = 0.0f;
+
+              if (fabsf (denom_x) > 1e-5f)
+                {
+                  delta_x = (h_xm - h_xp) / denom_x;
+                  delta_x = CLAMP (delta_x, -0.5f, 0.5f);
+                }
+              if (fabsf (denom_y) > 1e-5f)
+                {
+                  delta_y = (h_ym - h_yp) / denom_y;
+                  delta_y = CLAMP (delta_y, -0.5f, 0.5f);
+                }
+
               candidates[n_cands].score = val;
-              candidates[n_cands].x = x;
-              candidates[n_cands].y = y;
+              candidates[n_cands].x = (gfloat) x + delta_x;
+              candidates[n_cands].y = (gfloat) y + delta_y;
               candidates[n_cands].theta = theta;
               n_cands++;
             }
@@ -439,9 +531,11 @@ fpi_fte3600_ipa_extract (const guint8         *image,
   /* First pass: take up to 2 highest-scoring candidates per 16x16 cell */
   for (int i = 0; i < n_cands && n_selected < FTE3600_IPA_MAX_MINUTIAE; i++)
     {
-      int cell_x = candidates[i].x / 16;
-      int cell_y = candidates[i].y / 16;
+      int cell_x = (int) candidates[i].x / 16;
+      int cell_y = (int) candidates[i].y / 16;
+      if (cell_x < 0) cell_x = 0;
       if (cell_x >= 4) cell_x = 3;
+      if (cell_y < 0) cell_y = 0;
       if (cell_y >= 5) cell_y = 4;
 
       if (cell_counts[cell_x][cell_y] < 2)
@@ -467,8 +561,8 @@ fpi_fte3600_ipa_extract (const guint8         *image,
   for (guint i = 0; i < n_selected; i++)
     {
       Fte3600IpaMinutia *m = &features->minutiae[i];
-      m->x = (gfloat) selected[i].x;
-      m->y = (gfloat) selected[i].y;
+      m->x = selected[i].x;
+      m->y = selected[i].y;
       m->theta = selected[i].theta;
 
       gfloat cos_t = cosf (m->theta);
@@ -658,6 +752,7 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
   guint best_inlier_indices[FTE3600_IPA_MAX_MINUTIAE];
   guint n_best = 0;
 
+  /* 1. Evaluate single-minutia rotation hypotheses */
   for (guint m1 = 0; m1 < n_matches; m1++)
     {
       if (!supported[m1]) continue;
@@ -694,6 +789,80 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
           n_best = cluster_inl;
           for (guint k = 0; k < cluster_inl; k++)
             best_inlier_indices[k] = cur_indices[k];
+        }
+    }
+
+  /* 2. Evaluate two-point spatial vector rotation hypotheses */
+  for (guint m1 = 0; m1 < n_matches; m1++)
+    {
+      if (!supported[m1]) continue;
+      guint i1 = matches[m1].i, j1 = matches[m1].j;
+
+      for (guint m2 = m1 + 1; m2 < n_matches; m2++)
+        {
+          if (!supported[m2]) continue;
+          guint i2 = matches[m2].i, j2 = matches[m2].j;
+
+          gfloat dx1 = q_ctx.minutiae[i2].x - q_ctx.minutiae[i1].x;
+          gfloat dy1 = q_ctx.minutiae[i2].y - q_ctx.minutiae[i1].y;
+          gfloat d1 = hypotf (dx1, dy1);
+          if (d1 < 12.0f)
+            continue;
+
+          gfloat dx2 = r_ctx.minutiae[j2].x - r_ctx.minutiae[j1].x;
+          gfloat dy2 = r_ctx.minutiae[j2].y - r_ctx.minutiae[j1].y;
+          gfloat d2 = hypotf (dx2, dy2);
+          if (d2 < 12.0f || fabsf (d1 - d2) > (3.0f + 0.08f * d1))
+            continue;
+
+          /* Spatial vector rotation from relative bearings */
+          gfloat b1 = atan2f (dy1, dx1);
+          gfloat b2 = atan2f (dy2, dx2);
+          gfloat rot = atan2f (sinf (b2 - b1), cosf (b2 - b1));
+
+          /* Consistency check with local orientation differences */
+          gfloat rot1 = diff_angle_pi (r_ctx.minutiae[j1].theta, q_ctx.minutiae[i1].theta);
+          if (fabsf (atan2f (sinf (rot - rot1), cosf (rot - rot1))) > 0.40f)
+            continue;
+
+          gfloat cos_r = cosf (rot), sin_r = sinf (rot);
+
+          /* Midpoint translation */
+          gfloat mid_q_x = 0.5f * (q_ctx.minutiae[i1].x + q_ctx.minutiae[i2].x);
+          gfloat mid_q_y = 0.5f * (q_ctx.minutiae[i1].y + q_ctx.minutiae[i2].y);
+          gfloat mid_r_x = 0.5f * (r_ctx.minutiae[j1].x + r_ctx.minutiae[j2].x);
+          gfloat mid_r_y = 0.5f * (r_ctx.minutiae[j1].y + r_ctx.minutiae[j2].y);
+
+          gfloat tx = mid_r_x - (cos_r * mid_q_x - sin_r * mid_q_y);
+          gfloat ty = mid_r_y - (sin_r * mid_q_x + cos_r * mid_q_y);
+
+          guint cluster_inl = 0;
+          gfloat cluster_sim = 0.0f;
+          guint cur_indices[FTE3600_IPA_MAX_MINUTIAE];
+
+          for (guint m3 = 0; m3 < n_matches; m3++)
+            {
+              if (!supported[m3]) continue;
+              guint i3 = matches[m3].i, j3 = matches[m3].j;
+              gfloat pred_x = cos_r * q_ctx.minutiae[i3].x - sin_r * q_ctx.minutiae[i3].y + tx;
+              gfloat pred_y = sin_r * q_ctx.minutiae[i3].x + cos_r * q_ctx.minutiae[i3].y + ty;
+              gfloat err = hypotf (r_ctx.minutiae[j3].x - pred_x, r_ctx.minutiae[j3].y - pred_y);
+              if (err <= 4.5f)
+                {
+                  cur_indices[cluster_inl] = m3;
+                  cluster_inl++;
+                  cluster_sim += matches[m3].sim;
+                }
+            }
+          if (cluster_inl > max_cluster_inliers ||
+              (cluster_inl == max_cluster_inliers && cluster_sim > best_sim_sum))
+            {
+              max_cluster_inliers = cluster_inl;
+              best_sim_sum = cluster_sim;
+              n_best = cluster_inl;
+              for (guint k = 0; k < cluster_inl; k++)
+                best_inlier_indices[k] = cur_indices[k];
+            }
         }
     }
 

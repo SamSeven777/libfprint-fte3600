@@ -2315,6 +2315,53 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
+  /* 1. If authentication was accepted by any active engine, report SUCCESS immediately */
+  if (job->compare_status == FTE3600_TEMPLATE_OK && job->comparison.authentication_accepted)
+    {
+      const gchar *mode_str = "DUAL";
+      if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY)
+        mode_str = "BRISK-ONLY";
+      else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
+        mode_str = "2D-IPA-ONLY";
+
+      fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+              mode_str,
+              job->comparison.n_compared, job->comparison.diagnostic_passes,
+              job->comparison.brisk_accepted ? "PASS" : "FAIL",
+              job->comparison.ipa_accepted ? "PASS" : "FAIL",
+              "MATCH");
+      fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
+      fpi_device_verify_complete (dev, NULL);
+      return;
+    }
+
+  /* 2. If comparison executed cleanly but was rejected, report NO_MATCH */
+  if (job->compare_status == FTE3600_TEMPLATE_OK)
+    {
+      const gchar *mode_str = "DUAL";
+      if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY)
+        mode_str = "BRISK-ONLY";
+      else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
+        mode_str = "2D-IPA-ONLY";
+
+      fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+              mode_str,
+              job->comparison.n_compared, job->comparison.diagnostic_passes,
+              job->comparison.brisk_accepted ? "PASS" : "FAIL",
+              job->comparison.ipa_accepted ? "PASS" : "FAIL",
+              "NO_MATCH");
+      fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+      fpi_device_verify_complete (dev, NULL);
+      return;
+    }
+
+  /* 3. Comparison could not be cleanly executed: check template status or extractor status */
+  if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
+    {
+      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
+      return;
+    }
+
   switch (job->extract_status)
     {
     case FTE3600_BRISK_LOW_CONTRAST:
@@ -2337,37 +2384,12 @@ fte3600_verify_complete (GObject      *source_object,
       break;
     }
 
-  if (job->compare_status ==
-      FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
-    {
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
-      return;
-    }
   if (job->compare_status != FTE3600_TEMPLATE_OK)
     {
       fte3600_complete_action_error (
         self, fte3600_verify_template_error (job->compare_status));
       return;
     }
-
-  const gchar *mode_str = "DUAL";
-  if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY)
-    mode_str = "BRISK-ONLY";
-  else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
-    mode_str = "2D-IPA-ONLY";
-
-  fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
-          mode_str,
-          job->comparison.n_compared, job->comparison.diagnostic_passes,
-          job->comparison.brisk_accepted ? "PASS" : "FAIL",
-          job->comparison.ipa_accepted ? "PASS" : "FAIL",
-          job->comparison.authentication_accepted ? "MATCH" : "NO_MATCH");
-  fpi_device_verify_report (
-    dev,
-    job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS :
-    FPI_MATCH_FAIL,
-    NULL, NULL);
-  fpi_device_verify_complete (dev, NULL);
 }
 
 static void
