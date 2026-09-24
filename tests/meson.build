@@ -401,6 +401,7 @@ if 'fte3600' in drivers
             'test-fte3600-template.c',
             '../libfprint/drivers/fte3600-template.c',
             '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-ipa.c',
         ],
         dependencies: [glib_dep, mathlib_dep],
         c_args: common_cflags + fte3600_personal_auth_cflags,

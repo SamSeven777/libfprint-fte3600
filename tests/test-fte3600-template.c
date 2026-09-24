@@ -450,7 +450,7 @@ test_malformed_headers_and_lengths (void)
                    FTE3600_TEMPLATE_OK);
   original = g_bytes_get_data (wire, &original_size);
 
-  assert_header_mutation (wire, 8, 2, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
+  assert_header_mutation (wire, 8, 3, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 10, 38, FTE3600_TEMPLATE_INVALID_WIRE);
   assert_header_mutation (wire, 16, 0x9360, FTE3600_TEMPLATE_INVALID_WIRE);
   assert_header_mutation (wire, 24, 2,
@@ -743,6 +743,143 @@ test_rounding_mode_isolation (void)
   g_assert_cmpint (fesetround (caller_mode), ==, 0);
 }
 
+static void
+make_fingerprint_pattern (guint8 *image)
+{
+  static const struct
+  {
+    gdouble x;
+    gdouble y;
+    gdouble sigma;
+    gdouble amplitude;
+  } spots[] = {
+    { 17, 18, 1.5,  58 }, { 29, 17, 2.2, -54 },
+    { 43, 19, 3.1,  61 }, { 51, 29, 1.8, -48 },
+    { 18, 32, 2.7, -61 }, { 32, 31, 1.4,  52 },
+    { 43, 39, 2.4, -57 }, { 17, 47, 1.9,  55 },
+    { 31, 49, 3.2,  63 }, { 49, 52, 1.5, -53 },
+    { 20, 63, 2.3, -58 }, { 36, 63, 1.7,  57 },
+    { 48, 66, 2.8,  50 },
+  };
+
+  for (guint y = 0; y < FTE3600_IPA_HEIGHT; y++)
+    {
+      for (guint x = 0; x < FTE3600_IPA_WIDTH; x++)
+        {
+          gdouble value = 126.0 + 15.0 * sin (0.29 * x + 0.17 * y) +
+                          10.0 * cos (0.13 * x - 0.23 * y);
+
+          for (guint i = 0; i < G_N_ELEMENTS (spots); i++)
+            {
+              const gdouble dx = x - spots[i].x;
+              const gdouble dy = y - spots[i].y;
+              value += spots[i].amplitude *
+                       exp (-(dx * dx + dy * dy) / (2.0 * spots[i].sigma * spots[i].sigma));
+            }
+
+          image[y * FTE3600_IPA_WIDTH + x] = (guint8) CLAMP (floor (value + 0.5), 2, 253);
+        }
+    }
+}
+
+static void
+test_dual_engine_fusion (void)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(Fte3600Template) decoded = NULL;
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet ipa_ref = { 0 };
+  Fte3600BriskFeatureSet brisk_match = { 0 };
+  const guint8 *wire_data;
+  gsize wire_size = 0;
+
+  make_fingerprint_pattern (image);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa_ref),
+                   ==, FTE3600_IPA_OK);
+  g_assert_cmpuint (ipa_ref.n_minutiae, >=, FTE3600_IPA_POLICY_MIN_INLIERS);
+
+  for (guint sample = 0;
+       sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet features;
+      make_feature_set (&features, sample, FALSE);
+      if (sample == 0)
+        make_feature_set (&brisk_match, sample, FALSE);
+      g_assert_cmpint (
+        fpi_fte3600_template_add_dual_features (templ, &features, &ipa_ref, NULL),
+        ==,
+        sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+    }
+
+  g_assert_true (fpi_fte3600_template_is_ready (templ));
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+
+  wire_data = g_bytes_get_data (wire, &wire_size);
+  g_assert_cmpuint (read_u16 (&wire_data[8]), ==, FTE3600_TEMPLATE_WIRE_VERSION_V2);
+  g_assert_cmpuint (read_u32 (&wire_data[32]), ==, 0x01); /* Dual engine flag */
+
+#if FTE3600_ENABLE_PERSONAL_AUTH
+  Fte3600IpaFeatureSet ipa_probe = ipa_ref;
+  Fte3600BriskFeatureSet brisk_nomatch = { 0 };
+  Fte3600TemplateCompareResult result;
+
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (fpi_fte3600_template_is_ready (decoded));
+
+  brisk_nomatch.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  brisk_nomatch.n_features = TEST_FEATURES;
+  for (guint i = 0; i < TEST_FEATURES; i++)
+    {
+      brisk_nomatch.features[i].x = 5.0f + (gfloat) (i % 3) * 15.0f;
+      brisk_nomatch.features[i].y = 5.0f + (gfloat) (i / 3) * 18.0f;
+      brisk_nomatch.features[i].orientation = 0.0f;
+      memset (brisk_nomatch.features[i].descriptor, 0xaa ^ (guint8) i,
+              FTE3600_BRISK_DESCRIPTOR_BYTES);
+    }
+
+  /* 1. Dual Match: BRISK passes, IPA passes -> Auth Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_match, &ipa_probe,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.brisk_accepted);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 2. BRISK only (IPA NULL): BRISK passes -> Auth Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_match, NULL,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 3. IPA only (BRISK fails): IPA passes -> Auth Accepted (OR strategy!) */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_nomatch, &ipa_probe,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 4. Neither passes: BRISK fails, IPA NULL -> Auth Rejected */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_nomatch, NULL,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+#else
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_NOT_CALIBRATED);
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (fpi_fte3600_template_is_ready (decoded));
+#endif
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -767,5 +904,7 @@ main (int   argc,
                    test_incomplete_and_arguments);
   g_test_add_func ("/fte3600-template/rounding-mode-isolation",
                    test_rounding_mode_isolation);
+  g_test_add_func ("/fte3600-template/dual-engine-fusion",
+                   test_dual_engine_fusion);
   return g_test_run ();
 }

@@ -24,6 +24,7 @@
 #include "fte3600.h"
 #include "drivers_api.h"
 #include "fte3600-template.h"
+#include "fte3600-ipa.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1918,7 +1919,9 @@ fte3600_enroll_worker (GTask        *task,
                        GCancellable *cancellable)
 {
   Fte3600EnrollJob *job = task_data;
-  Fte3600BriskFeatureSet features = { 0 };
+  Fte3600BriskFeatureSet brisk_features = { 0 };
+  Fte3600IpaFeatureSet ipa_features = { 0 };
+  const Fte3600IpaFeatureSet *p_ipa = NULL;
 
   (void) source_object;
   (void) cancellable;
@@ -1927,7 +1930,10 @@ fte3600_enroll_worker (GTask        *task,
     goto out;
 
   job->extract_status =
-    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &brisk_features);
+  if (fpi_fte3600_ipa_extract (job->image, sizeof (job->image), &ipa_features) == FTE3600_IPA_OK)
+    p_ipa = &ipa_features;
+
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -1939,8 +1945,10 @@ fte3600_enroll_worker (GTask        *task,
     }
   else
     {
-      job->status = fpi_fte3600_template_add_features (job->enroll_template,
-                                                       &features, NULL);
+      job->status = fpi_fte3600_template_add_dual_features (job->enroll_template,
+                                                            &brisk_features,
+                                                            p_ipa,
+                                                            NULL);
       if (g_task_return_error_if_cancelled (task))
         goto out;
 
@@ -1956,7 +1964,8 @@ fte3600_enroll_worker (GTask        *task,
     g_task_return_boolean (task, TRUE);
 
 out:
-  fte3600_secure_clear (&features, sizeof (features));
+  fte3600_secure_clear (&brisk_features, sizeof (brisk_features));
+  fte3600_secure_clear (&ipa_features, sizeof (ipa_features));
 }
 
 static void
@@ -2043,7 +2052,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
 
     wire_data = g_bytes_get_data (job->encoded_template, &wire_size);
     if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-        wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
+        wire_size > FTE3600_TEMPLATE_V2_CURRENT_MAX_WIRE_SIZE)
       {
         fte3600_complete_action_error (
           self, fpi_device_error_new_msg (
@@ -2184,7 +2193,7 @@ fte3600_verify_load_template (FpiDeviceFte3600 *self)
   wire_data = g_variant_get_fixed_array (data, &wire_size,
                                          sizeof (*wire_data));
   if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-      wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
+      wire_size > FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE)
     return fpi_device_error_new_msg (
       FP_DEVICE_ERROR_DATA_INVALID,
       "FTE3600 verification template has an invalid length");
@@ -2225,7 +2234,9 @@ fte3600_verify_worker (GTask        *task,
                        GCancellable *cancellable)
 {
   Fte3600VerifyJob *job = task_data;
-  Fte3600BriskFeatureSet features = { 0 };
+  Fte3600BriskFeatureSet brisk_features = { 0 };
+  Fte3600IpaFeatureSet ipa_features = { 0 };
+  const Fte3600IpaFeatureSet *p_ipa = NULL;
 
   (void) source_object;
   (void) cancellable;
@@ -2234,21 +2245,25 @@ fte3600_verify_worker (GTask        *task,
     goto out;
 
   job->extract_status =
-    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &brisk_features);
+  if (fpi_fte3600_ipa_extract (job->image, sizeof (job->image), &ipa_features) == FTE3600_IPA_OK)
+    p_ipa = &ipa_features;
+
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
   if (job->extract_status == FTE3600_BRISK_OK)
-    job->compare_status = fpi_fte3600_template_compare_features (
-      job->verify_template, &features,
+    job->compare_status = fpi_fte3600_template_compare_dual_features (
+      job->verify_template, &brisk_features, p_ipa,
       FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &job->comparison);
 
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
 
 out:
-  fte3600_secure_clear (&features, sizeof (features));
+  fte3600_secure_clear (&brisk_features, sizeof (brisk_features));
+  fte3600_secure_clear (&ipa_features, sizeof (ipa_features));
 }
 
 static void
@@ -2317,8 +2332,11 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
-  fp_dbg ("Personal verification compared %u subtemplates; strict passes %u",
-          job->comparison.n_compared, job->comparison.diagnostic_passes);
+  fp_dbg ("Personal verification compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+          job->comparison.n_compared, job->comparison.diagnostic_passes,
+          job->comparison.brisk_accepted ? "PASS" : "FAIL",
+          job->comparison.ipa_accepted ? "PASS" : "FAIL",
+          job->comparison.authentication_accepted ? "MATCH" : "NO_MATCH");
   fpi_device_verify_report (
     dev,
     job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS :
