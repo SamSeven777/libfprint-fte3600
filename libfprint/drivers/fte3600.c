@@ -59,8 +59,8 @@ static inline gboolean
 fte3600_acpi_path_equal (const gchar *path_a,
                          const gchar *path_b)
 {
-  g_auto (GStrv) parts_a = NULL;
-  g_auto (GStrv) parts_b = NULL;
+  g_auto(GStrv) parts_a = NULL;
+  g_auto(GStrv) parts_b = NULL;
   guint len_a, len_b;
 
   if (!path_a || !path_b || !*path_a || !*path_b)

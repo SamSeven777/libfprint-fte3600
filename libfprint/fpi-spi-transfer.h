@@ -105,10 +105,10 @@ void               fpi_spi_transfer_read_full (FpiSpiTransfer *transfer,
                                                GDestroyNotify  free_func);
 
 void               fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
-                                                      gboolean        full_duplex);
+                                                     gboolean        full_duplex);
 
 void               fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
-                                                    gboolean        sensitive);
+                                                   gboolean        sensitive);
 
 void               fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
                                             GCancellable          *cancellable,

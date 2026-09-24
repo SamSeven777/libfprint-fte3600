@@ -105,7 +105,7 @@ mock_ioctl_reset (MockIoctlMode mode,
                   gsize         length_rd,
                   const guint8 *reply)
 {
-  mock_ioctl = (MockIoctlData) {
+  mock_ioctl = (MockIoctlData){
     .mode = mode,
     .buffer_wr = buffer_wr,
     .buffer_rd = buffer_rd,
@@ -121,6 +121,7 @@ test_full_duplex_sync (void)
   guint8 request[] = { 0x04, 0xfb, 0x34, 0x00 };
   const guint8 reply[] = { 0x00, 0x00, 0xa5, 0x5a };
   guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GError) error = NULL;
@@ -169,6 +170,7 @@ test_full_duplex_async (void)
   guint8 request[] = { 0x10, 0xef, 0x20, 0x00 };
   const guint8 reply[] = { 0x00, 0x00, 0xa5, 0x5a };
   guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GMainLoop) loop = g_main_loop_new (NULL, FALSE);
@@ -200,6 +202,7 @@ test_full_duplex_short_transfer (void)
   guint8 request[] = { 0x04, 0xfb, 0x34, 0x00 };
   const guint8 reply[] = { 0x00, 0x00, 0xa5, 0x5a };
   guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GError) error = NULL;
@@ -226,6 +229,7 @@ test_full_duplex_unequal_lengths (void)
 {
   guint8 request[2] = { 0 };
   guint8 response[3] = { 0 };
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GError) error = NULL;
@@ -248,6 +252,7 @@ test_full_duplex_too_large (void)
   const gsize oversize = G_MAXUINT16 + 1;
   g_autofree guint8 *request = g_malloc0 (oversize);
   g_autofree guint8 *response = g_malloc0 (oversize);
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GError) error = NULL;
@@ -270,6 +275,7 @@ test_sequential_unchanged (void)
   guint8 request[] = { 0x10, 0xef };
   const guint8 reply[] = { 0xa5, 0x5a, 0x00 };
   guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(FpiSpiTransfer) transfer = NULL;
   g_autoptr(GError) error = NULL;
@@ -298,7 +304,7 @@ test_sensitive_log_redaction (void)
       const guint8 reply[] = { 0xba, 0xad, 0xf0, 0x0d, 0x12, 0x34 };
       guint8 response[G_N_ELEMENTS (reply)] = { 0 };
       g_autoptr(FpDevice) device =
-          g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+        g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
       g_autoptr(FpiSpiTransfer) transfer = NULL;
       g_autoptr(GError) error = NULL;
 

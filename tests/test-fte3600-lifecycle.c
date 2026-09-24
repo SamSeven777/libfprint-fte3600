@@ -82,37 +82,37 @@ static const TestPlatform platforms[] = {
 
 static struct
 {
-  GMutex        lock;
+  GMutex              lock;
   const TestPlatform *platform;
-  gint          spi_fd;
-  gint          irq_pipe[2];
-  guint         opens;
-  guint         closes;
-  guint         claims;
-  guint         chip_opens;
-  guint         releases;
-  guint         resets;
-  guint         hardware_asserts;
-  guint         hardware_deasserts;
-  guint         images;
-  guint         irq_source;
-  guint8        registers[256];
-  gboolean      claimed;
-  gboolean      armed;
-  gboolean      finger_ready;
-  gboolean      bad_id;
-  gboolean      fail_config;
-  gboolean      fail_claim;
-  gboolean      fail_image;
-  gboolean      fail_reset;
-  gboolean      cancel_image;
-  gboolean      hardware_recovery;
-  gboolean      cold_start;
-  gboolean      reset_asserted;
-  gboolean      cancel_hardware_reset;
-  gboolean      fail_hardware_reset;
-  IrqAction     irq_action;
-  GCancellable *cancellable;
+  gint                spi_fd;
+  gint                irq_pipe[2];
+  guint               opens;
+  guint               closes;
+  guint               claims;
+  guint               chip_opens;
+  guint               releases;
+  guint               resets;
+  guint               hardware_asserts;
+  guint               hardware_deasserts;
+  guint               images;
+  guint               irq_source;
+  guint8              registers[256];
+  gboolean            claimed;
+  gboolean            armed;
+  gboolean            finger_ready;
+  gboolean            bad_id;
+  gboolean            fail_config;
+  gboolean            fail_claim;
+  gboolean            fail_image;
+  gboolean            fail_reset;
+  gboolean            cancel_image;
+  gboolean            hardware_recovery;
+  gboolean            cold_start;
+  gboolean            reset_asserted;
+  gboolean            cancel_hardware_reset;
+  gboolean            fail_hardware_reset;
+  IrqAction           irq_action;
+  GCancellable       *cancellable;
 } sensor;
 
 int
@@ -149,11 +149,17 @@ __wrap_g_file_get_contents (const gchar *path, gchar **contents,
   const gchar *value = NULL;
 
   if (g_str_equal (path, "/sys/class/dmi/id/sys_vendor"))
-    value = sensor.platform->vendor;
+    {
+      value = sensor.platform->vendor;
+    }
   else if (g_str_equal (path, "/sys/class/dmi/id/product_name"))
-    value = sensor.platform->product;
+    {
+      value = sensor.platform->product;
+    }
   else if (g_str_equal (path, "/mock/gpio/firmware_node/path"))
-    value = sensor.platform->controller_path;
+    {
+      value = sensor.platform->controller_path;
+    }
   else if (g_str_equal (path, "/mock/gpio/firmware_node/hid"))
     {
       value = sensor.platform->controller_hid;
@@ -165,9 +171,13 @@ __wrap_g_file_get_contents (const gchar *path, gchar **contents,
         }
     }
   else if (g_str_equal (path, "/sys/module/spidev/parameters/bufsiz"))
-    value = "32768\n";
+    {
+      value = "32768\n";
+    }
   else
-    return __real_g_file_get_contents (path, contents, length, error);
+    {
+      return __real_g_file_get_contents (path, contents, length, error);
+    }
 
   *contents = g_strdup (value);
   if (length)
@@ -592,6 +602,7 @@ static void
 test_unknown_controller_hid (gconstpointer data)
 {
   TestPlatform platform = platforms[1];
+
   g_autoptr(GError) error = NULL;
   FpDevice *device;
 
@@ -611,6 +622,7 @@ static void
 test_unknown_dmi (void)
 {
   TestPlatform platform = platforms[0];
+
   g_autoptr(GError) error = NULL;
   FpDevice *device;
 
@@ -628,6 +640,7 @@ test_hardware_reset (gconstpointer data)
 {
   guint scenario = GPOINTER_TO_UINT (data);
   FpDevice *device = new_device ();
+
   g_autoptr(GError) error = NULL;
 
   sensor.hardware_recovery = TRUE;
@@ -647,7 +660,7 @@ test_hardware_reset (gconstpointer data)
     {
       g_assert_false (fp_device_open_sync (device, sensor.cancellable, &error));
       g_assert_error (error, G_IO_ERROR,
-                       (scenario == 1 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+                      (scenario == 1 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
       g_assert_false (fp_device_is_open (device));
       g_assert_cmpint (sensor.spi_fd, ==, -1);
       g_assert_false (sensor.claimed);
