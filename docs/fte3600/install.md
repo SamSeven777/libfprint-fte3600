@@ -1,156 +1,181 @@
-# Build and installation
+# Build & Installation Guide
 
-Clone the repository and run all commands from the repository root:
+This guide covers dependency installation, firmware setup for cold-boot recovery, compilation, system configuration, and enrollment verification for `libfprint-fte3600`.
+
+---
+
+## 1. Prerequisites & Dependencies
+
+Clone the repository and ensure all commands are run from the repository root:
 
 ```sh
 git clone --branch main https://github.com/SamSeven777/libfprint-fte3600.git
 cd libfprint-fte3600
 ```
 
-See [hardware status](status.md) for verified platforms and requirements.
+Install build dependencies for your distribution:
 
-## Dependencies
-
-Arch Linux:
-
+### Arch Linux
 ```sh
-sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel libgusb \
-  libgudev libgpiod cairo fprintd
+sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel \
+  libgusb libgudev libgpiod cairo fprintd
 ```
 
-Fedora 43+:
-
+### Fedora 43+
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
   glib2-devel libgusb-devel libgudev-devel libgpiod-devel systemd-devel \
   systemd cairo-devel fprintd
 ```
 
-Ubuntu 26.04+:
-
+### Ubuntu 26.04+
 ```sh
 sudo apt install build-essential git meson ninja-build pkg-config \
   libglib2.0-dev libgusb-dev libgudev-1.0-dev libgpiod-dev libudev-dev \
   systemd-dev libcairo2-dev fprintd
 ```
 
-Requires libgpiod 2.x; Ubuntu 22.04/24.04 need a backport. Fedora and Ubuntu
-are build-tested; hardware validation is on Arch Linux.
+> [!NOTE]
+> The driver requires **`libgpiod` 2.x**. Older distributions (e.g., Ubuntu 22.04 / 24.04) provide `libgpiod` 1.x and require a backport or manual build of libgpiod 2.x.
+> Hardware validation is primarily conducted on Arch Linux; Fedora and Ubuntu are validated via build and unit tests.
 
-## Firmware for cold-boot recovery
+---
 
-Cold-boot recovery requires a 10,396-byte image at
-`/usr/lib/firmware/fte3600/ft9361.bin`, with SHA256
-`027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`.
-Neither the repository nor its packages bundle firmware.
+## 2. Firmware for Cold-Boot Recovery
 
-### Automated installer (Recommended)
+When the machine is completely powered off, the FT9361 sensor loses its volatile SRAM code and boots into an uninitialized MCU state (`00 00`). The driver automatically restores normal operation by uploading a 10,396-byte microcode payload over SPI to `/usr/lib/firmware/fte3600/ft9361.bin`.
 
-Run the included clean-room installation script. It downloads the signed vendor
-package directly from the Microsoft Update Catalog, cuts and verifies the
-firmware image, and installs it to `/usr/lib/firmware/fte3600/ft9361.bin`:
+Neither the repository nor its binary packages bundle this proprietary binary. You must extract it using one of the methods below.
+
+### Option A: Automated Download & Extraction (Recommended)
+
+Run the included clean-room script. It downloads the signed vendor driver package directly from the Microsoft Update Catalog, extracts the firmware payload at the verified byte offset, validates the SHA256 checksum, and installs it:
 
 ```sh
 ./scripts/install-firmware.sh
 ```
+*(Requires `curl` or `wget`, and `cabextract` or `7z`).*
 
-*(Requires `cabextract` or `7z`, and `curl` or `wget`).*
+### Option B: Local Windows Driver Extraction
 
-### Manual extraction from Windows driver
-
-If you already have a copy of `ftWbioUmdfDriverV2.dll`, you can pass it to the
-installer script or extract manually using `dd`:
+If you have access to the vendor driver (`ftWbioUmdfDriverV2.dll` or the vendor `.cab` archive):
 
 ```sh
-# Automated extraction from local DLL or CAB:
+# Automated extraction from local file:
 ./scripts/install-firmware.sh /path/to/ftWbioUmdfDriverV2.dll
 
-# Or manual extraction (offset 489824 for driver 2.0.3.102, 141824 for 2.0.3.100):
-fte_fw_dir=$(mktemp -d) &&
-dd if=/path/to/ftWbioUmdfDriverV2.dll of="$fte_fw_dir/ft9361.bin" \
-  bs=1 skip=489824 count=10396 status=none &&
-printf '%s  %s\n' \
-  027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f \
-  "$fte_fw_dir/ft9361.bin" | sha256sum -c - &&
-sudo install -Dm644 "$fte_fw_dir/ft9361.bin" \
-  /usr/lib/firmware/fte3600/ft9361.bin
+# Or manual extraction using dd (offset 489824 for driver v2.0.3.102):
+tmp_fw=$(mktemp -d)
+dd if=/path/to/ftWbioUmdfDriverV2.dll of="$tmp_fw/ft9361.bin" \
+  bs=1 skip=489824 count=10396 status=none
+printf '027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f  %s\n' \
+  "$tmp_fw/ft9361.bin" | sha256sum -c - && \
+  sudo install -Dm644 "$tmp_fw/ft9361.bin" /usr/lib/firmware/fte3600/ft9361.bin
+rm -rf "$tmp_fw"
 ```
 
-Offsets vary across driver versions; do not bypass a hash mismatch.
-`FTE3600_FIRMWARE_PATH` overrides the path for a diagnostic process, preserving
-validation and hardware gating. Shell variables do not configure D-Bus fprintd.
+Firmware integrity specifications:
+- **Location**: `/usr/lib/firmware/fte3600/ft9361.bin`
+- **File Size**: `10,396` bytes
+- **SHA256**: `027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`
 
-## Build and install
+---
 
-The default build exposes capture only. Host-side enrollment and verification
-require `-Dfte3600_personal_auth=true` (the Arch package enables this by default).
-Ensure you have a working root/sudo password as fallback before enabling biometric
-authentication on your system.
+## 3. Build & Installation
 
-> [!IMPORTANT]
-> Policy Version 3 enforces updated geometric consensus gates calibrated against offline test datasets.
-> If upgrading from earlier prototype builds, existing stored templates will be rejected by design;
-> simply re-enroll using `fprintd-enroll "$USER"`. Note that multi-person, population-level
-> authentication remains uncertified; keep biometric usage confined to personal experiments with
-> a working password fallback.
+### Option A: Arch Linux Package (Recommended for Arch)
 
-### Arch package
-
-From the committed Git checkout (GitHub source archives lack required metadata):
+The repository includes a ready-to-build `PKGBUILD` that compiles `libfprint` with `-Dfte3600_personal_auth=true` and automatically installs required systemd drop-ins and modprobe configurations:
 
 ```sh
-(cd packaging/arch && makepkg -si)
+cd packaging/arch
+makepkg -si
 sudo reboot
 ```
 
-This replaces stock libfprint and installs the SPI buffer and GPIO settings below.
+### Option B: Manual Meson Compilation (All Distributions)
 
-
-### Meson build
-
-From the repository root:
+To build and install manually:
 
 ```sh
+# Configure build directory
 meson setup build-fte3600 --prefix=/usr \
-  -Ddrivers=fte3600 -Dfte3600_personal_auth=false \
-  -Dgtk-examples=false -Ddoc=false -Dintrospection=false \
-  -Dinstalled-tests=false -Dwerror=true
+  -Ddrivers=fte3600 \
+  -Dfte3600_personal_auth=true \
+  -Dgtk-examples=false \
+  -Ddoc=false \
+  -Dintrospection=false \
+  -Dinstalled-tests=false \
+  -Dwerror=true
+
+# Compile
 meson compile -C build-fte3600
+
+# Execute unit and lifecycle test suite
 meson test -C build-fte3600 --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template
+  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template test-fte3600-lifecycle
+
+# Install library
+sudo meson install -C build-fte3600
 ```
 
-To opt in, configure `meson configure build-fte3600 -Dfte3600_personal_auth=true`
-and repeat compile/test. `./scripts/check-fte3600.sh` tests both policies.
+> [!NOTE]
+> Setting `-Dfte3600_personal_auth=false` builds a capture-only driver without host verification capabilities. Default upstream submissions use capture-only by default.
 
-Fedora/Ubuntu have no native fork packages. On a test system, manual installation
-is possible but untracked by the package manager and may be overwritten:
+---
+
+## 4. System Configuration
+
+For manual installations (non-Arch package), two system configurations are mandatory:
+
+### 1. SPI Buffer Size (`bufsiz=32768`)
+Linux kernel's default `spidev` buffer size is 4,096 bytes. The cold-boot recovery transfer requires a continuous 10,403-byte payload that cannot be chunked. Set the buffer size to 32,768 bytes:
 
 ```sh
-sudo meson install -C build-fte3600
-sudo install -Dm644 config/modprobe.d/fte3600-spidev.conf \
-  /etc/modprobe.d/fte3600-spidev.conf
-sudo install -Dm644 config/systemd/10-fte3600-gpio.conf \
-  /etc/systemd/system/fprintd.service.d/10-fte3600-gpio.conf
+sudo install -Dm644 config/modprobe.d/fte3600-spidev.conf /etc/modprobe.d/fte3600-spidev.conf
+```
+
+### 2. Systemd Sandbox GPIO Permission
+Modern `fprintd.service` units run with restricted device access. To allow `fprintd` to toggle the hardware reset and interrupt GPIO lines, install the systemd service drop-in:
+
+```sh
+sudo install -Dm644 config/systemd/10-fte3600-gpio.conf /etc/systemd/system/fprintd.service.d/10-fte3600-gpio.conf
 sudo systemctl daemon-reload
+```
+
+### 3. SELinux Policy (Fedora Only)
+On Fedora systems with SELinux in Enforcing mode, `fprintd_t` is blocked from opening GPIO character devices. Install the provided CIL module:
+
+```sh
+sudo semodule -i config/selinux/fte3600-gpio.cil
+```
+
+After completing system configuration, reboot the system:
+```sh
 sudo reboot
 ```
 
-After reboot, `/dev/spidev*` must exist and
-`cat /sys/module/spidev/parameters/bufsiz` should report `32768`.
-Recovery needs at least `10403` bytes; images need `5128`. Neither transfer
-may be split. The GPIO drop-in permits `char-gpiochip rw` inside fprintd's sandbox.
-For permission failures, see the optional
-[Fedora SELinux policy](troubleshooting.md#fprintd-cannot-open-gpio).
+---
 
-## Verify
+## 5. Enrollment & Verification
 
-With the personal policy enabled, keep a working password and run:
+After rebooting, confirm that `spidev` bufsiz is active:
+```sh
+cat /sys/module/spidev/parameters/bufsiz
+# Expected output: 32768
+```
 
+Ensure you have a working root/user password fallback, then enroll a finger:
 ```sh
 fprintd-enroll -f left-index-finger "$USER"
+```
+
+Verify authentication against the enrolled template:
+```sh
 fprintd-verify -f left-index-finger "$USER"
 ```
 
-For A1 cold-boot acceptance, shut down and boot directly into Linux, then verify.
-Removing enrollment with `fprintd-delete "$USER"` requires re-enrollment.
+> [!IMPORTANT]
+> **Policy Version 3 Notice**:
+> If updating from older experimental versions, existing stored templates in `/var/lib/fprint/` will be rejected due to incompatible geometric consensus formats. Delete old templates using `fprintd-delete "$USER"` and perform a fresh enrollment.
+
