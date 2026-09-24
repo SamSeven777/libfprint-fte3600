@@ -123,10 +123,10 @@ test_gpio_profiles (void)
   g_assert_cmpuint (medion->reset_offset, ==, 0x27);
   g_assert_cmpuint (medion->irq_offset, ==, 0);
 
-  /* Test environment variable override for reset line polarity */
+  /* Obsolete process-environment overrides cannot alter a board's polarity. */
   g_setenv ("FTE3600_RESET_ACTIVE_LOW", "0", TRUE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_ACTIVE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
   g_setenv ("FTE3600_RESET_ACTIVE_LOW", "1", TRUE);
   g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
   g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);

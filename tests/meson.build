@@ -351,6 +351,36 @@ if 'fte3600' in drivers
         env: fte3600_driver_envs,
     )
 
+    fte3600_mock_symbols = [
+        'open', 'open64', 'close', 'ioctl', 'g_file_get_contents',
+        'g_udev_client_new', 'g_udev_client_query_by_subsystem',
+        'g_udev_device_get_device_file', 'g_udev_device_get_sysfs_path',
+        'gpiod_chip_open', 'gpiod_chip_close', 'gpiod_chip_request_lines',
+        'gpiod_line_request_release', 'gpiod_line_request_set_value',
+        'gpiod_line_request_get_fd', 'gpiod_line_request_wait_edge_events',
+        'gpiod_line_request_read_edge_events',
+        'gpiod_edge_event_buffer_get_event', 'gpiod_edge_event_get_event_type',
+        'gpiod_edge_event_get_line_offset',
+    ]
+    fte3600_mock_link_args = []
+    foreach symbol : fte3600_mock_symbols
+        fte3600_mock_link_args += '-Wl,--wrap=' + symbol
+    endforeach
+    fte3600_lifecycle_test = executable('test-fte3600-lifecycle',
+        sources: 'test-fte3600-lifecycle.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        link_args: fte3600_mock_link_args,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-lifecycle',
+        fte3600_lifecycle_test,
+        suite: ['unit-tests'],
+        env: envs,
+        timeout: 30,
+    )
+
     test_medion_e3224 = executable('test-medion-e3224',
         sources: '../tools/test_medion_e3224.c',
         dependencies: [glib_dep, gpiod_dep, gudev_dep],

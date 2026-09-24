@@ -107,6 +107,28 @@ test:
     expire_in: 1 week
   coverage: '/^TOTAL.*\s+(\d+\%)$/'
 
+test_fte3600:
+  stage: test
+  extends:
+    - .standard_job
+  parallel:
+    matrix:
+      - FTE3600_AUTH: ['false', 'true']
+  script:
+    - >-
+      meson setup _build --werror -Ddrivers=fte3600
+      -Dfte3600_personal_auth=$FTE3600_AUTH
+      -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
+      -Db_sanitize=address,undefined
+    - meson test -C _build --print-errorlogs --suite=unit-tests
+  artifacts:
+    when: always
+    reports:
+      junit: _build/meson-logs/testlog.junit.xml
+    paths:
+      - _build/meson-logs
+    expire_in: 1 week
+
 test_valgrind:
   stage: test
   extends:

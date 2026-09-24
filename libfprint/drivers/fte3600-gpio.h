@@ -79,18 +79,10 @@ static inline enum gpiod_line_value
 fte3600_reset_line_value (const Fte3600GpioProfile *profile,
                           gboolean                  asserted)
 {
-  gboolean active_low;
-  const gchar *env_override;
-
   g_assert (profile != NULL);
-  active_low = profile->reset_active_low;
 
-  env_override = g_getenv ("FTE3600_RESET_ACTIVE_LOW");
-  if (env_override && *env_override)
-    active_low = (g_strcmp0 (env_override, "1") == 0 ||
-                  g_ascii_strcasecmp (env_override, "true") == 0);
-
-  if (active_low)
+  /* Polarity is a reviewed board property, never a process-environment knob. */
+  if (profile->reset_active_low)
     return asserted ? GPIOD_LINE_VALUE_INACTIVE : GPIOD_LINE_VALUE_ACTIVE;
   else
     return asserted ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
