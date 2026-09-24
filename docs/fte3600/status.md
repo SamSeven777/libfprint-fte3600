@@ -8,7 +8,7 @@
 | **DMI sys_vendor** | `ONE-NETBOOK TECHNOLOGY CO., LTD.` | `MEDION` |
 | **DMI product_name** | `A1` | `E3224` |
 | **ACPI Device ID** | `FTE3600` | `FTE3600` |
-| **Sensor IC** | FocalTech FT9361 (64 × 80 px) | FocalTech FT9361 (64 × 80 px) |
+| **Sensor IC** | FocalTech FT9361 (64 × 80 px) | Expected FT9361; hardware ID not yet read successfully |
 | **SPI Configuration** | Mode 0, 8-bit, 1 MHz | Mode 0, 8-bit, 1 MHz |
 | **Reset GPIO** | `\_SB_.PCI0.GPI0` offset `0x55` (ActiveLow) | `\_SB_.GPO1` offset `0x27` (ActiveLow, pending real-device test) |
 | **IRQ GPIO** | `\_SB_.PCI0.GPI0` offset `0x56` (ActiveHigh) | `\_SB_.GPO2` offset `0x00` (ActiveHigh) |
