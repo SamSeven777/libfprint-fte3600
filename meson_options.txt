@@ -6,6 +6,10 @@ option('fte3600_personal_auth',
        description: 'Enable the explicitly uncalibrated, personal-use FTE3600 verification policy',
        type: 'boolean',
        value: false)
+option('fte3600_ipa_auth',
+       description: 'Opt into experimental IPA/dual authentication; requires fte3600_personal_auth',
+       type: 'boolean',
+       value: false)
 option('introspection',
        description: 'Build GObject Introspection repository',
        type: 'boolean',

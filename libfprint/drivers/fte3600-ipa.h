@@ -8,6 +8,7 @@
 #pragma once
 
 #include <glib.h>
+#include "fte3600-brisk.h"
 
 G_BEGIN_DECLS
 
@@ -19,7 +20,23 @@ G_BEGIN_DECLS
 #define FTE3600_IPA_DESC_DIM 32
 #define FTE3600_IPA_NUM_PROBES 4
 
-/* Authentication Gates calibrated on FVC2002 DB3_B (FAR = 0.0000%) */
+/* Versioned experimental schema. These gates have no population FAR/FRR
+ * calibration. Authentication needs a separate opt-in in addition to the
+ * BRISK personal-authentication build; diagnostic matching is always available. */
+#define FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION 2
+#define FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION 2
+#ifndef FTE3600_ENABLE_IPA_AUTH
+#define FTE3600_ENABLE_IPA_AUTH 0
+#endif
+#if FTE3600_ENABLE_IPA_AUTH != 0 && FTE3600_ENABLE_IPA_AUTH != 1
+#error "FTE3600_ENABLE_IPA_AUTH must be zero or one"
+#endif
+#if FTE3600_ENABLE_IPA_AUTH && !FTE3600_ENABLE_PERSONAL_AUTH
+#error "IPA authentication requires personal authentication as well"
+#endif
+#define FTE3600_IPA_AUTHENTICATION_POLICY_VERSION (FTE3600_ENABLE_IPA_AUTH ? 2 : 0)
+#define FTE3600_IPA_ORIENTATION_LIMIT ((gfloat) 3.14159265358979323846)
+
 #define FTE3600_IPA_POLICY_MIN_INLIERS     4
 #define FTE3600_IPA_POLICY_MIN_SCORE       0.41f
 #define FTE3600_IPA_POLICY_MIN_SPAN_X      6.0f
@@ -41,6 +58,7 @@ typedef struct {
 } Fte3600IpaMinutia;
 
 typedef struct {
+  guint extractor_schema_version;
   guint n_minutiae;
   Fte3600IpaMinutia minutiae[FTE3600_IPA_MAX_MINUTIAE];
 } Fte3600IpaFeatureSet;
@@ -51,6 +69,7 @@ typedef struct {
   gfloat consensus_score;
   gfloat x_span;
   gfloat y_span;
+  gboolean diagnostic_policy_passed;
   gboolean authentication_accepted;
 } Fte3600IpaMatchResult;
 
@@ -71,8 +90,15 @@ Fte3600IpaStatus fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
                                         Fte3600IpaMatchResult      *result);
 
 /*
- * Decision policy: returns TRUE if match result satisfies the authentication gate.
+ * Diagnostic gate only; match.authentication_accepted additionally applies
+ * both explicit build-time authentication opt-ins.
  */
 gboolean fpi_fte3600_ipa_result_meets_policy (const Fte3600IpaMatchResult *result);
+
+gboolean fpi_fte3600_ipa_validate_feature_set (const Fte3600IpaFeatureSet *features);
+
+/* Schema-v1 projection coefficient: normalized Sylvester Hadamard H32.
+ * H[row,column] = (-1)^popcount(row & column) / sqrt(32). */
+gfloat fpi_fte3600_ipa_projection_coefficient (guint row, guint column);
 
 G_END_DECLS

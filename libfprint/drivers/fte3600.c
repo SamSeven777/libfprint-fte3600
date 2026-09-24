@@ -327,6 +327,8 @@ typedef struct
   guint8                       image[FT9361_IMAGE_SIZE];
   Fte3600Template             *verify_template;
   Fte3600BriskStatus           extract_status;
+  Fte3600IpaStatus             ipa_extract_status;
+  Fte3600EngineMode            engine_mode;
   Fte3600TemplateStatus        compare_status;
   Fte3600TemplateCompareResult comparison;
 } Fte3600VerifyJob;
@@ -455,19 +457,10 @@ static gboolean
 fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
                              GError          **error)
 {
-  const gchar *force_probe = g_getenv ("FTE3600_FORCE_PROBE");
   g_autofree gchar *sys_vendor = NULL;
   g_autofree gchar *product_name = NULL;
 
   self->gpio_profile = NULL;
-  if (force_probe && (g_strcmp0 (force_probe, "1") == 0 ||
-                      g_ascii_strcasecmp (force_probe, "true") == 0))
-    {
-      fp_warn ("FTE3600_FORCE_PROBE active; bypassing DMI hardware restriction");
-      self->gpio_profile = &fte3600_gpio_profiles[1];
-      return TRUE;
-    }
-
   if (!fte3600_read_dmi_value ("sys_vendor", &sys_vendor, error) ||
       !fte3600_read_dmi_value ("product_name", &product_name, error))
     return FALSE;
@@ -523,8 +516,19 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
             g_build_filename (sysfs_path, "firmware_node", "hid", NULL);
           g_autofree gchar *chip_hid = NULL;
 
-          if (g_file_get_contents (hid_file, &chip_hid, NULL, NULL))
+          /* DMI identifies a family, not necessarily its GPIO layout. Resolve
+           * chipset-specific profiles before requesting or driving any lines. */
+          if (self->gpio_profile->controller_hid)
             {
+              const Fte3600GpioProfile *matched_profile = NULL;
+
+              if (!g_file_get_contents (hid_file, &chip_hid, NULL, NULL))
+                {
+                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                               "Cannot determine the GPIO controller HID for %s",
+                               self->gpio_profile->product_name);
+                  break;
+                }
               g_strchomp (chip_hid);
               for (guint i = 0; i < G_N_ELEMENTS (fte3600_gpio_profiles); i++)
                 {
@@ -532,14 +536,23 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 
                   if (g_str_equal (p->sys_vendor, self->gpio_profile->sys_vendor) &&
                       g_str_equal (p->product_name, self->gpio_profile->product_name) &&
+                      fte3600_acpi_path_equal (p->controller_acpi_path, controller_path) &&
                       p->controller_hid && g_str_equal (p->controller_hid, chip_hid))
                     {
-                      self->gpio_profile = p;
-                      fp_dbg ("Selected chipset profile for %s (HID: %s)",
-                              p->product_name, chip_hid);
+                      matched_profile = p;
                       break;
                     }
                 }
+              if (!matched_profile)
+                {
+                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                               "GPIO controller HID '%s' is not verified for %s",
+                               chip_hid, self->gpio_profile->product_name);
+                  break;
+                }
+              self->gpio_profile = matched_profile;
+              fp_dbg ("Selected chipset profile for %s (HID: %s)",
+                      matched_profile->product_name, chip_hid);
             }
           result = g_strdup (device_file);
           break;
@@ -548,7 +561,7 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 
   g_list_free_full (gpio_devices, g_object_unref);
 
-  if (!result)
+  if (!result && (!error || !*error))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                    "Could not find the GPIO controller %s required by the "
@@ -572,33 +585,18 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   struct gpiod_chip *chip = NULL;
   unsigned int irq_offset;
   unsigned int reset_offset;
-  const gchar *env_reset;
-  const gchar *env_irq;
   gint saved_errno = 0;
 
   g_assert (self->gpio_profile != NULL);
-  irq_offset = self->gpio_profile->irq_offset;
-  reset_offset = self->gpio_profile->reset_offset;
-
-  env_reset = g_getenv ("FTE3600_RESET_GPIO_OFFSET");
-  env_irq = g_getenv ("FTE3600_IRQ_GPIO_OFFSET");
-  if (env_reset && *env_reset)
-    {
-      reset_offset = (guint) g_ascii_strtoull (env_reset, NULL, 0);
-      fp_info ("Overriding reset GPIO offset to %u via FTE3600_RESET_GPIO_OFFSET",
-               reset_offset);
-    }
-  if (env_irq && *env_irq)
-    {
-      irq_offset = (guint) g_ascii_strtoull (env_irq, NULL, 0);
-      fp_info ("Overriding IRQ GPIO offset to %u via FTE3600_IRQ_GPIO_OFFSET",
-               irq_offset);
-    }
-
-  g_assert_cmpuint (irq_offset, !=, reset_offset);
   gpiochip_path = fte3600_find_irq_gpiochip (self, error);
   if (!gpiochip_path)
     return FALSE;
+
+  /* The resolver may select a different chipset within the DMI family.
+   * Use this final profile for both the request and every later operation. */
+  irq_offset = self->gpio_profile->irq_offset;
+  reset_offset = self->gpio_profile->reset_offset;
+  g_assert_cmpuint (irq_offset, !=, reset_offset);
 
   chip = gpiod_chip_open (gpiochip_path);
   irq_settings = gpiod_line_settings_new ();
@@ -1931,8 +1929,10 @@ fte3600_enroll_worker (GTask        *task,
 
   job->extract_status =
     fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &brisk_features);
+#if FTE3600_ENABLE_IPA_AUTH
   if (fpi_fte3600_ipa_extract (job->image, sizeof (job->image), &ipa_features) == FTE3600_IPA_OK)
     p_ipa = &ipa_features;
+#endif
 
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
@@ -2052,7 +2052,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
 
     wire_data = g_bytes_get_data (job->encoded_template, &wire_size);
     if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-        wire_size > FTE3600_TEMPLATE_V2_CURRENT_MAX_WIRE_SIZE)
+        wire_size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE)
       {
         fte3600_complete_action_error (
           self, fpi_device_error_new_msg (
@@ -2193,7 +2193,7 @@ fte3600_verify_load_template (FpiDeviceFte3600 *self)
   wire_data = g_variant_get_fixed_array (data, &wire_size,
                                          sizeof (*wire_data));
   if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-      wire_size > FTE3600_TEMPLATE_V2_MAX_WIRE_SIZE)
+      wire_size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE)
     return fpi_device_error_new_msg (
       FP_DEVICE_ERROR_DATA_INVALID,
       "FTE3600 verification template has an invalid length");
@@ -2244,38 +2244,47 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  job->extract_status =
-    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &brisk_features);
-  if (fpi_fte3600_ipa_extract (job->image, sizeof (job->image), &ipa_features) == FTE3600_IPA_OK)
-    p_ipa = &ipa_features;
+  if (!fpi_fte3600_engine_mode_parse (g_getenv ("FP_FTE3600_MATCHER"),
+                                     &job->engine_mode))
+    {
+      g_task_return_error (task, fpi_device_error_new_msg (
+        FP_DEVICE_ERROR_NOT_SUPPORTED, "Unknown FTE3600 matcher mode"));
+      goto out;
+    }
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY && !FTE3600_ENABLE_IPA_AUTH)
+    {
+      g_task_return_error (task, fpi_device_error_new_msg (
+        FP_DEVICE_ERROR_NOT_SUPPORTED,
+        "IPA authentication requires its separate experimental build opt-in"));
+      goto out;
+    }
+
+  job->extract_status = FTE3600_BRISK_INSUFFICIENT_FEATURES;
+  job->ipa_extract_status = FTE3600_IPA_ERR_TOO_FEW_POINTS;
+  if (job->engine_mode != FTE3600_ENGINE_MODE_IPA_ONLY)
+    job->extract_status =
+      fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &brisk_features);
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY)
+    {
+      job->ipa_extract_status =
+        fpi_fte3600_ipa_extract (job->image, sizeof (job->image), &ipa_features);
+      if (job->ipa_extract_status == FTE3600_IPA_OK)
+        p_ipa = &ipa_features;
+    }
 
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  if (job->extract_status == FTE3600_BRISK_OK || p_ipa != NULL)
-    {
-      Fte3600EngineMode engine_mode = FTE3600_ENGINE_MODE_DUAL_FUSION;
-      const gchar *env_mode = g_getenv ("FP_FTE3600_MATCHER");
-      if (env_mode != NULL)
-        {
-          if (g_ascii_strcasecmp (env_mode, "brisk") == 0)
-            engine_mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
-          else if (g_ascii_strcasecmp (env_mode, "ipa") == 0)
-            engine_mode = FTE3600_ENGINE_MODE_IPA_ONLY;
-          else if (g_ascii_strcasecmp (env_mode, "dual") == 0)
-            engine_mode = FTE3600_ENGINE_MODE_DUAL_FUSION;
-        }
-
-      job->compare_status = fpi_fte3600_template_compare_with_mode (
-        job->verify_template,
-        job->extract_status == FTE3600_BRISK_OK ? &brisk_features : NULL,
-        p_ipa,
-        FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
-        engine_mode,
-        &job->comparison);
-    }
-
+  if (job->extract_status == FTE3600_BRISK_INVALID_ARGUMENT ||
+      job->ipa_extract_status == FTE3600_IPA_ERR_PARAM)
+    job->compare_status = FTE3600_TEMPLATE_INVALID_WIRE;
+  else
+    job->compare_status = fpi_fte3600_template_compare_with_mode (
+      job->verify_template,
+      job->extract_status == FTE3600_BRISK_OK ? &brisk_features : NULL,
+      p_ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+      job->engine_mode, &job->comparison);
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
 
@@ -2315,27 +2324,8 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
-  /* 1. If authentication was accepted by any active engine, report SUCCESS immediately */
-  if (job->compare_status == FTE3600_TEMPLATE_OK && job->comparison.authentication_accepted)
-    {
-      const gchar *mode_str = "DUAL";
-      if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY)
-        mode_str = "BRISK-ONLY";
-      else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
-        mode_str = "2D-IPA-ONLY";
-
-      fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
-              mode_str,
-              job->comparison.n_compared, job->comparison.diagnostic_passes,
-              job->comparison.brisk_accepted ? "PASS" : "FAIL",
-              job->comparison.ipa_accepted ? "PASS" : "FAIL",
-              "MATCH");
-      fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
-      fpi_device_verify_complete (dev, NULL);
-      return;
-    }
-
-  /* 2. If comparison executed cleanly but was rejected, report NO_MATCH */
+  /* A completed comparison reports either match or no-match. Extraction
+   * failure in an unused/alternate engine cannot override this result. */
   if (job->compare_status == FTE3600_TEMPLATE_OK)
     {
       const gchar *mode_str = "DUAL";
@@ -2349,47 +2339,25 @@ fte3600_verify_complete (GObject      *source_object,
               job->comparison.n_compared, job->comparison.diagnostic_passes,
               job->comparison.brisk_accepted ? "PASS" : "FAIL",
               job->comparison.ipa_accepted ? "PASS" : "FAIL",
-              "NO_MATCH");
-      fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+              job->comparison.authentication_accepted ? "MATCH" : "NO_MATCH");
+      fpi_device_verify_report (
+        dev, job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+        NULL, NULL);
       fpi_device_verify_complete (dev, NULL);
       return;
     }
 
-  /* 3. Comparison could not be cleanly executed: check template status or extractor status */
   if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
     {
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
+      fte3600_verify_report_retry (self,
+        job->engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY &&
+        job->extract_status == FTE3600_BRISK_LOW_CONTRAST ?
+          FP_DEVICE_RETRY_GENERAL : FP_DEVICE_RETRY_CENTER_FINGER);
       return;
     }
 
-  switch (job->extract_status)
-    {
-    case FTE3600_BRISK_LOW_CONTRAST:
-    case FTE3600_BRISK_NO_CONSENSUS:
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_GENERAL);
-      return;
-
-    case FTE3600_BRISK_INSUFFICIENT_FEATURES:
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
-      return;
-
-    case FTE3600_BRISK_INVALID_ARGUMENT:
-      fte3600_complete_action_error (
-        self, fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_DATA_INVALID,
-          "FTE3600 extractor rejected a verification image"));
-      return;
-
-    case FTE3600_BRISK_OK:
-      break;
-    }
-
-  if (job->compare_status != FTE3600_TEMPLATE_OK)
-    {
-      fte3600_complete_action_error (
-        self, fte3600_verify_template_error (job->compare_status));
-      return;
-    }
+  fte3600_complete_action_error (
+    self, fte3600_verify_template_error (job->compare_status));
 }
 
 static void

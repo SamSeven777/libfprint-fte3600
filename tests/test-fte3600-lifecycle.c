@@ -62,16 +62,38 @@ typedef enum {
   CANCEL_WAIT,
 } IrqAction;
 
+typedef struct
+{
+  const gchar *vendor;
+  const gchar *product;
+  const gchar *controller_path;
+  const gchar *controller_hid;
+  guint        reset_offset;
+  guint        irq_offset;
+} TestPlatform;
+
+static const TestPlatform platforms[] = {
+  { "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", "\\_SB_.PCI0.GPI0", NULL, 0x55, 0x56 },
+  { "GPD", "Pocket 3", "\\_SB_.GPI0", "INT34C8", 211, 56 },
+  { "GPD", "Pocket 3", "\\_SB_.GPI0", "INT3455", 179, 24 },
+  { "GPD", "GPD Pocket 3", "\\_SB_.GPI0", "INT34C8", 211, 56 },
+  { "GPD", "GPD Pocket 3", "\\_SB_.GPI0", "INT3455", 179, 24 },
+};
+
 static struct
 {
   GMutex        lock;
+  const TestPlatform *platform;
   gint          spi_fd;
   gint          irq_pipe[2];
   guint         opens;
   guint         closes;
   guint         claims;
+  guint         chip_opens;
   guint         releases;
   guint         resets;
+  guint         hardware_asserts;
+  guint         hardware_deasserts;
   guint         images;
   guint         irq_source;
   guint8        registers[256];
@@ -84,6 +106,11 @@ static struct
   gboolean      fail_image;
   gboolean      fail_reset;
   gboolean      cancel_image;
+  gboolean      hardware_recovery;
+  gboolean      cold_start;
+  gboolean      reset_asserted;
+  gboolean      cancel_hardware_reset;
+  gboolean      fail_hardware_reset;
   IrqAction     irq_action;
   GCancellable *cancellable;
 } sensor;
@@ -122,11 +149,21 @@ __wrap_g_file_get_contents (const gchar *path, gchar **contents,
   const gchar *value = NULL;
 
   if (g_str_equal (path, "/sys/class/dmi/id/sys_vendor"))
-    value = "ONE-NETBOOK TECHNOLOGY CO., LTD.\n";
+    value = sensor.platform->vendor;
   else if (g_str_equal (path, "/sys/class/dmi/id/product_name"))
-    value = "A1\n";
+    value = sensor.platform->product;
   else if (g_str_equal (path, "/mock/gpio/firmware_node/path"))
-    value = "\\_SB_.PCI0.GPI0\n";
+    value = sensor.platform->controller_path;
+  else if (g_str_equal (path, "/mock/gpio/firmware_node/hid"))
+    {
+      value = sensor.platform->controller_hid;
+      if (!value)
+        {
+          g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_NOENT,
+                               "Mock controller has no HID attribute");
+          return FALSE;
+        }
+    }
   else if (g_str_equal (path, "/sys/module/spidev/parameters/bufsiz"))
     value = "32768\n";
   else
@@ -168,6 +205,7 @@ struct gpiod_chip *
 __wrap_gpiod_chip_open (const char *path)
 {
   g_assert_cmpstr (path, ==, "/mock/gpiochip");
+  sensor.chip_opens++;
   return (struct gpiod_chip *) &sensor;
 }
 
@@ -182,6 +220,35 @@ __wrap_gpiod_chip_request_lines (struct gpiod_chip           *chip,
                                  struct gpiod_request_config *request_config,
                                  struct gpiod_line_config    *line_config)
 {
+  unsigned int offsets[2];
+  struct gpiod_line_settings *reset_settings;
+  struct gpiod_line_settings *irq_settings;
+
+  /* Inspect the real libgpiod configuration, not just driver-side metadata. */
+  g_assert_cmpuint (gpiod_line_config_get_num_configured_offsets (line_config), ==, 2);
+  g_assert_cmpuint (gpiod_line_config_get_configured_offsets (line_config, offsets, 2), ==, 2);
+  g_assert_true ((offsets[0] == sensor.platform->reset_offset &&
+                  offsets[1] == sensor.platform->irq_offset) ||
+                 (offsets[1] == sensor.platform->reset_offset &&
+                  offsets[0] == sensor.platform->irq_offset));
+  reset_settings = gpiod_line_config_get_line_settings (line_config,
+                                                        sensor.platform->reset_offset);
+  irq_settings = gpiod_line_config_get_line_settings (line_config,
+                                                      sensor.platform->irq_offset);
+  g_assert_nonnull (reset_settings);
+  g_assert_nonnull (irq_settings);
+  g_assert_cmpint (gpiod_line_settings_get_direction (reset_settings), ==,
+                   GPIOD_LINE_DIRECTION_OUTPUT);
+  g_assert_cmpint (gpiod_line_settings_get_output_value (reset_settings), ==,
+                   GPIOD_LINE_VALUE_ACTIVE);
+  g_assert_false (gpiod_line_settings_get_active_low (reset_settings));
+  g_assert_cmpint (gpiod_line_settings_get_direction (irq_settings), ==,
+                   GPIOD_LINE_DIRECTION_INPUT);
+  g_assert_cmpint (gpiod_line_settings_get_edge_detection (irq_settings), ==,
+                   GPIOD_LINE_EDGE_RISING);
+  gpiod_line_settings_free (reset_settings);
+  gpiod_line_settings_free (irq_settings);
+
   if (sensor.fail_claim)
     {
       errno = EBUSY;
@@ -197,6 +264,7 @@ void
 __wrap_gpiod_line_request_release (struct gpiod_line_request *request)
 {
   g_assert_true (sensor.claimed);
+  g_assert_false (sensor.reset_asserted);
   sensor.claimed = FALSE;
   sensor.releases++;
 }
@@ -207,9 +275,30 @@ __wrap_gpiod_line_request_set_value (struct gpiod_line_request *request,
                                      enum gpiod_line_value      value)
 {
   g_assert_true (sensor.claimed);
-  g_assert_cmpuint (offset, ==, 0x55);
-  /* These scenarios never need hardware recovery; release leaves reset high. */
-  g_assert_cmpint (value, ==, GPIOD_LINE_VALUE_ACTIVE);
+  g_assert_cmpuint (offset, ==, sensor.platform->reset_offset);
+  if (value == GPIOD_LINE_VALUE_INACTIVE)
+    {
+      g_assert_true (sensor.hardware_recovery);
+      sensor.hardware_asserts++;
+      if (sensor.fail_hardware_reset)
+        {
+          errno = EIO;
+          return -1;
+        }
+      sensor.reset_asserted = TRUE;
+      if (sensor.cancel_hardware_reset)
+        g_cancellable_cancel (sensor.cancellable);
+    }
+  else
+    {
+      g_assert_cmpint (value, ==, GPIOD_LINE_VALUE_ACTIVE);
+      if (sensor.reset_asserted)
+        {
+          sensor.hardware_deasserts++;
+          sensor.reset_asserted = FALSE;
+          sensor.cold_start = FALSE;
+        }
+    }
   return 0;
 }
 
@@ -279,7 +368,7 @@ __wrap_gpiod_edge_event_get_event_type (struct gpiod_edge_event *event)
 unsigned int
 __wrap_gpiod_edge_event_get_line_offset (struct gpiod_edge_event *event)
 {
-  return 0x56;
+  return sensor.platform->irq_offset;
 }
 
 int
@@ -333,7 +422,7 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       memset (rx, 0, transfer->len);
       if (tx[2] == FT9361_REG_MCU_STATUS)
         {
-          if (!sensor.armed)
+          if (!sensor.armed && !sensor.cold_start)
             {
               rx[4] = 0xa5;
               rx[5] = 0x5a;
@@ -374,25 +463,33 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   return result;
 }
 
+typedef struct
+{
+  gboolean complete;
+  GError  *error;
+} DeviceInit;
+
 static void
 init_complete (GObject *object, GAsyncResult *result, gpointer data)
 {
-  GError *error = NULL;
+  DeviceInit *initialized = data;
+  gboolean success;
 
-  g_assert_true (g_async_initable_init_finish (G_ASYNC_INITABLE (object), result,
-                                               &error));
-  g_assert_no_error (error);
-  *(gboolean *) data = TRUE;
+  success = g_async_initable_init_finish (G_ASYNC_INITABLE (object), result,
+                                          &initialized->error);
+  g_assert_cmpint (success, ==, initialized->error == NULL);
+  initialized->complete = TRUE;
 }
 
 static FpDevice *
-new_device (void)
+new_device_for_platform (const TestPlatform *platform, GError **error)
 {
-  gboolean initialized = FALSE;
+  DeviceInit initialized = { 0 };
   FpDevice *device;
 
   memset (&sensor, 0, sizeof (sensor));
   g_mutex_init (&sensor.lock);
+  sensor.platform = platform;
   sensor.spi_fd = -1;
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = FT9361_SENSOR_ID_HIGH;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = FT9361_SENSOR_ID_LOW;
@@ -404,8 +501,20 @@ new_device (void)
                          "fpi-udev-data-spidev", "/mock/fte3600-spi", NULL);
   g_async_initable_init_async (G_ASYNC_INITABLE (device), G_PRIORITY_DEFAULT,
                                NULL, init_complete, &initialized);
-  while (!initialized)
+  while (!initialized.complete)
     g_main_context_iteration (NULL, TRUE);
+  if (initialized.error)
+    g_propagate_error (error, initialized.error);
+  return device;
+}
+
+static FpDevice *
+new_device (void)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = new_device_for_platform (&platforms[0], &error);
+
+  g_assert_no_error (error);
   return device;
 }
 
@@ -442,9 +551,12 @@ open_device (FpDevice *device)
 }
 
 static void
-test_capture_reopen (void)
+test_capture_reopen (gconstpointer data)
 {
-  FpDevice *device = new_device ();
+  g_autoptr(GError) init_error = NULL;
+  FpDevice *device = new_device_for_platform (data, &init_error);
+
+  g_assert_no_error (init_error);
 
   for (guint round = 0; round < 2; round++)
     {
@@ -473,6 +585,86 @@ test_capture_reopen (void)
       g_assert_false (sensor.claimed);
     }
   g_assert_cmpuint (sensor.images, ==, 2);
+  finish_device (device);
+}
+
+static void
+test_unknown_controller_hid (gconstpointer data)
+{
+  TestPlatform platform = platforms[1];
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  platform.controller_hid = data;
+  device = new_device_for_platform (&platform, &error);
+  g_assert_no_error (error);
+  g_assert_false (fp_device_open_sync (device, NULL, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_assert_cmpuint (sensor.chip_opens, ==, 0);
+  g_assert_cmpuint (sensor.claims, ==, 0);
+  g_assert_cmpuint (sensor.resets, ==, 0);
+  g_assert_false (fp_device_is_open (device));
+  finish_device (device);
+}
+
+static void
+test_unknown_dmi (void)
+{
+  TestPlatform platform = platforms[0];
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  platform.vendor = "UNVERIFIED";
+  device = new_device_for_platform (&platform, &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_assert_cmpuint (sensor.opens, ==, 0);
+  g_assert_cmpuint (sensor.chip_opens, ==, 0);
+  g_assert_cmpuint (sensor.claims, ==, 0);
+  finish_device (device);
+}
+
+static void
+test_hardware_reset (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  FpDevice *device = new_device ();
+  g_autoptr(GError) error = NULL;
+
+  sensor.hardware_recovery = TRUE;
+  sensor.cold_start = TRUE;
+  sensor.cancel_hardware_reset = scenario == 1;
+  sensor.fail_hardware_reset = scenario == 2;
+  if (scenario == 2)
+    g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
+                           "*Sensor reset after open failure also failed:*");
+
+  if (scenario == 0)
+    {
+      g_assert_true (fp_device_open_sync (device, sensor.cancellable, &error));
+      g_assert_no_error (error);
+    }
+  else
+    {
+      g_assert_false (fp_device_open_sync (device, sensor.cancellable, &error));
+      g_assert_error (error, G_IO_ERROR,
+                       (scenario == 1 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+      g_assert_false (fp_device_is_open (device));
+      g_assert_cmpint (sensor.spi_fd, ==, -1);
+      g_assert_false (sensor.claimed);
+    }
+
+  if (scenario == 2)
+    {
+      g_test_assert_expected_messages ();
+      g_assert_cmpuint (sensor.hardware_asserts, ==, 1);
+      g_assert_cmpuint (sensor.hardware_deasserts, ==, 0);
+    }
+  else
+    {
+      /* Cancellation during the first pulse must not truncate either pulse. */
+      g_assert_cmpuint (sensor.hardware_asserts, ==, 2);
+      g_assert_cmpuint (sensor.hardware_deasserts, ==, 2);
+    }
   finish_device (device);
 }
 
@@ -567,7 +759,34 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
-  g_test_add_func ("/fte3600-lifecycle/capture-reopen", test_capture_reopen);
+  /* Former production overrides must not bypass DMI or change requested GPIOs.
+   * Set these before any worker threads are created, for the entire test run. */
+  g_setenv ("FTE3600_FORCE_PROBE", "1", TRUE);
+  g_setenv ("FTE3600_RESET_GPIO_OFFSET", "7", TRUE);
+  g_setenv ("FTE3600_IRQ_GPIO_OFFSET", "8", TRUE);
+  g_test_add_data_func ("/fte3600-lifecycle/capture-reopen", &platforms[0],
+                        test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/jasper-lake", &platforms[1],
+                        test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/tiger-lake", &platforms[2],
+                        test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/jasper-lake-product-alias", &platforms[3],
+                        test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/tiger-lake-product-alias", &platforms[4],
+                        test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/unknown-hid", "UNKNOWN",
+                        test_unknown_controller_hid);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/missing-hid", NULL,
+                        test_unknown_controller_hid);
+  g_test_add_data_func ("/fte3600-lifecycle/gpio/empty-hid", "",
+                        test_unknown_controller_hid);
+  g_test_add_func ("/fte3600-lifecycle/probe/unknown-dmi", test_unknown_dmi);
+  g_test_add_data_func ("/fte3600-lifecycle/hardware-reset/recovery", GUINT_TO_POINTER (0),
+                        test_hardware_reset);
+  g_test_add_data_func ("/fte3600-lifecycle/hardware-reset/cancel", GUINT_TO_POINTER (1),
+                        test_hardware_reset);
+  g_test_add_data_func ("/fte3600-lifecycle/hardware-reset/error", GUINT_TO_POINTER (2),
+                        test_hardware_reset);
   g_test_add_data_func ("/fte3600-lifecycle/cancel-wait", GINT_TO_POINTER (TRUE),
                         test_capture_error);
   g_test_add_data_func ("/fte3600-lifecycle/capture-error", GINT_TO_POINTER (FALSE),
