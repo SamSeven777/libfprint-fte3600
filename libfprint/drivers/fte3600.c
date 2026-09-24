@@ -2253,10 +2253,28 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  if (job->extract_status == FTE3600_BRISK_OK)
-    job->compare_status = fpi_fte3600_template_compare_dual_features (
-      job->verify_template, &brisk_features, p_ipa,
-      FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &job->comparison);
+  if (job->extract_status == FTE3600_BRISK_OK || p_ipa != NULL)
+    {
+      Fte3600EngineMode engine_mode = FTE3600_ENGINE_MODE_DUAL_FUSION;
+      const gchar *env_mode = g_getenv ("FP_FTE3600_MATCHER");
+      if (env_mode != NULL)
+        {
+          if (g_ascii_strcasecmp (env_mode, "brisk") == 0)
+            engine_mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
+          else if (g_ascii_strcasecmp (env_mode, "ipa") == 0)
+            engine_mode = FTE3600_ENGINE_MODE_IPA_ONLY;
+          else if (g_ascii_strcasecmp (env_mode, "dual") == 0)
+            engine_mode = FTE3600_ENGINE_MODE_DUAL_FUSION;
+        }
+
+      job->compare_status = fpi_fte3600_template_compare_with_mode (
+        job->verify_template,
+        job->extract_status == FTE3600_BRISK_OK ? &brisk_features : NULL,
+        p_ipa,
+        FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+        engine_mode,
+        &job->comparison);
+    }
 
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
@@ -2332,7 +2350,14 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
-  fp_dbg ("Personal verification compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+  const gchar *mode_str = "DUAL";
+  if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_BRISK_ONLY)
+    mode_str = "BRISK-ONLY";
+  else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
+    mode_str = "2D-IPA-ONLY";
+
+  fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+          mode_str,
           job->comparison.n_compared, job->comparison.diagnostic_passes,
           job->comparison.brisk_accepted ? "PASS" : "FAIL",
           job->comparison.ipa_accepted ? "PASS" : "FAIL",

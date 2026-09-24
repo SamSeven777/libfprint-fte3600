@@ -775,25 +775,26 @@ fpi_fte3600_template_decode (GBytes                    *wire,
 }
 
 Fte3600TemplateStatus
-fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
-                                            const Fte3600BriskFeatureSet *query_brisk,
-                                            const Fte3600IpaFeatureSet   *query_ipa,
-                                            Fte3600TemplateLoadPurpose    purpose,
-                                            Fte3600TemplateCompareResult *result)
+fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
+                                        const Fte3600BriskFeatureSet *query_brisk,
+                                        const Fte3600IpaFeatureSet   *query_ipa,
+                                        Fte3600TemplateLoadPurpose    purpose,
+                                        Fte3600EngineMode             mode,
+                                        Fte3600TemplateCompareResult *result)
 {
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
   CanonicalSubtemplate canonical_query;
-  FeatureSetValidation validation;
   gboolean have_best = FALSE;
 
   if (result != NULL)
     {
       memset (result, 0, sizeof (*result));
       result->best_subtemplate = G_MAXUINT;
+      result->engine_mode = mode;
     }
   if (!template_rounding_guard_enter (&rounding_guard))
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  validation = canonicalize_feature_set (query_brisk, &canonical_query);
+
   if (templ == NULL || result == NULL || !fpi_fte3600_template_is_ready (templ) ||
       (purpose != FTE3600_TEMPLATE_LOAD_DIAGNOSTIC &&
        purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION))
@@ -801,24 +802,54 @@ fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
       FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
-  if (validation != FEATURE_SET_VALID)
-    return validation_to_status (validation);
+
+  if (query_brisk != NULL)
+    {
+      const FeatureSetValidation validation =
+        canonicalize_feature_set (query_brisk, &canonical_query);
+      if (validation != FEATURE_SET_VALID)
+        return validation_to_status (validation);
+    }
+  else if (mode != FTE3600_ENGINE_MODE_IPA_ONLY)
+    {
+      return FTE3600_TEMPLATE_INVALID_WIRE;
+    }
+
+  if (mode == FTE3600_ENGINE_MODE_IPA_ONLY &&
+      (query_ipa == NULL || query_ipa->n_minutiae < 3))
+    {
+      return FTE3600_TEMPLATE_INVALID_WIRE;
+    }
 
   for (guint i = 0; i < templ->n_subtemplates; i++)
     {
-      Fte3600BriskMatchResult match;
+      Fte3600BriskMatchResult match = { 0 };
       gboolean brisk_ok = FALSE;
       gboolean ipa_ok = FALSE;
 
-      (void) fpi_fte3600_brisk_match (&canonical_query.features,
-                                      &templ->subtemplates[i].features, &match);
       result->n_compared++;
-      if (match.diagnostic_policy_passed)
-        result->diagnostic_passes++;
-      if (match.authentication_accepted)
-        brisk_ok = TRUE;
 
-      if (query_ipa != NULL && query_ipa->n_minutiae >= 3 && templ->subtemplates[i].has_ipa)
+      /* 1. BRISK evaluation (run if in BRISK or DUAL mode and query_brisk is present) */
+      if (mode != FTE3600_ENGINE_MODE_IPA_ONLY && query_brisk != NULL)
+        {
+          (void) fpi_fte3600_brisk_match (&canonical_query.features,
+                                          &templ->subtemplates[i].features, &match);
+          if (match.diagnostic_policy_passed)
+            result->diagnostic_passes++;
+          if (match.authentication_accepted)
+            brisk_ok = TRUE;
+
+          if (!have_best || match_is_better (&match, &result->best))
+            {
+              result->best = match;
+              result->best_subtemplate = i;
+              have_best = TRUE;
+            }
+        }
+
+      /* 2. 2D-IPA evaluation (run if in IPA or DUAL mode and query_ipa is present) */
+      if (mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
+          query_ipa != NULL && query_ipa->n_minutiae >= 3 && templ->subtemplates[i].has_ipa)
         {
           Fte3600IpaMatchResult ipa_res = { 0 };
           if (fpi_fte3600_ipa_match (query_ipa, &templ->subtemplates[i].ipa_features, &ipa_res) == FTE3600_IPA_OK)
@@ -830,22 +861,32 @@ fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
             }
         }
 
+      /* 3. Decision arbitration based on engine mode */
       if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION)
         {
           if (brisk_ok)
             result->brisk_accepted = TRUE;
           if (ipa_ok)
             result->ipa_accepted = TRUE;
-          /* Dual-Engine Biometric Fusion: BRISK OR 2D-IPA */
-          if (brisk_ok || ipa_ok)
-            result->authentication_accepted = TRUE;
-        }
 
-      if (!have_best || match_is_better (&match, &result->best))
-        {
-          result->best = match;
-          result->best_subtemplate = i;
-          have_best = TRUE;
+          switch (mode)
+            {
+            case FTE3600_ENGINE_MODE_BRISK_ONLY:
+              if (brisk_ok)
+                result->authentication_accepted = TRUE;
+              break;
+
+            case FTE3600_ENGINE_MODE_IPA_ONLY:
+              if (ipa_ok)
+                result->authentication_accepted = TRUE;
+              break;
+
+            case FTE3600_ENGINE_MODE_DUAL_FUSION:
+            default:
+              if (brisk_ok || ipa_ok)
+                result->authentication_accepted = TRUE;
+              break;
+            }
         }
     }
 
@@ -855,10 +896,35 @@ fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
 }
 
 Fte3600TemplateStatus
+fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
+                                            const Fte3600BriskFeatureSet *query_brisk,
+                                            const Fte3600IpaFeatureSet   *query_ipa,
+                                            Fte3600TemplateLoadPurpose    purpose,
+                                            Fte3600TemplateCompareResult *result)
+{
+  return fpi_fte3600_template_compare_with_mode (templ, query_brisk, query_ipa,
+                                                 purpose, FTE3600_ENGINE_MODE_DUAL_FUSION,
+                                                 result);
+}
+
+Fte3600TemplateStatus
 fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
                                        const Fte3600BriskFeatureSet *query,
                                        Fte3600TemplateLoadPurpose    purpose,
                                        Fte3600TemplateCompareResult *result)
 {
-  return fpi_fte3600_template_compare_dual_features (templ, query, NULL, purpose, result);
+  return fpi_fte3600_template_compare_with_mode (templ, query, NULL,
+                                                 purpose, FTE3600_ENGINE_MODE_BRISK_ONLY,
+                                                 result);
+}
+
+Fte3600TemplateStatus
+fpi_fte3600_template_compare_ipa_features (const Fte3600Template      *templ,
+                                           const Fte3600IpaFeatureSet *query_ipa,
+                                           Fte3600TemplateLoadPurpose  purpose,
+                                           Fte3600TemplateCompareResult *result)
+{
+  return fpi_fte3600_template_compare_with_mode (templ, NULL, query_ipa,
+                                                 purpose, FTE3600_ENGINE_MODE_IPA_ONLY,
+                                                 result);
 }

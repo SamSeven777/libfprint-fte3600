@@ -381,6 +381,13 @@ fpi_fte3600_ipa_extract (const guint8         *image,
           if (val <= harris_thresh)
             continue;
 
+          /* Orientation coherence check to reject isotropic/flat background noise */
+          gfloat diff_sq = (s_sxx[p_idx] - s_syy[p_idx]) * (s_sxx[p_idx] - s_syy[p_idx]);
+          gfloat cross_sq = 4.0f * s_sxy[p_idx] * s_sxy[p_idx];
+          gfloat trace_sq = (s_sxx[p_idx] + s_syy[p_idx]) * (s_sxx[p_idx] + s_syy[p_idx]);
+          if (trace_sq > 1e-4f && (diff_sq + cross_sq) < 0.04f * trace_sq)
+            continue; /* coherence < 0.20f */
+
           int is_local_max = 1;
           for (int dy = -3; dy <= 3 && is_local_max; dy++)
             {
@@ -423,15 +430,46 @@ fpi_fte3600_ipa_extract (const guint8         *image,
         }
     }
 
-  guint select_count = n_cands < FTE3600_IPA_MAX_MINUTIAE ? n_cands : FTE3600_IPA_MAX_MINUTIAE;
-  features->n_minutiae = select_count;
+  /* 4. Spatial Grid Bucketing: 4x5 cells of 16x16 pixels */
+  Candidate selected[FTE3600_IPA_MAX_MINUTIAE];
+  guint n_selected = 0;
+  guint cell_counts[4][5] = { { 0 } };
+  guint8 used[250] = { 0 };
 
-  for (guint i = 0; i < select_count; i++)
+  /* First pass: take up to 2 highest-scoring candidates per 16x16 cell */
+  for (int i = 0; i < n_cands && n_selected < FTE3600_IPA_MAX_MINUTIAE; i++)
+    {
+      int cell_x = candidates[i].x / 16;
+      int cell_y = candidates[i].y / 16;
+      if (cell_x >= 4) cell_x = 3;
+      if (cell_y >= 5) cell_y = 4;
+
+      if (cell_counts[cell_x][cell_y] < 2)
+        {
+          selected[n_selected++] = candidates[i];
+          cell_counts[cell_x][cell_y]++;
+          used[i] = 1;
+        }
+    }
+
+  /* Second pass: if under budget, fill from remaining highest scoring candidates */
+  for (int i = 0; i < n_cands && n_selected < FTE3600_IPA_MAX_MINUTIAE; i++)
+    {
+      if (!used[i])
+        {
+          selected[n_selected++] = candidates[i];
+          used[i] = 1;
+        }
+    }
+
+  features->n_minutiae = n_selected;
+
+  for (guint i = 0; i < n_selected; i++)
     {
       Fte3600IpaMinutia *m = &features->minutiae[i];
-      m->x = (gfloat) candidates[i].x;
-      m->y = (gfloat) candidates[i].y;
-      m->theta = candidates[i].theta;
+      m->x = (gfloat) selected[i].x;
+      m->y = (gfloat) selected[i].y;
+      m->theta = selected[i].theta;
 
       gfloat cos_t = cosf (m->theta);
       gfloat sin_t = sinf (m->theta);
@@ -674,9 +712,21 @@ fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
         }
       result->x_span = max_x - min_x;
       result->y_span = max_y - min_y;
-      result->consensus_score = best_sim_sum / (gfloat) (max_cluster_inliers + 1);
-      if (result->consensus_score > 1.0f)
-        result->consensus_score = 1.0f;
+      gfloat raw_score = best_sim_sum / (gfloat) (max_cluster_inliers + 1);
+      if (raw_score > 1.0f)
+        raw_score = 1.0f;
+
+      /* Overlap-aware consensus score: penalize excessive unmatched candidates in overlap span */
+      guint overlap_query_pts = 0;
+      for (guint i = 0; i < N; i++)
+        {
+          if (q_ctx.minutiae[i].x >= min_x - 1.5f && q_ctx.minutiae[i].x <= max_x + 1.5f &&
+              q_ctx.minutiae[i].y >= min_y - 1.5f && q_ctx.minutiae[i].y <= max_y + 1.5f)
+            overlap_query_pts++;
+        }
+      guint unmatched_overlap = overlap_query_pts > max_cluster_inliers ? (overlap_query_pts - max_cluster_inliers) : 0;
+      gfloat penalty_factor = 1.0f / (1.0f + 0.04f * (gfloat) unmatched_overlap);
+      result->consensus_score = raw_score * penalty_factor;
       result->n_supported_inliers = max_cluster_inliers;
     }
   else
