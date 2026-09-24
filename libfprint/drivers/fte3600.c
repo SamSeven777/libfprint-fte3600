@@ -454,19 +454,10 @@ static gboolean
 fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
                              GError          **error)
 {
-  const gchar *force_probe = g_getenv ("FTE3600_FORCE_PROBE");
   g_autofree gchar *sys_vendor = NULL;
   g_autofree gchar *product_name = NULL;
 
   self->gpio_profile = NULL;
-  if (force_probe && (g_strcmp0 (force_probe, "1") == 0 ||
-                      g_ascii_strcasecmp (force_probe, "true") == 0))
-    {
-      fp_warn ("FTE3600_FORCE_PROBE active; bypassing DMI hardware restriction");
-      self->gpio_profile = &fte3600_gpio_profiles[1];
-      return TRUE;
-    }
-
   if (!fte3600_read_dmi_value ("sys_vendor", &sys_vendor, error) ||
       !fte3600_read_dmi_value ("product_name", &product_name, error))
     return FALSE;
@@ -522,8 +513,19 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
             g_build_filename (sysfs_path, "firmware_node", "hid", NULL);
           g_autofree gchar *chip_hid = NULL;
 
-          if (g_file_get_contents (hid_file, &chip_hid, NULL, NULL))
+          /* DMI identifies a family, not necessarily its GPIO layout. Resolve
+           * chipset-specific profiles before requesting or driving any lines. */
+          if (self->gpio_profile->controller_hid)
             {
+              const Fte3600GpioProfile *matched_profile = NULL;
+
+              if (!g_file_get_contents (hid_file, &chip_hid, NULL, NULL))
+                {
+                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                               "Cannot determine the GPIO controller HID for %s",
+                               self->gpio_profile->product_name);
+                  break;
+                }
               g_strchomp (chip_hid);
               for (guint i = 0; i < G_N_ELEMENTS (fte3600_gpio_profiles); i++)
                 {
@@ -531,14 +533,23 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 
                   if (g_str_equal (p->sys_vendor, self->gpio_profile->sys_vendor) &&
                       g_str_equal (p->product_name, self->gpio_profile->product_name) &&
+                      fte3600_acpi_path_equal (p->controller_acpi_path, controller_path) &&
                       p->controller_hid && g_str_equal (p->controller_hid, chip_hid))
                     {
-                      self->gpio_profile = p;
-                      fp_dbg ("Selected chipset profile for %s (HID: %s)",
-                              p->product_name, chip_hid);
+                      matched_profile = p;
                       break;
                     }
                 }
+              if (!matched_profile)
+                {
+                  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                               "GPIO controller HID '%s' is not verified for %s",
+                               chip_hid, self->gpio_profile->product_name);
+                  break;
+                }
+              self->gpio_profile = matched_profile;
+              fp_dbg ("Selected chipset profile for %s (HID: %s)",
+                      matched_profile->product_name, chip_hid);
             }
           result = g_strdup (device_file);
           break;
@@ -547,7 +558,7 @@ fte3600_find_irq_gpiochip (FpiDeviceFte3600 *self,
 
   g_list_free_full (gpio_devices, g_object_unref);
 
-  if (!result)
+  if (!result && (!error || !*error))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                    "Could not find the GPIO controller %s required by the "
@@ -571,33 +582,18 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
   struct gpiod_chip *chip = NULL;
   unsigned int irq_offset;
   unsigned int reset_offset;
-  const gchar *env_reset;
-  const gchar *env_irq;
   gint saved_errno = 0;
 
   g_assert (self->gpio_profile != NULL);
-  irq_offset = self->gpio_profile->irq_offset;
-  reset_offset = self->gpio_profile->reset_offset;
-
-  env_reset = g_getenv ("FTE3600_RESET_GPIO_OFFSET");
-  env_irq = g_getenv ("FTE3600_IRQ_GPIO_OFFSET");
-  if (env_reset && *env_reset)
-    {
-      reset_offset = (guint) g_ascii_strtoull (env_reset, NULL, 0);
-      fp_info ("Overriding reset GPIO offset to %u via FTE3600_RESET_GPIO_OFFSET",
-               reset_offset);
-    }
-  if (env_irq && *env_irq)
-    {
-      irq_offset = (guint) g_ascii_strtoull (env_irq, NULL, 0);
-      fp_info ("Overriding IRQ GPIO offset to %u via FTE3600_IRQ_GPIO_OFFSET",
-               irq_offset);
-    }
-
-  g_assert_cmpuint (irq_offset, !=, reset_offset);
   gpiochip_path = fte3600_find_irq_gpiochip (self, error);
   if (!gpiochip_path)
     return FALSE;
+
+  /* The resolver may select a different chipset within the DMI family.
+   * Use this final profile for both the request and every later operation. */
+  irq_offset = self->gpio_profile->irq_offset;
+  reset_offset = self->gpio_profile->reset_offset;
+  g_assert_cmpuint (irq_offset, !=, reset_offset);
 
   chip = gpiod_chip_open (gpiochip_path);
   irq_settings = gpiod_line_settings_new ();
