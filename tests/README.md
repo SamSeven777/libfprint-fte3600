@@ -73,5 +73,9 @@ test enrollment cancellation. Each scenario checks that descriptors and GPIO
 requests are released; interrupted capture is followed by another capture on
 the same device to detect stale state.
 
-Run both build policies with `./scripts/check-fte3600.sh`, or run
-`meson test -C BUILD fte3600-lifecycle --print-errorlogs` in an FTE3600 build.
+This branch does not include the downstream installation/check scripts.
+Configure separate build directories with `-Ddrivers=fte3600` and
+`-Dfte3600_personal_auth=false` / `true`, then run
+`meson test -C BUILD --suite=unit-tests --print-errorlogs` for each.
+To select only the lifecycle test, use its registered name:
+`meson test -C BUILD fte3600-lifecycle --print-errorlogs`.
