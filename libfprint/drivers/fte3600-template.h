@@ -68,8 +68,8 @@ typedef enum {
 /* NULL selects BRISK unless the separate IPA authentication opt-in is built.
  * Unknown modes fail closed. Diagnostic callers can explicitly select all
  * three modes; authentication additionally checks the build-time gates. */
-gboolean fpi_fte3600_engine_mode_parse (const gchar *value,
-                                       Fte3600EngineMode *mode);
+gboolean fpi_fte3600_engine_mode_parse (const gchar       *value,
+                                        Fte3600EngineMode *mode);
 
 typedef struct
 {
@@ -136,10 +136,9 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Templa
                                                              Fte3600TemplateCompareResult *result);
 
 /* Mono-engine helper: 2D-IPA only */
-Fte3600TemplateStatus fpi_fte3600_template_compare_ipa_features (const Fte3600Template      *templ,
-                                                                 const Fte3600IpaFeatureSet *query_ipa,
-                                                                 Fte3600TemplateLoadPurpose  purpose,
+Fte3600TemplateStatus fpi_fte3600_template_compare_ipa_features (const Fte3600Template        *templ,
+                                                                 const Fte3600IpaFeatureSet   *query_ipa,
+                                                                 Fte3600TemplateLoadPurpose    purpose,
                                                                  Fte3600TemplateCompareResult *result);
 
 G_END_DECLS
-

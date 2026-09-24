@@ -77,7 +77,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CanonicalGallery, canonical_gallery_clear)
 
 typedef struct
 {
-  gsize size;
+  gsize  size;
   guint8 data[];
 } TemplateWireBuffer;
 
@@ -129,14 +129,14 @@ G_STATIC_ASSERT (FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE ==
                  FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE - FTE3600_TEMPLATE_WIRE_HEADER_SIZE);
 
 gboolean
-fpi_fte3600_engine_mode_parse (const gchar *value,
-                              Fte3600EngineMode *mode)
+fpi_fte3600_engine_mode_parse (const gchar       *value,
+                               Fte3600EngineMode *mode)
 {
   if (mode == NULL)
     return FALSE;
   if (value == NULL)
     *mode = FTE3600_ENABLE_IPA_AUTH ? FTE3600_ENGINE_MODE_DUAL_FUSION :
-                                   FTE3600_ENGINE_MODE_BRISK_ONLY;
+            FTE3600_ENGINE_MODE_BRISK_ONLY;
   else if (g_ascii_strcasecmp (value, "brisk") == 0)
     *mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
   else if (g_ascii_strcasecmp (value, "ipa") == 0)
@@ -397,7 +397,7 @@ ipa_point_compare (const void *first, const void *second)
 
 static gboolean
 canonicalize_ipa_feature_set (const Fte3600IpaFeatureSet *source,
-                              Fte3600IpaFeatureSet *canonical)
+                              Fte3600IpaFeatureSet       *canonical)
 {
   memset (canonical, 0, sizeof (*canonical));
   if (!fpi_fte3600_ipa_validate_feature_set (source) || source->n_minutiae < 3)
@@ -407,13 +407,17 @@ canonicalize_ipa_feature_set (const Fte3600IpaFeatureSet *source,
     {
       Fte3600IpaMinutia *point = &canonical->minutiae[i];
 
-      if (point->x == 0.0f) point->x = 0.0f;
-      if (point->y == 0.0f) point->y = 0.0f;
-      if (point->theta == 0.0f) point->theta = 0.0f;
+      if (point->x == 0.0f)
+        point->x = 0.0f;
+      if (point->y == 0.0f)
+        point->y = 0.0f;
+      if (point->theta == 0.0f)
+        point->theta = 0.0f;
       if (point->theta == FTE3600_IPA_ORIENTATION_LIMIT)
         point->theta = -FTE3600_IPA_ORIENTATION_LIMIT;
       for (guint d = 0; d < FTE3600_IPA_DESC_DIM; d++)
-        if (point->desc[d] == 0.0f) point->desc[d] = 0.0f;
+        if (point->desc[d] == 0.0f)
+          point->desc[d] = 0.0f;
     }
   qsort (canonical->minutiae, canonical->n_minutiae,
          sizeof (canonical->minutiae[0]), ipa_point_compare);
@@ -620,7 +624,7 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
       return FTE3600_TEMPLATE_RETRY_DUPLICATE;
 
   gsize max_allowed = has_any_ipa ? FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE :
-                                    FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
+                      FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
   if (total_size > max_allowed || total_size > G_MAXUINT32)
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
@@ -629,9 +633,9 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
   data = buffer->data;
   memcpy (data, template_magic, sizeof (template_magic));
   put_uint16_le (&data[8], has_any_ipa ? FTE3600_TEMPLATE_WIRE_VERSION_V3 :
-                                         FTE3600_TEMPLATE_WIRE_VERSION_V1);
+                 FTE3600_TEMPLATE_WIRE_VERSION_V1);
   const gsize header_size = has_any_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
-                                       FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+                            FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   put_uint16_le (&data[10], header_size);
   put_uint32_le (&data[12], total_size);
   put_uint16_le (&data[16], TEMPLATE_MODEL_ID);
@@ -706,8 +710,8 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
   if (offset != total_size)
     return FTE3600_TEMPLATE_INVALID_WIRE;
   *wire = g_bytes_new_with_free_func (data, total_size,
-                                     template_wire_buffer_free,
-                                     g_steal_pointer (&buffer));
+                                      template_wire_buffer_free,
+                                      g_steal_pointer (&buffer));
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -727,9 +731,9 @@ validate_header (const guint8 *data,
 
   const gboolean has_ipa = wire_ver == FTE3600_TEMPLATE_WIRE_VERSION_V3;
   const gsize header_size = has_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
-                                     FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
+                            FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   const gsize max_size = has_ipa ? FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE :
-                                  FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
+                         FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE;
   if (size < header_size || size > max_size ||
       get_uint16_le (&data[10]) != header_size ||
       get_uint32_le (&data[12]) != size ||
@@ -1071,9 +1075,9 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
 }
 
 Fte3600TemplateStatus
-fpi_fte3600_template_compare_ipa_features (const Fte3600Template      *templ,
-                                           const Fte3600IpaFeatureSet *query_ipa,
-                                           Fte3600TemplateLoadPurpose  purpose,
+fpi_fte3600_template_compare_ipa_features (const Fte3600Template        *templ,
+                                           const Fte3600IpaFeatureSet   *query_ipa,
+                                           Fte3600TemplateLoadPurpose    purpose,
                                            Fte3600TemplateCompareResult *result)
 {
   return fpi_fte3600_template_compare_with_mode (templ, NULL, query_ipa,

@@ -183,10 +183,8 @@ test_ipa_extract_deterministic (void)
       g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].y, feat2.minutiae[i].y, 1e-6);
       g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].theta, feat2.minutiae[i].theta, 1e-6);
       for (guint d = 0; d < FTE3600_IPA_DESC_DIM; d++)
-        {
-          g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].desc[d],
-                                          feat2.minutiae[i].desc[d], 1e-6);
-        }
+        g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].desc[d],
+                                        feat2.minutiae[i].desc[d], 1e-6);
     }
 }
 
@@ -323,18 +321,14 @@ test_ipa_execution_speed (void)
 
   gint64 t0 = g_get_monotonic_time ();
   for (guint i = 0; i < iterations; i++)
-    {
-      fpi_fte3600_ipa_extract (image, sizeof (image), &feat1);
-    }
+    fpi_fte3600_ipa_extract (image, sizeof (image), &feat1);
   gint64 t1 = g_get_monotonic_time ();
 
   fpi_fte3600_ipa_extract (image, sizeof (image), &feat2);
 
   gint64 t2 = g_get_monotonic_time ();
   for (guint i = 0; i < iterations; i++)
-    {
-      fpi_fte3600_ipa_match (&feat1, &feat2, &result);
-    }
+    fpi_fte3600_ipa_match (&feat1, &feat2, &result);
   gint64 t3 = g_get_monotonic_time ();
 
   gdouble extract_us = (gdouble) (t1 - t0) / iterations;
@@ -396,7 +390,7 @@ test_rigid_feature_rotation (void)
           if (i & 1)
             reference.minutiae[i].theta += (gfloat) M_PI;
           reference.minutiae[i].theta = atan2f (sinf (reference.minutiae[i].theta),
-                                                 cosf (reference.minutiae[i].theta));
+                                                cosf (reference.minutiae[i].theta));
         }
       g_assert_cmpint (fpi_fte3600_ipa_match (&query, &reference, &result), ==, FTE3600_IPA_OK);
       g_assert_cmpuint (result.n_supported_inliers, ==, query.n_minutiae);
@@ -408,7 +402,7 @@ test_rigid_feature_rotation (void)
 
 typedef struct
 {
-  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  guint8               image[FTE3600_IPA_IMAGE_SIZE];
   Fte3600IpaFeatureSet expected;
 } ExtractThreadData;
 

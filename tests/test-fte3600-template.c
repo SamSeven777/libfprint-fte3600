@@ -1000,11 +1000,11 @@ make_ipa_gallery (guint ipa_mask, gboolean maximum)
     {
       Fte3600BriskFeatureSet brisk;
       make_feature_set_n (&brisk, sample,
-                           maximum ? FTE3600_BRISK_MAX_FEATURES : TEST_FEATURES, FALSE);
+                          maximum ? FTE3600_BRISK_MAX_FEATURES : TEST_FEATURES, FALSE);
       g_assert_cmpint (fpi_fte3600_template_add_dual_features (
-                        templ, &brisk, (ipa_mask & (1u << sample)) ? &ipa : NULL, NULL),
+                         templ, &brisk, (ipa_mask & (1u << sample)) ? &ipa : NULL, NULL),
                        ==, sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
-                           FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+                       FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
   return templ;
 }
@@ -1013,6 +1013,7 @@ static void
 test_mixed_ipa_roundtrip (void)
 {
   static const guint masks[] = { 0, 1, 0x80, 0x55, 0xff };
+
   for (guint i = 0; i < G_N_ELEMENTS (masks); i++)
     {
       g_autoptr(Fte3600Template) templ = make_ipa_gallery (masks[i], FALSE);
@@ -1074,27 +1075,27 @@ test_mode_gates_and_query_fallback (void)
   g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa), ==, FTE3600_IPA_OK);
   g_assert_true (fpi_fte3600_engine_mode_parse (NULL, &mode));
   g_assert_cmpint (mode, ==, FTE3600_ENABLE_IPA_AUTH ?
-                    FTE3600_ENGINE_MODE_DUAL_FUSION : FTE3600_ENGINE_MODE_BRISK_ONLY);
+                   FTE3600_ENGINE_MODE_DUAL_FUSION : FTE3600_ENGINE_MODE_BRISK_ONLY);
   g_assert_false (fpi_fte3600_engine_mode_parse ("unknown", &mode));
 
   /* A valid IPA extraction can be used even when BRISK returned no query. */
   g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
-                    templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
                    ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.best_ipa.diagnostic_policy_passed);
   g_assert_false (result.authentication_accepted);
   g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
-                    templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
                    ==, FTE3600_ENABLE_IPA_AUTH ? FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NOT_CALIBRATED);
   g_assert_cmpint (result.authentication_accepted, ==, FTE3600_ENABLE_IPA_AUTH);
 
   brisk.n_features = 10; /* Valid but insufficient for the BRISK template gate. */
   g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
-                    templ, &brisk, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
+                     templ, &brisk, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
                    ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.best_ipa.diagnostic_policy_passed);
   g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
-                    templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, (Fte3600EngineMode) 99, &result),
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, (Fte3600EngineMode) 99, &result),
                    ==, FTE3600_TEMPLATE_INVALID_WIRE);
 }
 
