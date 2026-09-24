@@ -12,7 +12,7 @@ validation; it is not a general authentication-safety certification.
 | Medion E3224 | Separate experimental `medion-e3224` branch. Current implementation has not produced a successful identity/capture result on the reported machine. | `\_SB_.GPO1`, 39 (`0x27`); active-low is the current hypothesis, not a completed board-level validation | `\_SB_.GPO2`, 0; reported active-high IRQ |
 
 DMI names are `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`,
-`GPD / Pocket 3` or `GPD / G1621-02`, and `MEDION / E3224`,
+`GPD / Pocket 3` or `GPD / GPD Pocket 3`, and `MEDION / E3224`,
 respectively. Do not infer support for a similar product name. Main/upstream
 do not include the Medion profile; the Medion branch does not thereby inherit
 main's GPD support.

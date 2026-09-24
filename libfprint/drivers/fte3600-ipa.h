@@ -97,7 +97,7 @@ gboolean fpi_fte3600_ipa_result_meets_policy (const Fte3600IpaMatchResult *resul
 
 gboolean fpi_fte3600_ipa_validate_feature_set (const Fte3600IpaFeatureSet *features);
 
-/* Schema-v1 projection coefficient: normalized Sylvester Hadamard H32.
+/* Projection used by schemas v1/v2: normalized Sylvester Hadamard H32.
  * H[row,column] = (-1)^popcount(row & column) / sqrt(32). */
 gfloat fpi_fte3600_ipa_projection_coefficient (guint row, guint column);
 

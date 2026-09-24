@@ -128,12 +128,12 @@ test_fte3600:
       meson test -C _build --print-errorlogs --suite=unit-tests
     - >-
       if [ "$FTE3600_AUTH" = true ]; then
-        meson test -C _build --benchmark --print-errorlogs benchmark-fte3600;
+        meson test -C _build --benchmark --logbase=benchmark --print-errorlogs benchmark-fte3600;
       fi
   artifacts:
     when: always
     reports:
-      junit: _build/meson-logs/testlog.junit.xml
+      junit: '_build/meson-logs/*.junit.xml'
     paths:
       - _build/meson-logs
     expire_in: 1 week
