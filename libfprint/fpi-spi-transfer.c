@@ -465,7 +465,7 @@ transfer_thread_func (GTask        *task,
                                    G_IO_ERROR_MESSAGE_TOO_LARGE,
                                    "Full-duplex SPI transfer length %zd exceeds "
                                    "spidev block size %" G_GSIZE_FORMAT "; "
-                                   "increase the spidev bufsiz module parameter",
+                                                                        "increase the spidev bufsiz module parameter",
                                    transfer->length_wr,
                                    block_size);
           return;
