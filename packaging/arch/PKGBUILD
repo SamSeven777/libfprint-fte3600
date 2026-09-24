@@ -19,13 +19,9 @@ install=fte3600.install
 # release tag can replace this local VCS source with a fixed GitHub archive.
 source=(
   "libfprint::git+file://${startdir}/../.."
-  fte3600-gpio.conf
-  fte3600-spidev.conf
 )
 sha256sums=(
   SKIP
-  'f0fce5dd6685227aa22c54e045fd5ba518631a9afc2c2467fbbbae765f43df26'
-  '4ba92238b116e3d9f931d0f8c56f8ed929f261ddaad97049bd79b4febd7e18a9'
 )
 
 # Upstream libfprint development snapshot from which the FTE3600 work starts.
@@ -69,9 +65,9 @@ check() {
 package() {
   DESTDIR="$pkgdir" meson install -C "$srcdir/build"
 
-  install -Dm644 "$srcdir/fte3600-gpio.conf" \
+  install -Dm644 "$srcdir/libfprint/config/systemd/10-fte3600-gpio.conf" \
     "$pkgdir/usr/lib/systemd/system/fprintd.service.d/10-fte3600-gpio.conf"
-  install -Dm644 "$srcdir/fte3600-spidev.conf" \
+  install -Dm644 "$srcdir/libfprint/config/modprobe.d/fte3600-spidev.conf" \
     "$pkgdir/usr/lib/modprobe.d/fte3600-spidev.conf"
 
   # Firmware is supplied separately by the device owner. Never silently

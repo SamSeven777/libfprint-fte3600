@@ -35,7 +35,7 @@ sudo apt install build-essential git meson ninja-build pkg-config \
 ```
 
 Requires libgpiod 2.x; Ubuntu 22.04/24.04 need a backport. Fedora and Ubuntu
-are build-tested; hardware validation is on Arch/Omarchy.
+are build-tested; hardware validation is on Arch Linux.
 
 ## Firmware for cold-boot recovery
 
@@ -153,5 +153,4 @@ fprintd-verify -f left-index-finger "$USER"
 ```
 
 For A1 cold-boot acceptance, shut down and boot directly into Linux, then verify.
-[Omarchy lock-screen setup](arch-omarchy.md) is separate. Removing enrollment
-with `fprintd-delete "$USER"` requires re-enrollment.
+Removing enrollment with `fprintd-delete "$USER"` requires re-enrollment.
