@@ -10,20 +10,41 @@ cat /sys/module/spidev/parameters/bufsiz
 systemctl status fprintd.service --no-pager
 ```
 
-- `/dev/spidev*` nodes are bound by udev rules upon installation and system reboot.
-- `cat /sys/module/spidev/parameters/bufsiz` must report `32768` (required for the 10,403-byte cold-boot firmware payload). If it reports `4096` or `8192`, install `config/modprobe.d/fte3600-spidev.conf` and reboot.
+- `/dev/spidev*` requires the matching udev rule and successful binding; inspect
+  the actual rule, modalias and device logs if it is absent.
+- Record `/sys/module/spidev/parameters/bufsiz`. Recovery needs at least 10,403
+  bytes and the supplied configuration uses `32768`; the two six-byte status
+  reads do not require that larger buffer. Do not change the setting or reboot
+  just to collect a baseline.
 - `00 00` means the expected MCU response was not received. Missing runtime
   firmware is one cause, but this value alone cannot distinguish it from reset,
-  transport or power problems. Check the verified firmware installation first
-  (`./scripts/install-firmware.sh`).
+  transport or power problems. Inspect existing logs and the current firmware
+  file's presence, size and hash against [installation](install.md). Do not
+  automatically download/install firmware or reset the sensor before observing
+  its current state.
 
 ## Medion E3224 recovery
 
-From an updated `medion-e3224` checkout, run:
+The same reported machine worked with the older Mint stack. Treat that as the
+known-good control. Do not rerun the unchanged recovery sequence that has already
+failed; first identify a concrete difference to test.
 
-```sh
-sudo bash scripts/test-medion-recovery.sh
-```
+The current diagnostic's default / `--status-no-reset` mode uses only the two
+existing application-state/geometry SPI reads. It does not discover/claim GPIO,
+reset, enter ROM, write scratch RAM or upload firmware. It is still an **active
+SPI query**, not a passive electrical measurement or a promise to preserve every
+device state. This mode saves SPI mode, word size and bit order before changing
+them, and attempts to restore them along with runtime-power policies on exit.
+Restoration errors are reported and return a failure status. Speed is selected
+per transfer; the shared maximum-speed setting is not changed. As with other
+cleanup, forced termination or process/system failure can prevent restoration.
+
+The legacy `--probe` mode sends two software resets and is explicitly mutating.
+`--chip-id` also writes scratch RAM. Neither is a read-only baseline.
+A maintainer-directed recovery experiment may use
+`sudo bash scripts/test-medion-recovery.sh`, but only after explaining the new
+hypothesis, expected evidence and state changes; this is not the next automatic
+step for the existing failure.
 
 This compiles and runs the current tool (not an older `./test_medion_e3224` binary),
 temporarily masks fprintd to prevent concurrent access, then restores its prior
@@ -61,9 +82,16 @@ normal recovery and refuses a running MCU or the unsupported Edition A path.
 
 ## fprintd cannot open GPIO (Permission denied)
 
-Ensure `systemctl cat fprintd.service` includes `DeviceAllow=char-gpiochip rw` (installed by `10-fte3600-gpio.conf`).
+Inspect `systemctl cat fprintd.service` and the actual denial logs first. The
+example `DeviceAllow=char-gpiochip rw` grants access to a GPIO device class, not
+just these fingerprint pins. SELinux is not necessarily the cause of a failure.
 
-On Fedora with SELinux in Enforcing mode, `fprintd_t` is blocked from opening `gpio_device_t` by default. Install the provided SELinux CIL policy:
+Consider the provided CIL policy only after confirming an actual AVC denial
+for `fprintd_t` accessing the required GPIO device (typically `gpio_device_t`).
+Review the policy, record whether a module named `fte3600-gpio` already exists,
+and retain its previous configuration as described in
+[installation and rollback](install.md). Only if that evidence warrants the
+change:
 
 ```sh
 sudo semodule -i config/selinux/fte3600-gpio.cil
