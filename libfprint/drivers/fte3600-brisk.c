@@ -18,34 +18,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BRISK_PI                 3.14159265358979323846
-#define BRISK_TWO_PI             (2.0 * BRISK_PI)
-#define BRISK_UPSCALE            2
-#define BRISK_OCTAVES            2
-#define BRISK_GAUSSIAN_LEVELS    6
-#define BRISK_DOG_LEVELS         5
-#define BRISK_ORIENTATION_BINS   36
-#define BRISK_DESCRIPTOR_MARGIN  14
+#define BRISK_PI 3.14159265358979323846
+#define BRISK_TWO_PI (2.0 * BRISK_PI)
+#define BRISK_UPSCALE 2
+#define BRISK_OCTAVES 2
+#define BRISK_GAUSSIAN_LEVELS 6
+#define BRISK_DOG_LEVELS 5
+#define BRISK_ORIENTATION_BINS 36
+#define BRISK_DESCRIPTOR_MARGIN 14
 #define BRISK_DOG_PRETHRESHOLD_U8 0.85
 #define BRISK_DOG_CONTRAST_NORMALIZED 0.02
-#define BRISK_U8_RANGE           255.0
-#define BRISK_MAX_REFINEMENT     5
-#define BRISK_AXIS_INLIER_LIMIT  1.2
-#define BRISK_ORIENTATION_LIMIT  (20.0 * BRISK_PI / 180.0)
+#define BRISK_U8_RANGE 255.0
+#define BRISK_MAX_REFINEMENT 5
+#define BRISK_AXIS_INLIER_LIMIT 1.2
+#define BRISK_ORIENTATION_LIMIT (20.0 * BRISK_PI / 180.0)
 
-typedef struct {
+typedef struct
+{
   guint8 first;
   guint8 second;
 } DescriptorPair;
 
-typedef struct {
-  guint width;
-  guint height;
+typedef struct
+{
+  guint   width;
+  guint   height;
   gfloat *gaussian[BRISK_GAUSSIAN_LEVELS];
   gfloat *dog[BRISK_DOG_LEVELS];
 } BriskOctave;
 
-typedef struct {
+typedef struct
+{
   gfloat x;
   gfloat y;
   gfloat image_x;
@@ -55,24 +58,28 @@ typedef struct {
   guint  level;
 } BriskKeypoint;
 
-typedef struct {
+typedef struct
+{
   gdouble angle;
   gdouble translate_x;
   gdouble translate_y;
 } RigidModel;
 
-typedef struct {
+typedef struct
+{
   guint n_groups;
   guint group_for_feature[FTE3600_BRISK_MAX_FEATURES];
 } PhysicalGroups;
 
-typedef struct {
+typedef struct
+{
   guint hamming;
   guint query_feature;
   guint reference_feature;
 } GroupPairDistance;
 
-typedef struct {
+typedef struct
+{
   gint     previous_mode;
   gboolean changed;
 } BriskRoundingGuard;
@@ -453,7 +460,7 @@ is_strict_extremum (const BriskOctave *octave,
       for (gint x_offset = -1; x_offset <= 1; x_offset++)
         {
           const gfloat neighbor = octave->dog[level + level_offset]
-            [(y + y_offset) * octave->width + x + x_offset];
+                                  [(y + y_offset) * octave->width + x + x_offset];
 
           if (level_offset == 0 && y_offset == 0 && x_offset == 0)
             continue;
@@ -507,10 +514,10 @@ solve_symmetric_3x3 (gdouble  hxx,
 
 static gboolean
 refine_keypoint (const BriskOctave *octave,
-                 guint             initial_level,
-                 guint             initial_x,
-                 guint             initial_y,
-                 BriskKeypoint    *keypoint)
+                 guint              initial_level,
+                 guint              initial_x,
+                 guint              initial_y,
+                 BriskKeypoint     *keypoint)
 {
   gint level = initial_level;
   gint x = initial_x;
@@ -552,9 +559,9 @@ refine_keypoint (const BriskOctave *octave,
       hss = octave->dog[level + 1][y * width + x] +
             octave->dog[level - 1][y * width + x] - 2.0 * value;
       hxy = 0.25 * (current[(y + 1) * width + x + 1] -
-                           current[(y + 1) * width + x - 1] -
-                           current[(y - 1) * width + x + 1] +
-                           current[(y - 1) * width + x - 1]);
+                    current[(y + 1) * width + x - 1] -
+                    current[(y - 1) * width + x + 1] +
+                    current[(y - 1) * width + x - 1]);
       hxs = 0.25 * (octave->dog[level + 1][y * width + x + 1] -
                     octave->dog[level + 1][y * width + x - 1] -
                     octave->dog[level - 1][y * width + x + 1] +
@@ -643,6 +650,7 @@ static GArray *
 detect_keypoints (BriskOctave octaves[BRISK_OCTAVES])
 {
   static const guint level_borders[] = { 0, 7, 8, 10 };
+
   g_autoptr(GArray) candidates = g_array_new (FALSE, FALSE, sizeof (BriskKeypoint));
   GArray *selected = g_array_new (FALSE, FALSE, sizeof (BriskKeypoint));
 
@@ -785,13 +793,13 @@ orientation_peaks (const gfloat *image,
 }
 
 static void
-describe_float_image (const gfloat          *image,
-                      guint                  width,
-                      guint                  height,
-                      gfloat                 center_x,
-                      gfloat                 center_y,
-                      gdouble                orientation,
-                      Fte3600BriskFeature   *feature)
+describe_float_image (const gfloat        *image,
+                      guint                width,
+                      guint                height,
+                      gfloat               center_x,
+                      gfloat               center_y,
+                      gdouble              orientation,
+                      Fte3600BriskFeature *feature)
 {
   gfloat samples[FTE3600_BRISK_PATTERN_POINTS] = { 0.0 };
   gboolean valid[FTE3600_BRISK_PATTERN_POINTS] = { FALSE };
@@ -830,11 +838,11 @@ describe_float_image (const gfloat          *image,
 }
 
 Fte3600BriskStatus
-fte3600_brisk_describe_at (const guint8         *image,
-                           gsize                 length,
-                           gfloat                x,
-                           gfloat                y,
-                           Fte3600BriskFeature  *feature)
+fte3600_brisk_describe_at (const guint8        *image,
+                           gsize                length,
+                           gfloat               x,
+                           gfloat               y,
+                           Fte3600BriskFeature *feature)
 {
   g_auto(BriskRoundingGuard) rounding_guard = { 0 };
   static const guint initial_boxes[] = { 3, 3, 3, 3 };
@@ -896,9 +904,9 @@ fte3600_brisk_describe_at (const guint8         *image,
 }
 
 Fte3600BriskStatus
-fte3600_brisk_extract (const guint8            *image,
-                       gsize                    length,
-                       Fte3600BriskFeatureSet  *features)
+fte3600_brisk_extract (const guint8           *image,
+                       gsize                   length,
+                       Fte3600BriskFeatureSet *features)
 {
   g_auto(BriskRoundingGuard) rounding_guard = { 0 };
   BriskOctave octaves[BRISK_OCTAVES];
@@ -920,7 +928,7 @@ fte3600_brisk_extract (const guint8            *image,
   build_scale_space (image, octaves);
   keypoints = detect_keypoints (octaves);
   for (guint i = 0; i < keypoints->len &&
-                    features->n_features < FTE3600_BRISK_MAX_FEATURES; i++)
+       features->n_features < FTE3600_BRISK_MAX_FEATURES; i++)
     {
       const BriskKeypoint keypoint = g_array_index (keypoints, BriskKeypoint, i);
       const BriskOctave *octave = &octaves[keypoint.octave];
@@ -932,7 +940,7 @@ fte3600_brisk_extract (const guint8            *image,
       if (n_angles > 0)
         physical_features++;
       for (guint angle_index = 0; angle_index < n_angles &&
-                                  features->n_features < FTE3600_BRISK_MAX_FEATURES;
+           features->n_features < FTE3600_BRISK_MAX_FEATURES;
            angle_index++)
         {
           Fte3600BriskFeature *feature =
@@ -980,7 +988,7 @@ hamming_distance (const guint8 *first,
 
 gboolean
 fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
-                                     guint                        *physical_count)
+                                    guint                        *physical_count)
 {
   g_auto(BriskRoundingGuard) rounding_guard = { 0 };
   gboolean assigned[FTE3600_BRISK_MAX_FEATURES] = { FALSE };
@@ -1082,8 +1090,8 @@ build_physical_groups (const Fte3600BriskFeatureSet *features,
     }
 
   /* Multiple orientation peaks from one detector location are variants, not
-   * independent evidence.  Connected components make grouping invariant to
-   * feature ordering; a chain can only collapse votes, never create them. */
+  * independent evidence.  Connected components make grouping invariant to
+  * feature ordering; a chain can only collapse votes, never create them. */
   for (guint i = 0; i < features->n_features; i++)
     for (guint j = i + 1; j < features->n_features; j++)
       {
@@ -1146,7 +1154,7 @@ collect_mutual_correspondences (const Fte3600BriskFeatureSet *query,
     }
 
   /* A group-to-group distance is the best orientation variant pair.  Ties are
-   * resolved by source indices for a stable schema-independent match order. */
+  * resolved by source indices for a stable schema-independent match order. */
   for (guint i = 0; i < query->n_features; i++)
     for (guint j = 0; j < reference->n_features; j++)
       {
@@ -1185,7 +1193,9 @@ collect_mutual_correspondences (const Fte3600BriskFeatureSet *query,
               query_index[i] = j;
             }
           else if (distance < query_second[i])
-            query_second[i] = distance;
+            {
+              query_second[i] = distance;
+            }
         }
     }
   for (guint j = 0; j < reference_groups.n_groups; j++)
@@ -1205,7 +1215,9 @@ collect_mutual_correspondences (const Fte3600BriskFeatureSet *query,
               reference_index[j] = i;
             }
           else if (distance < reference_second[j])
-            reference_second[j] = distance;
+            {
+              reference_second[j] = distance;
+            }
         }
     }
 
@@ -1293,13 +1305,13 @@ model_from_pair (const Fte3600BriskFeature *query_a,
 }
 
 static guint
-evaluate_model (const Fte3600BriskFeatureSet *query,
-                const Fte3600BriskFeatureSet *reference,
+evaluate_model (const Fte3600BriskFeatureSet     *query,
+                const Fte3600BriskFeatureSet     *reference,
                 const Fte3600BriskCorrespondence *correspondences,
-                guint                       n_correspondences,
-                const RigidModel           *model,
-                gboolean                   *inlier_mask,
-                gdouble                    *square_error)
+                guint                             n_correspondences,
+                const RigidModel                 *model,
+                gboolean                         *inlier_mask,
+                gdouble                          *square_error)
 {
   const gdouble cosine = cos (model->angle);
   const gdouble sine = sin (model->angle);
@@ -1337,12 +1349,12 @@ evaluate_model (const Fte3600BriskFeatureSet *query,
 }
 
 static gboolean
-refit_model (const Fte3600BriskFeatureSet *query,
-             const Fte3600BriskFeatureSet *reference,
+refit_model (const Fte3600BriskFeatureSet     *query,
+             const Fte3600BriskFeatureSet     *reference,
              const Fte3600BriskCorrespondence *correspondences,
-             guint                       n_correspondences,
-             const gboolean             *inlier_mask,
-             RigidModel                 *model)
+             guint                             n_correspondences,
+             const gboolean                   *inlier_mask,
+             RigidModel                       *model)
 {
   gdouble query_center_x = 0.0;
   gdouble query_center_y = 0.0;
@@ -1431,13 +1443,13 @@ models_are_competing (const RigidModel *first,
 }
 
 static void
-covariance_geometry (const Fte3600BriskFeatureSet    *features,
+covariance_geometry (const Fte3600BriskFeatureSet     *features,
                      const Fte3600BriskCorrespondence *correspondences,
-                     guint                            n_correspondences,
-                     const gboolean                  *inlier_mask,
-                     gboolean                         use_query,
-                     gdouble                         *minimum_variance,
-                     gdouble                         *anisotropy)
+                     guint                             n_correspondences,
+                     const gboolean                   *inlier_mask,
+                     gboolean                          use_query,
+                     gdouble                          *minimum_variance,
+                     gdouble                          *anisotropy)
 {
   gdouble center_x = 0.0;
   gdouble center_y = 0.0;
@@ -1452,7 +1464,7 @@ covariance_geometry (const Fte3600BriskFeatureSet    *features,
     if (inlier_mask[i])
       {
         const guint feature_index = use_query ? correspondences[i].query_index :
-                                               correspondences[i].reference_index;
+                                    correspondences[i].reference_index;
         const Fte3600BriskFeature *feature = &features->features[feature_index];
 
         center_x += feature->x;
@@ -1468,7 +1480,7 @@ covariance_geometry (const Fte3600BriskFeatureSet    *features,
     if (inlier_mask[i])
       {
         const guint feature_index = use_query ? correspondences[i].query_index :
-                                               correspondences[i].reference_index;
+                                    correspondences[i].reference_index;
         const Fte3600BriskFeature *feature = &features->features[feature_index];
         const gdouble dx = feature->x - center_x;
         const gdouble dy = feature->y - center_y;
@@ -1483,7 +1495,7 @@ covariance_geometry (const Fte3600BriskFeatureSet    *features,
   {
     const gdouble trace = xx + yy;
     const gdouble discriminant = sqrt (MAX (0.0,
-      (xx - yy) * (xx - yy) + 4.0 * xy * xy));
+                                            (xx - yy) * (xx - yy) + 4.0 * xy * xy));
     const gdouble maximum_variance = 0.5 * (trace + discriminant);
 
     *minimum_variance = MAX (0.0, 0.5 * (trace - discriminant));
@@ -1603,7 +1615,7 @@ fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
     return FTE3600_BRISK_INSUFFICIENT_FEATURES;
 
   n_correspondences = collect_mutual_correspondences (query, reference,
-                                                       correspondences);
+                                                      correspondences);
   result->mutual_matches = n_correspondences;
   if (n_correspondences < 5)
     return FTE3600_BRISK_NO_CONSENSUS;
@@ -1641,8 +1653,8 @@ fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
     {
       gdouble error;
       const guint inliers = evaluate_model (query, reference, correspondences,
-                                             n_correspondences,
-                                             &hypotheses[hypothesis], NULL, &error);
+                                            n_correspondences,
+                                            &hypotheses[hypothesis], NULL, &error);
 
       if (inliers > best_inliers || (inliers == best_inliers && error < best_error))
         {
@@ -1663,15 +1675,17 @@ fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
         return FTE3600_BRISK_NO_CONSENSUS;
     }
   best_inliers = evaluate_model (query, reference, correspondences,
-                                  n_correspondences, &best_model,
-                                  inlier_mask, &best_error);
+                                 n_correspondences, &best_model,
+                                 inlier_mask, &best_error);
 
   for (guint hypothesis = 0; hypothesis < n_hypotheses; hypothesis++)
     if (models_are_competing (&best_model, &hypotheses[hypothesis]))
-      result->competing_inliers = MAX (
-        result->competing_inliers,
-        evaluate_model (query, reference, correspondences, n_correspondences,
-                        &hypotheses[hypothesis], trial_mask, NULL));
+      {
+        result->competing_inliers = MAX (
+          result->competing_inliers,
+          evaluate_model (query, reference, correspondences, n_correspondences,
+                          &hypotheses[hypothesis], trial_mask, NULL));
+      }
 
   result->inliers = best_inliers;
   result->inlier_ratio = (gdouble) best_inliers / n_correspondences;
@@ -1713,9 +1727,9 @@ fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
             const Fte3600BriskFeature *b =
               &reference->features[correspondences[i].reference_index];
             const gdouble predicted_x = cosine * a->x - sine * a->y +
-                                         best_model.translate_x;
+                                        best_model.translate_x;
             const gdouble predicted_y = sine * a->x + cosine * a->y +
-                                         best_model.translate_y;
+                                        best_model.translate_y;
             const gdouble dx = b->x - predicted_x;
             const gdouble dy = b->y - predicted_y;
             const guint cell_x = MIN ((guint) (a->x / 16.0), 3);
@@ -1735,7 +1749,7 @@ fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
 
       qsort (residuals, best_inliers, sizeof (gdouble), compare_double);
       result->median_error = best_inliers & 1 ? residuals[best_inliers / 2] :
-        0.5 * (residuals[best_inliers / 2 - 1] + residuals[best_inliers / 2]);
+                             0.5 * (residuals[best_inliers / 2 - 1] + residuals[best_inliers / 2]);
       result->rms_error = sqrt (best_error / best_inliers);
       result->mean_hamming = hamming_sum / best_inliers;
       result->x_span = maximum_x - minimum_x;

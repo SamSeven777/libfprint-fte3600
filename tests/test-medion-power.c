@@ -2,8 +2,7 @@
 #include <glib/gstdio.h>
 #include "../tools/medion-power.h"
 
-typedef enum
-{
+typedef enum {
   WRITE_NORMAL,
   WRITE_DENIED,
   WRITE_SHORT,
@@ -13,20 +12,21 @@ typedef enum
 
 typedef struct
 {
-  gchar *root;
-  gchar *parent;
-  gchar *leaf;
-  GPtrArray *writes;
-  MedionPower power;
-  guint fail_at;
+  gchar       *root;
+  gchar       *parent;
+  gchar       *leaf;
+  GPtrArray   *writes;
+  MedionPower  power;
+  guint        fail_at;
   WriteFailure failure;
-  gboolean stay_suspended;
+  gboolean     stay_suspended;
 } Fixture;
 
 static void
 set_attribute (const gchar *node, const gchar *name, const gchar *value)
 {
   g_autofree gchar *filename = g_build_filename (node, "power", name, NULL);
+
   g_assert_true (g_file_set_contents (filename, value, -1, NULL));
 }
 
@@ -34,6 +34,7 @@ static void
 assert_policy (const gchar *node, const gchar *value)
 {
   g_autofree gchar *actual = medion_power_read (node, "control", NULL);
+
   g_assert_cmpstr (actual, ==, value);
 }
 
@@ -46,6 +47,7 @@ fixture_write (int fd, const void *data, size_t size, gpointer user_data)
   g_autofree gchar *powerdir = g_path_get_dirname (filename);
   g_autofree gchar *node = g_path_get_dirname (powerdir);
   g_autofree gchar *value = g_strndup (data, size);
+
   g_strstrip (value);
   g_ptr_array_add (fixture->writes, g_strdup_printf ("%s=%s", node, value));
   if (fixture->writes->len == fixture->fail_at)
@@ -55,13 +57,17 @@ fixture_write (int fd, const void *data, size_t size, gpointer user_data)
         case WRITE_DENIED:
           errno = EACCES;
           return -1;
+
         case WRITE_SHORT:
           return write (fd, data, 1);
+
         case WRITE_IGNORED:
           return size;
+
         case WRITE_INTERRUPTED:
           errno = EINTR;
           return -1;
+
         case WRITE_NORMAL:
           break;
         }
@@ -156,7 +162,7 @@ test_round_trip (Fixture *fixture, gconstpointer data)
 static void
 test_write_failure (Fixture *fixture, gconstpointer data)
 {
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   fixture->failure = GPOINTER_TO_INT (data);
   fixture->fail_at = 2;
   g_assert_false (medion_power_prepare (&fixture->power, fixture->leaf, fixture->root, &error));
@@ -180,7 +186,7 @@ static void
 test_suspended_timeout (Fixture *fixture, gconstpointer data)
 {
   (void) data;
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   fixture->stay_suspended = TRUE;
   g_assert_false (medion_power_prepare (&fixture->power, fixture->leaf, fixture->root, &error));
   g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_IO);
@@ -207,7 +213,7 @@ static void
 test_restore_failure (Fixture *fixture, gconstpointer data)
 {
   (void) data;
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   g_assert_true (medion_power_prepare (&fixture->power, fixture->leaf, fixture->root, NULL));
   fixture->failure = WRITE_DENIED;
   fixture->fail_at = 3;
@@ -224,7 +230,7 @@ static void
 test_outside_root (Fixture *fixture, gconstpointer data)
 {
   (void) data;
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   g_assert_false (medion_power_prepare (&fixture->power, "/tmp", fixture->root, &error));
   g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL);
   g_assert_cmpuint (fixture->writes->len, ==, 0);
@@ -244,7 +250,7 @@ test_direct_writer (Fixture *fixture, gconstpointer data)
   g_assert_cmpint (after.st_size, ==, before.st_size); /* No rename or truncation. */
   g_assert_true (medion_power_write (&direct, fixture->parent, "auto", NULL));
   g_assert_cmpint (g_unlink (control), ==, 0);
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   g_assert_false (medion_power_write (&direct, fixture->parent, "on", &error));
   g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_NOENT);
   g_assert_false (g_file_test (control, G_FILE_TEST_EXISTS)); /* No O_CREAT. */
@@ -256,7 +262,8 @@ test_symlink (Fixture *fixture, gconstpointer data)
 {
   gboolean escape = GPOINTER_TO_INT (data);
   g_autofree gchar *link = g_build_filename (fixture->root, "selected-spi", NULL);
-  g_autoptr (GError) error = NULL;
+
+  g_autoptr(GError) error = NULL;
   g_assert_cmpint (symlink (escape ? "/tmp" : fixture->leaf, link), ==, 0);
   if (escape)
     {
@@ -277,7 +284,7 @@ static void
 test_runtime_error (Fixture *fixture, gconstpointer data)
 {
   (void) data;
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   fixture->stay_suspended = TRUE;
   set_attribute (fixture->parent, "runtime_status", "error\n");
   set_attribute (fixture->parent, "runtime_error", "-5\n");

@@ -42,20 +42,22 @@ static uint32_t cur_speed_hz = 1000000;
 static struct
 {
   uint32_t mode;
-  uint8_t bits;
-  uint8_t lsb;
+  uint8_t  bits;
+  uint8_t  lsb;
   gboolean mode_changed;
   gboolean bits_changed;
   gboolean lsb_changed;
 } saved_spi;
 
-static void fail (const char *what)
+static void
+fail (const char *what)
 {
   fprintf (stderr, "ERROR: %s\n", what);
   exit (1);
 }
 
-static uint32_t parse_spi_speed (const char *value)
+static uint32_t
+parse_spi_speed (const char *value)
 {
   if (!value || !*value)
     fail ("--speed requires an integer from 1 to 1000000 Hz");
@@ -69,7 +71,8 @@ static uint32_t parse_spi_speed (const char *value)
   return (uint32_t) speed;
 }
 
-static void cleanup (void)
+static void
+cleanup (void)
 {
   if (req_gpo1)
     {
@@ -105,7 +108,7 @@ static void cleanup (void)
       close (spi_fd);
       spi_fd = -1;
     }
-  g_autoptr (GError) error = NULL;
+  g_autoptr(GError) error = NULL;
   if (!medion_power_restore (&power_state, &error))
     {
       fprintf (stderr, "ERROR: restoring runtime PM: %s\n", error->message);
@@ -114,13 +117,15 @@ static void cleanup (void)
   medion_power_clear (&power_state);
 }
 
-static void sig_handler (int sig)
+static void
+sig_handler (int sig)
 {
   /* Do not call GLib or libgpiod from an asynchronous signal handler. */
   interrupted = sig;
 }
 
-static void require (int ok, const char *what)
+static void
+require (int ok, const char *what)
 {
   if (!ok)
     {
@@ -129,7 +134,8 @@ static void require (int ok, const char *what)
     }
 }
 
-static void check_dmi (void)
+static void
+check_dmi (void)
 {
   gchar *vendor = NULL;
   gchar *product = NULL;
@@ -162,10 +168,12 @@ static void check_dmi (void)
   g_free (product);
 }
 
-static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
+static gchar *
+find_gpiochip_for_acpi (const gchar *target_acpi_path)
 {
   const gchar *subsystems[] = { "gpio", NULL };
-  g_autoptr (GUdevClient) client = g_udev_client_new (subsystems);
+
+  g_autoptr(GUdevClient) client = g_udev_client_new (subsystems);
   GList *gpio_devices = g_udev_client_query_by_subsystem (client, "gpio");
   gchar *result = NULL;
 
@@ -204,7 +212,7 @@ static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
                   if (g_file_get_contents (attribute_path, &value, NULL, NULL))
                     printf ("  GPIO %s=%s\n", attributes[i], g_strstrip (value));
                 }
-              g_autoptr (GUdevDevice) parent = g_udev_device_get_parent (dev);
+              g_autoptr(GUdevDevice) parent = g_udev_device_get_parent (dev);
               if (parent)
                 printf ("  GPIO parent=%s driver=%s\n", g_udev_device_get_sysfs_path (parent),
                         g_udev_device_get_driver (parent) ? g_udev_device_get_driver (parent) : "(none)");
@@ -215,10 +223,12 @@ static gchar *find_gpiochip_for_acpi (const gchar *target_acpi_path)
   return result;
 }
 
-static gchar *resolve_spi_device (const gchar *requested, gchar **sysfs_path)
+static gchar *
+resolve_spi_device (const gchar *requested, gchar **sysfs_path)
 {
   const gchar *subsystems[] = { "spidev", NULL };
-  g_autoptr (GUdevClient) client = g_udev_client_new (subsystems);
+
+  g_autoptr(GUdevClient) client = g_udev_client_new (subsystems);
   GList *devices = g_udev_client_query_by_subsystem (client, "spidev");
   g_autofree gchar *sensor = realpath ("/sys/bus/spi/devices/spi-FTE3600:00", NULL);
   gchar *result = NULL;
@@ -227,7 +237,7 @@ static gchar *resolve_spi_device (const gchar *requested, gchar **sysfs_path)
   for (GList *item = devices; item; item = item->next)
     {
       GUdevDevice *dev = item->data;
-      g_autoptr (GUdevDevice) parent = g_udev_device_get_parent (dev);
+      g_autoptr(GUdevDevice) parent = g_udev_device_get_parent (dev);
       if (parent && g_strcmp0 (g_udev_device_get_sysfs_path (parent), sensor) == 0)
         {
           if (result)
@@ -251,12 +261,14 @@ static gchar *resolve_spi_device (const gchar *requested, gchar **sysfs_path)
   return result;
 }
 
-static guint8 *load_verified_firmware (const gchar *path)
+static guint8 *
+load_verified_firmware (const gchar *path)
 {
   guint8 *data = g_malloc (FW_SIZE + 1);
   struct stat st;
   gsize length = 0;
   int fd = open (path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+
   require (fd >= 0, "open firmware");
   require (fstat (fd, &st) == 0, "stat firmware");
   if (!S_ISREG (st.st_mode) || st.st_size != FW_SIZE)
@@ -279,7 +291,8 @@ static guint8 *load_verified_firmware (const gchar *path)
   return data;
 }
 
-static void spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
+static void
+spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
 {
   if (interrupted)
     exit (128 + interrupted);
@@ -299,12 +312,14 @@ static void spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
     }
 }
 
-static void set_spi_mode (uint8_t mode)
+static void
+set_spi_mode (uint8_t mode)
 {
   require (ioctl (spi_fd, SPI_IOC_WR_MODE, &mode) == 0, "set SPI mode");
 }
 
-static void set_pin39 (int high)
+static void
+set_pin39 (int high)
 {
   if (interrupted)
     exit (128 + interrupted);
@@ -315,9 +330,11 @@ static void set_pin39 (int high)
            "set reset GPIO value");
 }
 
-static void report_reset_value (int high)
+static void
+report_reset_value (int high)
 {
   int actual = gpiod_line_request_get_value (req_gpo1, PIN_GPO1_RESET);
+
   require (actual >= 0, "read back reset GPIO value");
   printf ("  Reset GPIO requested=%d readback=%d (not an electrical measurement)\n",
           high, actual);
@@ -333,7 +350,8 @@ static void report_reset_value (int high)
  * 4. Sleep 20ms
  * 5. Write 1 (High / Deasserted)
  */
-static void windows_reset_pulse (void)
+static void
+windows_reset_pulse (void)
 {
   set_pin39 (1);
   g_usleep (10000);
@@ -343,27 +361,33 @@ static void windows_reset_pulse (void)
 }
 
 /* Write MCU Register: 0x11 0xee <reg> <val> 0x00 */
-static void write_mcu_reg (uint8_t reg, uint8_t val)
+static void
+write_mcu_reg (uint8_t reg, uint8_t val)
 {
   uint8_t tx[5] = { 0x11, 0xee, reg, val, 0x00 };
+
   spi_xfer (tx, NULL, sizeof (tx), cur_speed_hz);
   g_usleep (2000);
 }
 
 /* Read MCU Register: TX 0x10 0xef <reg> 0x00 0x00 -> RX byte index 4 */
-static uint8_t read_mcu_reg (uint8_t reg)
+static uint8_t
+read_mcu_reg (uint8_t reg)
 {
   uint8_t tx[5] = { 0x10, 0xef, reg, 0x00, 0x00 };
   uint8_t rx[5] = { 0 };
+
   spi_xfer (tx, rx, sizeof (tx), cur_speed_hz);
   return rx[4];
 }
 
 /* Query Bootloader ROM Edition (0x90 0x00 0x00 -> byte index 2 is 0xef for Edition A) */
-static uint8_t query_bootloader_edition (void)
+static uint8_t
+query_bootloader_edition (void)
 {
   uint8_t tx[3] = { 0x90, 0x00, 0x00 };
   uint8_t rx[3] = { 0 };
+
   spi_xfer (tx, rx, sizeof (tx), cur_speed_hz);
   return rx[2];
 }
@@ -371,10 +395,12 @@ static uint8_t query_bootloader_edition (void)
 /* JudgeByChipId in Windows 2.0.3.102 uses scratch address 0x85c0 only for
  * non-Edition-A bootloaders. This is an explicit mutating diagnostic, not
  * part of the ordinary status probe or FT9361 firmware recovery. */
-static int probe_chip_id (void)
+static int
+probe_chip_id (void)
 {
   uint8_t tx_status[6] = { 0x10, 0xef, 0x20, 0, 0, 0 };
   uint8_t rx_status[6] = { 0 };
+
   spi_xfer (tx_status, rx_status, sizeof (tx_status), cur_speed_hz);
   printf ("MCU status before chip-ID probe: %02x %02x\n", rx_status[4], rx_status[5]);
   if (!((rx_status[4] == 0 && rx_status[5] == 0) ||
@@ -418,7 +444,8 @@ static int probe_chip_id (void)
   return 2;
 }
 
-static gboolean probe_status_and_id (const char *tag, uint32_t speed_hz)
+static gboolean
+probe_status_and_id (const char *tag, uint32_t speed_hz)
 {
   uint8_t tx_status[6] = { 0x10, 0xef, 0x20, 0x00, 0x00, 0x00 };
   uint8_t rx_status[6] = { 0 };
@@ -451,14 +478,15 @@ static gboolean probe_status_and_id (const char *tag, uint32_t speed_hz)
           rx_id[0], rx_id[1], rx_id[2], rx_id[3], rx_id[4], rx_id[5],
           mark);
 
-  return (rx_status[4] == 0xa5 && rx_status[5] == 0x5a);
+  return rx_status[4] == 0xa5 && rx_status[5] == 0x5a;
 }
 
 /* Only the two existing FT9361-path status/geometry read transactions.
  * No fallback to other chip protocols, GPIO request, reset, ROM command,
  * register write or firmware download belongs in this baseline operation.
  * These are active SPI queries, not a passive bus/electrical measurement. */
-static int observe_status_without_reset (void)
+static int
+observe_status_without_reset (void)
 {
   printf ("Observing the current state using FT9361-path register reads only.\n");
   printf ("No GPIO claim, soft/hardware reset, scratch write or firmware upload.\n");
@@ -470,9 +498,11 @@ static int observe_status_without_reset (void)
   return idle ? 0 : 2;
 }
 
-static void transfer_firmware_and_start (const guint8 *firmware)
+static void
+transfer_firmware_and_start (const guint8 *firmware)
 {
   g_autofree guint8 *packet = g_malloc (FW_SIZE + 7);
+
   packet[0] = 0x05;
   packet[1] = 0xfa;
   packet[2] = 0x00;
@@ -504,7 +534,8 @@ static void transfer_firmware_and_start (const guint8 *firmware)
   g_usleep (2000);
 }
 
-int main (int argc, char **argv)
+int
+main (int argc, char **argv)
 {
   gboolean probe_only = FALSE;
   gboolean vendor_recover = FALSE;
@@ -520,22 +551,34 @@ int main (int argc, char **argv)
   for (int i = 1; i < argc; i++)
     {
       if (!strcmp (argv[i], "--probe"))
-        probe_only = TRUE;
+        {
+          probe_only = TRUE;
+        }
       else if (!strcmp (argv[i], "--status-no-reset"))
-        status_no_reset = TRUE;
+        {
+          status_no_reset = TRUE;
+        }
       else if (!strcmp (argv[i], "--reset"))
-        do_reset = TRUE;
+        {
+          do_reset = TRUE;
+        }
       else if (!strcmp (argv[i], "--chip-id"))
-        chip_id_only = TRUE;
+        {
+          chip_id_only = TRUE;
+        }
       else if (!strcmp (argv[i], "--test-vendor-recovery") && i + 1 < argc)
         {
           vendor_recover = TRUE;
           firmware_file = argv[++i];
         }
       else if (!strcmp (argv[i], "--spi") && i + 1 < argc)
-        requested_spi = argv[++i];
+        {
+          requested_spi = argv[++i];
+        }
       else if (!strcmp (argv[i], "--speed") && i + 1 < argc)
-        cur_speed_hz = parse_spi_speed (argv[++i]);
+        {
+          cur_speed_hz = parse_spi_speed (argv[++i]);
+        }
       else
         {
           printf ("Usage: %s [OPTIONS]\n", argv[0]);
@@ -578,7 +621,7 @@ int main (int argc, char **argv)
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
   g_autofree gchar *spi_dev = resolve_spi_device (requested_spi, &spi_sysfs);
-  g_autoptr (GError) power_error = NULL;
+  g_autoptr(GError) power_error = NULL;
   if (!medion_power_prepare (&power_state, spi_sysfs, "/sys/devices", &power_error))
     fail (power_error->message);
 
@@ -611,7 +654,7 @@ int main (int argc, char **argv)
   struct stat spi_stat;
   require (fstat (spi_fd, &spi_stat) == 0, "stat opened SPI device");
   g_autofree gchar *char_link = g_strdup_printf ("/sys/dev/char/%u:%u/device",
-                                               major (spi_stat.st_rdev), minor (spi_stat.st_rdev));
+                                                 major (spi_stat.st_rdev), minor (spi_stat.st_rdev));
   g_autofree gchar *opened_sysfs = realpath (char_link, NULL);
   if (!S_ISCHR (spi_stat.st_mode) || g_strcmp0 (opened_sysfs, spi_sysfs) != 0)
     fail ("Opened SPI node does not match FTE3600 sysfs device");
@@ -645,34 +688,34 @@ int main (int argc, char **argv)
     {
       struct gpiod_chip *chip = gpiod_chip_open (chip_gpo1);
       require (chip != NULL, "open reset GPIO controller");
-        {
-          struct gpiod_line_info *info = gpiod_chip_get_line_info (chip, PIN_GPO1_RESET);
-          require (info != NULL, "get reset GPIO line info");
-          printf ("Reset line name=%s consumer=%s used=%d\n",
-                  gpiod_line_info_get_name (info) ? gpiod_line_info_get_name (info) : "(unnamed)",
-                  gpiod_line_info_get_consumer (info) ? gpiod_line_info_get_consumer (info) : "(none)",
-                  gpiod_line_info_is_used (info));
-          gpiod_line_info_free (info);
-          struct gpiod_line_settings *s = gpiod_line_settings_new ();
-          struct gpiod_line_config *c = gpiod_line_config_new ();
-          require (s != NULL && c != NULL, "allocate reset GPIO settings");
-          require (gpiod_line_settings_set_direction (s, GPIOD_LINE_DIRECTION_OUTPUT) == 0,
-                   "set reset GPIO direction");
-          require (gpiod_line_settings_set_output_value (s, GPIOD_LINE_VALUE_ACTIVE) == 0,
-                   "set reset GPIO initial high");
-          unsigned off = PIN_GPO1_RESET;
-          if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)
-            req_gpo1 = gpiod_chip_request_lines (chip, NULL, c);
-          gpiod_line_settings_free (s);
-          gpiod_line_config_free (c);
-          gpiod_chip_close (chip);
-          if (req_gpo1)
-            printf ("Successfully claimed Reset Line (GPO1 Pin 39) on %s\n", chip_gpo1);
-          else
-            fail ("Could not claim reset GPIO; stop fprintd before testing");
-          set_pin39 (1);
-          report_reset_value (1);
-        }
+      {
+        struct gpiod_line_info *info = gpiod_chip_get_line_info (chip, PIN_GPO1_RESET);
+        require (info != NULL, "get reset GPIO line info");
+        printf ("Reset line name=%s consumer=%s used=%d\n",
+                gpiod_line_info_get_name (info) ? gpiod_line_info_get_name (info) : "(unnamed)",
+                gpiod_line_info_get_consumer (info) ? gpiod_line_info_get_consumer (info) : "(none)",
+                gpiod_line_info_is_used (info));
+        gpiod_line_info_free (info);
+        struct gpiod_line_settings *s = gpiod_line_settings_new ();
+        struct gpiod_line_config *c = gpiod_line_config_new ();
+        require (s != NULL && c != NULL, "allocate reset GPIO settings");
+        require (gpiod_line_settings_set_direction (s, GPIOD_LINE_DIRECTION_OUTPUT) == 0,
+                 "set reset GPIO direction");
+        require (gpiod_line_settings_set_output_value (s, GPIOD_LINE_VALUE_ACTIVE) == 0,
+                 "set reset GPIO initial high");
+        unsigned off = PIN_GPO1_RESET;
+        if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)
+          req_gpo1 = gpiod_chip_request_lines (chip, NULL, c);
+        gpiod_line_settings_free (s);
+        gpiod_line_config_free (c);
+        gpiod_chip_close (chip);
+        if (req_gpo1)
+          printf ("Successfully claimed Reset Line (GPO1 Pin 39) on %s\n", chip_gpo1);
+        else
+          fail ("Could not claim reset GPIO; stop fprintd before testing");
+        set_pin39 (1);
+        report_reset_value (1);
+      }
     }
 
   if (status_no_reset)
@@ -775,7 +818,7 @@ int main (int argc, char **argv)
       if (!success)
         {
           fprintf (stderr, "FAILED: host SPI transfers completed, but no MCU idle response.\n"
-                   "This does not establish whether the sensor rail is powered.\n");
+                           "This does not establish whether the sensor rail is powered.\n");
           result = 2;
           goto done;
         }
