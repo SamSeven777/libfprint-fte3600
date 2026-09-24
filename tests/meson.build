@@ -351,6 +351,29 @@ if 'fte3600' in drivers
         env: fte3600_driver_envs,
     )
 
+    test_medion_e3224 = executable('test-medion-e3224',
+        sources: '../tools/test_medion_e3224.c',
+        dependencies: [glib_dep, gpiod_dep, gudev_dep],
+        c_args: common_cflags,
+        install: false,
+    )
+
+    medion_power_test = executable('test-medion-power',
+        sources: 'test-medion-power.c',
+        dependencies: glib_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+    test('medion-power', medion_power_test, suite: ['unit-tests'])
+
+    medion_diagnostic_test = executable('test-medion-diagnostic',
+        sources: 'test-medion-diagnostic.c',
+        dependencies: [glib_dep, gpiod_dep, gudev_dep],
+        c_args: common_cflags,
+        install: false,
+    )
+    test('medion-diagnostic', medion_diagnostic_test, suite: ['unit-tests'])
+
     fte3600_brisk_test = executable('test-fte3600-brisk',
         sources: [
             'test-fte3600-brisk.c',
