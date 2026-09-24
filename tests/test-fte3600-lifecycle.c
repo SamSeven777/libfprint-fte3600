@@ -3,9 +3,10 @@
  * SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
  *
- * Linker wrappers replace only the OS/device boundary. The production driver,
- * SPI worker threads, state machines, cancellables and public FpDevice API run
- * unchanged. No real sensor, GPIO, firmware or biometric fixture is needed.
+ * Linker wrappers replace the OS/device boundary. Verify-specific cases also
+ * inject controlled extractor outcomes, but do not stub matching decisions.
+ * The production driver, SPI workers, state machines, cancellables and public
+ * FpDevice API run unchanged. No real hardware or biometric fixture is needed.
  */
 
 #include <errno.h>
@@ -20,6 +21,7 @@
 #include <gudev/gudev.h>
 
 #include "drivers/fte3600.h"
+#include "drivers/fte3600-template.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
@@ -48,11 +50,17 @@ WRAPPED (gpiod_line_request_read_edge_events);
 WRAPPED (gpiod_edge_event_buffer_get_event);
 WRAPPED (gpiod_edge_event_get_event_type);
 WRAPPED (gpiod_edge_event_get_line_offset);
+WRAPPED (g_getenv);
+WRAPPED (fpi_fte3600_brisk_extract);
+WRAPPED (fpi_fte3600_ipa_extract);
 #undef WRAPPED
 
 __typeof__ (open) __real_open;
 __typeof__ (close) __real_close;
 __typeof__ (g_file_get_contents) __real_g_file_get_contents;
+__typeof__ (g_getenv) __real_g_getenv;
+__typeof__ (fpi_fte3600_brisk_extract) __real_fpi_fte3600_brisk_extract;
+__typeof__ (fpi_fte3600_ipa_extract) __real_fpi_fte3600_ipa_extract;
 int __wrap_open64 (const char *path,
                    int         flags,
                    ...);
@@ -113,7 +121,81 @@ static struct
   gboolean      fail_hardware_reset;
   IrqAction     irq_action;
   GCancellable *cancellable;
+  const gchar  *matcher_mode;
+  gboolean      mock_extract;
+  gboolean      cancel_extract;
+  gboolean      invalid_brisk;
+  gboolean      invalid_ipa;
+  gboolean      empty_ipa;
+  gboolean      nonmatching_ipa;
+  guint         brisk_calls;
+  guint         ipa_calls;
 } sensor;
+
+/* Controlled, valid synthetic features isolate the driver completion contract
+ * from extraction quality. The real template comparator and FpDevice verify
+ * worker/callback still run; no authentication result is stubbed. */
+static void
+make_mock_ipa (Fte3600IpaFeatureSet *features)
+{
+  memset (features, 0, sizeof (*features));
+  features->extractor_schema_version = FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION;
+  features->n_minutiae = 6;
+  for (guint i = 0; i < features->n_minutiae; i++)
+    {
+      features->minutiae[i].x = 10.0f + 18.0f * (i % 3);
+      features->minutiae[i].y = 15.0f + 35.0f * (i / 3);
+      features->minutiae[i].desc[i] = 1.0f;
+    }
+}
+
+const gchar *
+__wrap_g_getenv (const gchar *variable)
+{
+  if (sensor.matcher_mode && g_str_equal (variable, "FP_FTE3600_MATCHER"))
+    return sensor.matcher_mode;
+  return __real_g_getenv (variable);
+}
+
+Fte3600BriskStatus
+__wrap_fpi_fte3600_brisk_extract (const guint8 *image, gsize length,
+                                  Fte3600BriskFeatureSet *features)
+{
+  if (!sensor.mock_extract)
+    return __real_fpi_fte3600_brisk_extract (image, length, features);
+  sensor.brisk_calls++;
+  memset (features, 0, sizeof (*features));
+  if (sensor.cancel_extract)
+    g_cancellable_cancel (sensor.cancellable);
+  return sensor.invalid_brisk ? FTE3600_BRISK_INVALID_ARGUMENT :
+         FTE3600_BRISK_INSUFFICIENT_FEATURES;
+}
+
+Fte3600IpaStatus
+__wrap_fpi_fte3600_ipa_extract (const guint8 *image, gsize length,
+                                Fte3600IpaFeatureSet *features)
+{
+  if (!sensor.mock_extract)
+    return __real_fpi_fte3600_ipa_extract (image, length, features);
+  sensor.ipa_calls++;
+  make_mock_ipa (features);
+  if (sensor.cancel_extract)
+    g_cancellable_cancel (sensor.cancellable);
+  if (sensor.invalid_ipa)
+    return FTE3600_IPA_ERR_PARAM;
+  if (sensor.empty_ipa)
+    {
+      features->n_minutiae = 0;
+      return FTE3600_IPA_ERR_TOO_FEW_POINTS;
+    }
+  if (sensor.nonmatching_ipa)
+    for (guint i = 0; i < features->n_minutiae; i++)
+      {
+        memset (features->minutiae[i].desc, 0, sizeof (features->minutiae[i].desc));
+        features->minutiae[i].desc[20] = 1.0f;
+      }
+  return FTE3600_IPA_OK;
+}
 
 int
 __wrap_open (const char *path, int flags, ...)
@@ -705,6 +787,111 @@ test_capture_error (gconstpointer data)
 }
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
+static FpPrint *
+make_mock_print (FpDevice *device)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(GVariant) data = NULL;
+  Fte3600IpaFeatureSet ipa;
+  gsize size;
+  const guint8 *bytes;
+  FpPrint *print;
+
+  make_mock_ipa (&ipa);
+  for (guint sample = 0; sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet brisk = { 0 };
+      brisk.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      brisk.n_features = 12;
+      for (guint i = 0; i < brisk.n_features; i++)
+        {
+          Fte3600BriskFeature *point = &brisk.features[i];
+          guint32 state = 0x9e3779b9u ^ (i + 1) * 0x45d9f3bu;
+          point->x = 8.0f + 12.0f * (i % 4);
+          point->y = 10.0f + 25.0f * (i / 4);
+          for (guint d = 0; d < FTE3600_BRISK_DESCRIPTOR_BYTES; d++)
+            {
+              state ^= state << 13;
+              state ^= state >> 17;
+              state ^= state << 5;
+              point->descriptor[d] = state >> 24;
+            }
+          point->descriptor[0] ^= sample;
+        }
+      g_assert_cmpint (fpi_fte3600_template_add_dual_features (
+                        templ, &brisk, &ipa, NULL), ==,
+                       sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+                         FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+    }
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+  bytes = g_bytes_get_data (wire, &size);
+  data = g_variant_ref_sink (g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                                        bytes, size, 1));
+  print = g_object_ref_sink (fp_print_new (device));
+  fpi_print_set_type (print, FPI_PRINT_RAW);
+  g_object_set (print, "fpi-data", data, NULL);
+  return print;
+}
+
+static void
+test_verify_completion (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  FpDevice *device = new_device ();
+  g_autoptr(FpPrint) print = make_mock_print (device);
+  g_autoptr(GError) error = NULL;
+  gboolean matched = FALSE;
+  gboolean completed;
+
+  open_device (device);
+  sensor.mock_extract = TRUE;
+  sensor.matcher_mode = scenario == 0 || scenario == 6 || scenario == 7 ? "ipa" :
+                        scenario == 2 ? "brisk" : scenario == 8 ? "unknown" : "dual";
+  sensor.empty_ipa = scenario == 3;
+  sensor.invalid_brisk = scenario == 4;
+  sensor.cancel_extract = scenario == 5;
+  sensor.invalid_ipa = scenario == 6;
+  sensor.nonmatching_ipa = scenario == 7;
+  completed = fp_device_verify_sync (device, print, sensor.cancellable,
+                                     NULL, NULL, &matched, NULL, &error);
+
+  if (scenario == 8 || (!FTE3600_ENABLE_IPA_AUTH && scenario != 2))
+    {
+      g_assert_false (completed);
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+      g_assert_cmpuint (sensor.brisk_calls, ==, 0);
+      g_assert_cmpuint (sensor.ipa_calls, ==, 0);
+    }
+  else if (scenario == 2 || scenario == 3)
+    {
+      g_assert_false (completed);
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+      g_assert_cmpuint (sensor.brisk_calls, ==, 1);
+    }
+  else if (scenario == 4 || scenario == 6)
+    {
+      g_assert_false (completed);
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_INVALID);
+    }
+  else if (scenario == 5)
+    {
+      g_assert_false (completed);
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    }
+  else
+    {
+      g_assert_true (completed);
+      g_assert_no_error (error);
+      g_assert_cmpint (matched, ==, scenario != 7);
+      g_assert_cmpuint (sensor.brisk_calls, ==, scenario == 1 ? 1 : 0);
+      g_assert_cmpuint (sensor.ipa_calls, ==, 1);
+    }
+  g_assert_cmpuint (sensor.images, ==, 1);
+  g_assert_cmpint (fpi_device_get_current_action (device), ==, FPI_DEVICE_ACTION_NONE);
+  finish_device (device);
+}
+
 static void
 test_enroll_cancel (void)
 {
@@ -797,6 +984,15 @@ main (int argc, char **argv)
                         test_capture_error);
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_test_add_func ("/fte3600-lifecycle/enroll-cancel", test_enroll_cancel);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/ipa-rescue", GUINT_TO_POINTER (0), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/dual-rescue", GUINT_TO_POINTER (1), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/brisk-insufficient", GUINT_TO_POINTER (2), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/both-insufficient", GUINT_TO_POINTER (3), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/brisk-error", GUINT_TO_POINTER (4), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/cancel-worker", GUINT_TO_POINTER (5), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/ipa-error", GUINT_TO_POINTER (6), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/ipa-no-match", GUINT_TO_POINTER (7), test_verify_completion);
+  g_test_add_data_func ("/fte3600-lifecycle/verify/unknown-mode", GUINT_TO_POINTER (8), test_verify_completion);
 #endif
   g_test_add_data_func ("/fte3600-lifecycle/open/spi-error", GUINT_TO_POINTER (0),
                         test_open_error);

@@ -361,6 +361,7 @@ if 'fte3600' in drivers
         'gpiod_line_request_read_edge_events',
         'gpiod_edge_event_buffer_get_event', 'gpiod_edge_event_get_event_type',
         'gpiod_edge_event_get_line_offset',
+        'g_getenv', 'fpi_fte3600_brisk_extract', 'fpi_fte3600_ipa_extract',
     ]
     fte3600_mock_link_args = []
     foreach symbol : fte3600_mock_symbols

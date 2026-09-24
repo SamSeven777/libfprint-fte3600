@@ -8,11 +8,14 @@ evaluation in this repository.
 ## Algorithms and decision boundaries
 
 BRISK uses DoG keypoints, orientation-normalized binary descriptors and geometric
-consensus. IPA uses image-gradient/structure information, spatially distributed
-points, continuous descriptors and geometric consistency. The name does not
-establish equivalence to a published learned model, orthogonal projections,
-general affine invariance or superior biometric accuracy. Follow the actual
-implementation and its documented parameter provenance.
+consensus. IPA first applies local contrast normalization, then finds
+gradient/structure-based points with sub-pixel peak interpolation and builds
+continuous descriptors. It checks rigid geometric consistency using local
+orientations and two-point spatial rotation hypotheses. Descriptor context uses
+a fixed normalized Hadamard basis, not trained parameters. The name does not
+establish equivalence to a published learned model, general affine invariance
+or superior biometric accuracy. Follow the implementation and its documented
+parameter provenance.
 
 Runtime modes are BRISK, IPA and OR fusion. In dual mode either permitted engine
 can accept, so adding IPA is a change to the authentication boundary, not a
@@ -40,8 +43,12 @@ system-wide sudo/root authentication and preserve a password fallback.
 
 BRISK-only Wire V1 remains version checked. The old experimental Wire V2 format
 is rejected; it did not carry a complete IPA compatibility contract.
-IPA-containing records use the revised format with independent IPA extractor,
-diagnostic, authentication and fusion policy versions. Upgrade tests must check
+IPA-containing records use Wire V3 with a 48-byte header and independent IPA
+extractor, diagnostic, authentication and fusion policy versions. The current
+contrast-normalized/sub-pixel extractor schema and diagnostic policy are both
+version 2. The IPA authentication policy is version 2 only with its explicit
+build opt-in, otherwise 0; fusion policy is version 1. The earlier experimental
+IPA schema is not interchangeable with these descriptors. Upgrade tests must check
 mismatches and mixed BRISK-only/IPA records. Re-enroll when the driver reports
 an incompatible experimental template; do not relabel old records to bypass
 version checks. Inspect the current header constants rather than hard-coding
@@ -85,8 +92,8 @@ effective mode. Do not change a login service just to run this benchmark.
 Only personal-auth builds register the real Meson benchmark:
 
 ```sh
-meson test -C build-brisk --benchmark --print-errorlogs benchmark-fte3600
-meson test -C build-dual --benchmark --print-errorlogs benchmark-fte3600
+meson test -C build-brisk --benchmark --logbase=benchmark --print-errorlogs benchmark-fte3600
+meson test -C build-dual --benchmark --logbase=benchmark --print-errorlogs benchmark-fte3600
 ```
 
 The program times extraction and complete gallery comparisons, prints the

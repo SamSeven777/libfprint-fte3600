@@ -1048,10 +1048,13 @@ test_ipa_version_isolation (void)
                           FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 40, FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION + 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 40, 1, FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
   assert_header_mutation (wire, 42, FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION + 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 42, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 44, !FTE3600_IPA_AUTHENTICATION_POLICY_VERSION,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 44, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 46, FTE3600_TEMPLATE_FUSION_POLICY_VERSION + 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
 }
