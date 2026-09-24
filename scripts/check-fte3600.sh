@@ -26,6 +26,6 @@ for fte_auth in false true; do
 
   meson compile -C "$fte_build"
   meson test -C "$fte_build" --print-errorlogs --no-rebuild \
-    fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+    fpi-spi-transfer fte3600-driver fte3600-lifecycle fte3600-brisk fte3600-template \
     medion-power medion-diagnostic
 done

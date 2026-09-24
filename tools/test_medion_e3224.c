@@ -37,6 +37,17 @@ static MedionPower power_state;
 static volatile sig_atomic_t interrupted;
 static gboolean cleanup_failed;
 static uint32_t cur_speed_hz = 1000000;
+/* Only the no-reset observation temporarily changes shared SPI settings.
+ * Keep the full mode word, including flags beyond the legacy 8-bit ioctl. */
+static struct
+{
+  uint32_t mode;
+  uint8_t bits;
+  uint8_t lsb;
+  gboolean mode_changed;
+  gboolean bits_changed;
+  gboolean lsb_changed;
+} saved_spi;
 
 static void fail (const char *what)
 {
@@ -73,6 +84,24 @@ static void cleanup (void)
     }
   if (spi_fd >= 0)
     {
+      /* Attempt every restoration even if an earlier ioctl fails. Mark before
+       * writes during setup so a partially applied failing ioctl is covered. */
+      if (saved_spi.mode_changed && ioctl (spi_fd, SPI_IOC_WR_MODE32, &saved_spi.mode) < 0)
+        {
+          fprintf (stderr, "ERROR: restoring SPI mode: %s\n", strerror (errno));
+          cleanup_failed = TRUE;
+        }
+      if (saved_spi.bits_changed && ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &saved_spi.bits) < 0)
+        {
+          fprintf (stderr, "ERROR: restoring SPI word size: %s\n", strerror (errno));
+          cleanup_failed = TRUE;
+        }
+      if (saved_spi.lsb_changed && ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &saved_spi.lsb) < 0)
+        {
+          fprintf (stderr, "ERROR: restoring SPI bit order: %s\n", strerror (errno));
+          cleanup_failed = TRUE;
+        }
+      memset (&saved_spi, 0, sizeof (saved_spi));
       close (spi_fd);
       spi_fd = -1;
     }
@@ -410,9 +439,9 @@ static gboolean probe_status_and_id (const char *tag, uint32_t speed_hz)
 
   const char *mark = "";
   if (rx_id[4] == 0x40 && rx_id[5] == 0x50)
-    mark = " >>> [MATCH! FT9361 SENSOR ID 0x40 0x50 DETECTED!] <<<";
+    mark = " [64x80 geometry signature; not an exact chip identification]";
   else if (rx_status[4] == 0xa5 && rx_status[5] == 0x5a)
-    mark = " >>> [MATCH! FT9361 MCU IDLE (a5 5a) DETECTED!] <<<";
+    mark = " [MCU idle signature; not an exact chip identification]";
   else if (has_nonzero)
     mark = " *** [NON-ZERO SPI DATA RECEIVED!] ***";
 
@@ -423,6 +452,22 @@ static gboolean probe_status_and_id (const char *tag, uint32_t speed_hz)
           mark);
 
   return (rx_status[4] == 0xa5 && rx_status[5] == 0x5a);
+}
+
+/* Only the two existing FT9361-path status/geometry read transactions.
+ * No fallback to other chip protocols, GPIO request, reset, ROM command,
+ * register write or firmware download belongs in this baseline operation.
+ * These are active SPI queries, not a passive bus/electrical measurement. */
+static int observe_status_without_reset (void)
+{
+  printf ("Observing the current state using FT9361-path register reads only.\n");
+  printf ("No GPIO claim, soft/hardware reset, scratch write or firmware upload.\n");
+  gboolean idle = probe_status_and_id ("Before any reset", cur_speed_hz);
+  printf ("An idle/geometry signature does not uniquely identify FT9361.\n");
+  if (!idle)
+    printf ("No recognized idle response; no recovery attempted. "
+            "This does not establish chip type or sensor power.\n");
+  return idle ? 0 : 2;
 }
 
 static void transfer_firmware_and_start (const guint8 *firmware)
@@ -465,6 +510,7 @@ int main (int argc, char **argv)
   gboolean vendor_recover = FALSE;
   gboolean do_reset = FALSE;
   gboolean chip_id_only = FALSE;
+  gboolean status_no_reset = FALSE;
   int result = 0;
   const char *firmware_file = NULL;
   const char *requested_spi = NULL;
@@ -475,6 +521,8 @@ int main (int argc, char **argv)
     {
       if (!strcmp (argv[i], "--probe"))
         probe_only = TRUE;
+      else if (!strcmp (argv[i], "--status-no-reset"))
+        status_no_reset = TRUE;
       else if (!strcmp (argv[i], "--reset"))
         do_reset = TRUE;
       else if (!strcmp (argv[i], "--chip-id"))
@@ -492,7 +540,8 @@ int main (int argc, char **argv)
         {
           printf ("Usage: %s [OPTIONS]\n", argv[0]);
           printf ("Options:\n");
-          printf ("  --probe                      Probe chip status and bootloader edition\n");
+          printf ("  --status-no-reset            Status/geometry reads; no GPIO, reset or upload (default)\n");
+          printf ("  --probe                      MUTATING: dual soft reset, then status/ROM queries\n");
           printf ("  --chip-id                    Explicit scratch-RAM chip-family probe; no GPIO/reset\n");
           printf ("  --test-vendor-recovery <fw>  Test the experimental Medion recovery sequence:\n");
           printf ("                                 1. Soft reset & idle check\n");
@@ -506,15 +555,17 @@ int main (int argc, char **argv)
           printf ("  --spi <device>               Verify node against discovered FTE3600 device\n");
           printf ("  --speed <hz>                 SPI speed 1..1000000 Hz (default: ACPI's 1000000)\n");
           printf ("  --help                       Show usage without accessing hardware\n");
+          printf ("Run with other fingerprint clients stopped; SPI queries are not passive.\n");
           printf ("Runtime PM overrides are temporary and restored on exit.\n");
+          printf ("No-reset observation also restores SPI settings; cleanup failures are errors.\n");
           return !strcmp (argv[i], "--help") ? 0 : 1;
         }
     }
 
-  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only)
-    probe_only = TRUE;
-  if (probe_only + vendor_recover + do_reset + chip_id_only != 1)
-    fail ("Choose exactly one of --probe, --reset, --chip-id, or --test-vendor-recovery");
+  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset)
+    status_no_reset = TRUE;
+  if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset != 1)
+    fail ("Choose exactly one of --status-no-reset, --probe, --reset, --chip-id, or --test-vendor-recovery");
 
   setvbuf (stdout, NULL, _IOLBF, 0);
   signal (SIGINT, sig_handler);
@@ -522,7 +573,7 @@ int main (int argc, char **argv)
   atexit (cleanup);
 
   printf ("=== Medion Akoya E3224 Hardware Diagnostic & Recovery Tool ===\n");
-  printf ("Diagnostic revision: 2026-09-23.1 (checked runtime PM and transfers)\n");
+  printf ("Diagnostic revision: 2026-09-24.3 (no-reset baseline with SPI settings restoration)\n");
   check_dmi ();
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
@@ -546,7 +597,7 @@ int main (int argc, char **argv)
 
   /* Resolve GPO1 (Pin 39 reset) */
   g_autofree gchar *chip_gpo1 = NULL;
-  if (!chip_id_only)
+  if (do_reset || vendor_recover)
     {
       chip_gpo1 = find_gpiochip_for_acpi ("\\_SB_.GPO1");
       printf ("Resolved GPO1 (Pin 39): %s\n", chip_gpo1 ? chip_gpo1 : "NOT FOUND");
@@ -564,9 +615,21 @@ int main (int argc, char **argv)
   g_autofree gchar *opened_sysfs = realpath (char_link, NULL);
   if (!S_ISCHR (spi_stat.st_mode) || g_strcmp0 (opened_sysfs, spi_sysfs) != 0)
     fail ("Opened SPI node does not match FTE3600 sysfs device");
+  if (status_no_reset)
+    {
+      /* Read all originals before changing anything. No WR_MAX_SPEED_HZ is
+       * issued: speed_hz is selected per transfer and does not change that
+       * spidev default, so there is no max-speed setting to restore. */
+      require (ioctl (spi_fd, SPI_IOC_RD_MODE32, &saved_spi.mode) == 0, "save SPI mode");
+      require (ioctl (spi_fd, SPI_IOC_RD_BITS_PER_WORD, &saved_spi.bits) == 0, "save SPI word size");
+      require (ioctl (spi_fd, SPI_IOC_RD_LSB_FIRST, &saved_spi.lsb) == 0, "save SPI bit order");
+      saved_spi.mode_changed = TRUE;
+    }
   set_spi_mode (SPI_MODE_0);
   uint8_t bits = 8, lsb = 0;
+  saved_spi.bits_changed = status_no_reset;
   require (ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) == 0, "set SPI 8-bit");
+  saved_spi.lsb_changed = status_no_reset;
   require (ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb) == 0, "set SPI MSB-first");
   uint8_t mode_read = 0, bits_read = 0, lsb_read = 0;
   require (ioctl (spi_fd, SPI_IOC_RD_MODE, &mode_read) == 0, "read SPI mode");
@@ -610,6 +673,12 @@ int main (int argc, char **argv)
           set_pin39 (1);
           report_reset_value (1);
         }
+    }
+
+  if (status_no_reset)
+    {
+      result = observe_status_without_reset ();
+      goto done;
     }
 
   if (chip_id_only)
@@ -745,7 +814,7 @@ done:
     report_reset_value (1);
   medion_power_report (&power_state, "after SPI operations");
   cleanup ();
-  printf ("\nDiagnostic exit=%d; runtime PM restore=%s\n", result,
+  printf ("\nDiagnostic exit=%d; cleanup (SPI settings / runtime PM)=%s\n", result,
           cleanup_failed ? "FAILED (see errors)" : "complete");
   return cleanup_failed ? 1 : (interrupted ? 128 + interrupted : result);
 }
