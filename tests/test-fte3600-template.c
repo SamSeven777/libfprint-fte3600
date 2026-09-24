@@ -12,11 +12,12 @@
 
 #include "../libfprint/drivers/fte3600-template.h"
 
-#define TEST_FEATURES       12
-#define TEST_RECORD_SIZE    (8 + TEST_FEATURES * FTE3600_TEMPLATE_FEATURE_RECORD_SIZE)
-#define TEST_WIRE_SIZE      (FTE3600_TEMPLATE_WIRE_HEADER_SIZE + \
-                             FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES * \
-                             TEST_RECORD_SIZE)
+#define TEST_FEATURES 12
+#define TEST_RECORD_SIZE (8 + TEST_FEATURES * FTE3600_TEMPLATE_FEATURE_RECORD_SIZE)
+#define TEST_WIRE_SIZE \
+  (FTE3600_TEMPLATE_WIRE_HEADER_SIZE + \
+   FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES * \
+   TEST_RECORD_SIZE)
 
 static guint16
 read_u16 (const guint8 *data)
@@ -34,16 +35,16 @@ read_u32 (const guint8 *data)
 }
 
 static void
-write_u16 (guint8  *data,
-           guint16  value)
+write_u16 (guint8 *data,
+           guint16 value)
 {
   data[0] = value & 0xff;
   data[1] = value >> 8;
 }
 
 static void
-write_u32 (guint8  *data,
-           guint32  value)
+write_u32 (guint8 *data,
+           guint32 value)
 {
   data[0] = value & 0xff;
   data[1] = (value >> 8) & 0xff;
@@ -123,7 +124,7 @@ make_ready_template (gboolean reverse)
       Fte3600BriskFeatureSet features;
       const Fte3600TemplateStatus expected =
         sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
-          FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
 
       make_feature_set (&features, sample, reverse && (sample & 1));
       g_assert_cmpint (fte3600_template_add_features (templ, &features, NULL),
@@ -180,7 +181,7 @@ test_validate_feature_set (void)
     features.features[i].y = 5.0f;
 
   g_assert_true (fte3600_brisk_validate_feature_set (&features,
-                                                      &physical_count));
+                                                     &physical_count));
   g_assert_cmpuint (physical_count, ==, 2);
   features.features[0].orientation = (gfloat) G_PI;
   g_assert_true (fte3600_brisk_validate_feature_set (&features, NULL));
@@ -188,7 +189,7 @@ test_validate_feature_set (void)
   g_assert_true (fte3600_brisk_validate_feature_set (&features, NULL));
   features.features[0].x = NAN;
   g_assert_false (fte3600_brisk_validate_feature_set (&features,
-                                                       &physical_count));
+                                                      &physical_count));
   g_assert_cmpuint (physical_count, ==, 0);
 }
 
@@ -256,10 +257,10 @@ test_roundtrip_and_header (void)
 
       make_feature_set (&features, sample, added & 1);
       g_assert_cmpint (fte3600_template_add_features (
-                           reverse_samples, &features, NULL), ==,
+                         reverse_samples, &features, NULL), ==,
                        added + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
-                         FTE3600_TEMPLATE_OK :
-                         FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+                       FTE3600_TEMPLATE_OK :
+                       FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
   g_assert_cmpint (fte3600_template_encode (reverse_samples, &reverse_wire),
                    ==, FTE3600_TEMPLATE_OK);
@@ -315,9 +316,9 @@ test_enrollment_validation (void)
       make_feature_set (&related, sample, sample & 1);
       g_assert_cmpint (fte3600_template_add_features (templ, &related, NULL),
                        ==, sample + 1 ==
-                           FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
-                             FTE3600_TEMPLATE_OK :
-                             FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+                       FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+                       FTE3600_TEMPLATE_OK :
+                       FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
   g_assert_true (fte3600_template_is_ready (templ));
 #endif
@@ -381,8 +382,8 @@ test_authentication_policy (void)
 
   make_feature_set (&query, 0, FALSE);
   g_assert_cmpint (fte3600_template_compare_features (
-                       templ, &query, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
-                       &result), ==, FTE3600_TEMPLATE_OK);
+                     templ, &query, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
+                     &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_cmpuint (result.n_compared, ==,
                     FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   g_assert_cmpuint (result.diagnostic_passes, >=, 1);
@@ -393,15 +394,15 @@ test_authentication_policy (void)
   memset (&result, 0xa5, sizeof (result));
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_assert_cmpint (fte3600_template_compare_features (
-                       templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
-                       &result), ==, FTE3600_TEMPLATE_OK);
+                     templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.authentication_accepted);
   g_assert_cmpuint (result.n_compared, ==,
                     FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
 #else
   g_assert_cmpint (fte3600_template_compare_features (
-                       templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
-                       &result), ==, FTE3600_TEMPLATE_NOT_CALIBRATED);
+                     templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     &result), ==, FTE3600_TEMPLATE_NOT_CALIBRATED);
   g_assert_false (result.authentication_accepted);
   g_assert_cmpuint (result.n_compared, ==, 0);
 #endif
@@ -410,25 +411,26 @@ test_authentication_policy (void)
                    FTE3600_TEMPLATE_OK);
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_assert_cmpint (fte3600_template_decode (
-                       wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                     wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
                    ==, FTE3600_TEMPLATE_OK);
   g_assert_nonnull (decoded);
 #else
   g_assert_cmpint (fte3600_template_decode (
-                       wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                     wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
                    ==, FTE3600_TEMPLATE_NOT_CALIBRATED);
   g_assert_null (decoded);
 #endif
 }
 
 static void
-assert_header_mutation (GBytes                    *original,
-                        gsize                      offset,
-                        guint16                    value,
-                        Fte3600TemplateStatus      expected)
+assert_header_mutation (GBytes               *original,
+                        gsize                 offset,
+                        guint16               value,
+                        Fte3600TemplateStatus expected)
 {
   guint8 *data;
   gsize size;
+
   g_autoptr(GBytes) changed = mutable_copy (original, &data, &size);
 
   g_assert_cmpuint (offset + 2, <=, size);
@@ -511,9 +513,9 @@ test_malformed_headers_and_lengths (void)
 }
 
 static GBytes *
-copy_and_mutate_u16 (GBytes  *wire,
-                     gsize    offset,
-                     guint16  value)
+copy_and_mutate_u16 (GBytes *wire,
+                     gsize   offset,
+                     guint16 value)
 {
   guint8 *data;
   GBytes *copy = mutable_copy (wire, &data, NULL);
@@ -523,9 +525,9 @@ copy_and_mutate_u16 (GBytes  *wire,
 }
 
 static GBytes *
-copy_and_mutate_u32 (GBytes  *wire,
-                     gsize    offset,
-                     guint32  value)
+copy_and_mutate_u32 (GBytes *wire,
+                     gsize   offset,
+                     guint32 value)
 {
   guint8 *data;
   GBytes *copy = mutable_copy (wire, &data, NULL);
@@ -638,9 +640,9 @@ test_maximum_size (void)
                           sample & 1);
       g_assert_cmpint (fte3600_template_add_features (templ, &features, NULL),
                        ==, sample + 1 ==
-                           FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
-                             FTE3600_TEMPLATE_OK :
-                             FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+                       FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+                       FTE3600_TEMPLATE_OK :
+                       FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
   g_assert_cmpint (fte3600_template_encode (templ, &wire), ==,
                    FTE3600_TEMPLATE_OK);
@@ -664,7 +666,7 @@ test_incomplete_and_arguments (void)
                    FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
   g_assert_null (wire);
   g_assert_cmpint (fte3600_template_decode (
-                       NULL, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded), ==,
+                     NULL, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded), ==,
                    FTE3600_TEMPLATE_INVALID_WIRE);
   g_assert_null (decoded);
   g_assert_cmpint (fte3600_template_add_features (NULL, NULL, NULL), ==,
@@ -676,6 +678,7 @@ test_rounding_mode_isolation (void)
 {
   static const gint modes[] = { FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO };
   const gint caller_mode = fegetround ();
+
   g_autoptr(Fte3600Template) templ = NULL;
   g_autoptr(Fte3600Template) baseline_decoded = NULL;
   g_autoptr(GBytes) baseline_wire = NULL;
@@ -689,12 +692,12 @@ test_rounding_mode_isolation (void)
   g_assert_cmpint (fte3600_template_encode (templ, &baseline_wire), ==,
                    FTE3600_TEMPLATE_OK);
   g_assert_cmpint (fte3600_template_decode (
-                       baseline_wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
-                       &baseline_decoded), ==, FTE3600_TEMPLATE_OK);
+                     baseline_wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
+                     &baseline_decoded), ==, FTE3600_TEMPLATE_OK);
   g_assert_cmpint (fte3600_template_compare_features (
-                       baseline_decoded, &query,
-                       FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
-                       &baseline_result), ==, FTE3600_TEMPLATE_OK);
+                     baseline_decoded, &query,
+                     FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
+                     &baseline_result), ==, FTE3600_TEMPLATE_OK);
 
   for (guint i = 0; i < G_N_ELEMENTS (modes); i++)
     {
@@ -710,12 +713,12 @@ test_rounding_mode_isolation (void)
       g_assert_true (g_bytes_equal (wire, baseline_wire));
 
       g_assert_cmpint (fte3600_template_decode (
-                           wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                         wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
                        ==, FTE3600_TEMPLATE_OK);
       g_assert_cmpint (fegetround (), ==, modes[i]);
       g_assert_cmpint (fte3600_template_compare_features (
-                           decoded, &query,
-                           FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result), ==,
+                         decoded, &query,
+                         FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result), ==,
                        FTE3600_TEMPLATE_OK);
       g_assert_cmpint (fegetround (), ==, modes[i]);
       g_assert_cmpmem (&result, sizeof (result),
@@ -725,14 +728,14 @@ test_rounding_mode_isolation (void)
                        ==, FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
       g_assert_cmpint (fegetround (), ==, modes[i]);
       g_assert_cmpint (fte3600_template_compare_features (
-                           decoded, &query,
-                           FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==,
+                         decoded, &query,
+                         FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==,
 #if FTE3600_ENABLE_PERSONAL_AUTH
                        FTE3600_TEMPLATE_OK);
       g_assert_true (result.authentication_accepted);
 #else
                        FTE3600_TEMPLATE_NOT_CALIBRATED);
-      g_assert_false (result.authentication_accepted);
+                       g_assert_false (result.authentication_accepted);
 #endif
       g_assert_cmpint (fegetround (), ==, modes[i]);
     }

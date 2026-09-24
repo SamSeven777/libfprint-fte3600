@@ -11,18 +11,18 @@
 
 G_BEGIN_DECLS
 
-#define FTE3600_BRISK_WIDTH                 64
-#define FTE3600_BRISK_HEIGHT                80
-#define FTE3600_BRISK_IMAGE_SIZE            (FTE3600_BRISK_WIDTH * FTE3600_BRISK_HEIGHT)
+#define FTE3600_BRISK_WIDTH 64
+#define FTE3600_BRISK_HEIGHT 80
+#define FTE3600_BRISK_IMAGE_SIZE (FTE3600_BRISK_WIDTH * FTE3600_BRISK_HEIGHT)
 
-#define FTE3600_BRISK_PATTERN_POINTS        45
-#define FTE3600_BRISK_DESCRIPTOR_BITS       256
-#define FTE3600_BRISK_DESCRIPTOR_BYTES      (FTE3600_BRISK_DESCRIPTOR_BITS / 8)
-#define FTE3600_BRISK_MAX_FEATURES          160
+#define FTE3600_BRISK_PATTERN_POINTS 45
+#define FTE3600_BRISK_DESCRIPTOR_BITS 256
+#define FTE3600_BRISK_DESCRIPTOR_BYTES (FTE3600_BRISK_DESCRIPTOR_BITS / 8)
+#define FTE3600_BRISK_MAX_FEATURES 160
 /* Inclusive representable orientation domain for schema v1.  Extractor
  * output is a gfloat, so validation uses this binary32 boundary rather than a
  * narrower binary64 approximation of pi. */
-#define FTE3600_BRISK_ORIENTATION_LIMIT      ((gfloat) 3.14159265358979323846)
+#define FTE3600_BRISK_ORIENTATION_LIMIT ((gfloat) 3.14159265358979323846)
 
 /*
  * This version covers the complete extractor schema, including image scaling,
@@ -40,8 +40,8 @@ G_BEGIN_DECLS
  * to persistent storage.
  */
 #define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 1
-#define FTE3600_BRISK_DESCRIPTOR_VERSION       FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION
-#define FTE3600_BRISK_PAIR_SEED             ((guint32) 0x46544231u)
+#define FTE3600_BRISK_DESCRIPTOR_VERSION FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION
+#define FTE3600_BRISK_PAIR_SEED ((guint32) 0x46544231u)
 #define FTE3600_BRISK_PAIR_TABLE_SHA256      \
   "89a0eb6d633305294aeb095acaef2b87"     \
   "2237ebd4499ea1bab68f403f791f21d8"
@@ -73,11 +73,11 @@ G_BEGIN_DECLS
 #define FTE3600_BRISK_THRESHOLDS_CALIBRATED 0
 G_STATIC_ASSERT (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ==
                  (FTE3600_ENABLE_PERSONAL_AUTH ? 3 : 0));
-#define FTE3600_BRISK_MAX_HAMMING            64
-#define FTE3600_BRISK_RATIO_PERCENT          80
-#define FTE3600_BRISK_MIN_HAMMING_MARGIN       8
-#define FTE3600_BRISK_MIN_MUTUAL_MATCHES      5
-#define FTE3600_BRISK_MIN_INLIERS             5
+#define FTE3600_BRISK_MAX_HAMMING 64
+#define FTE3600_BRISK_RATIO_PERCENT 80
+#define FTE3600_BRISK_MIN_HAMMING_MARGIN 8
+#define FTE3600_BRISK_MIN_MUTUAL_MATCHES 5
+#define FTE3600_BRISK_MIN_INLIERS 5
 
 typedef enum {
   FTE3600_BRISK_OK,
@@ -89,7 +89,8 @@ typedef enum {
 
 /* Deliberately kept at the vendor-observed conceptual size without copying
  * the vendor representation or serialized format. */
-typedef struct {
+typedef struct
+{
   gfloat x;
   gfloat y;
   gfloat orientation;
@@ -98,19 +99,22 @@ typedef struct {
 
 G_STATIC_ASSERT (sizeof (Fte3600BriskFeature) == 44);
 
-typedef struct {
-  guint                extractor_schema_version;
-  guint                n_features;
-  Fte3600BriskFeature  features[FTE3600_BRISK_MAX_FEATURES];
+typedef struct
+{
+  guint               extractor_schema_version;
+  guint               n_features;
+  Fte3600BriskFeature features[FTE3600_BRISK_MAX_FEATURES];
 } Fte3600BriskFeatureSet;
 
-typedef struct {
+typedef struct
+{
   guint   query_index;
   guint   reference_index;
   guint16 hamming;
 } Fte3600BriskCorrespondence;
 
-typedef struct {
+typedef struct
+{
   guint    mutual_matches;
   guint    inliers;
   guint    competing_inliers;
@@ -146,15 +150,15 @@ gboolean fte3600_brisk_descriptor_pair (guint  bit,
                                         guint *first,
                                         guint *second);
 
-Fte3600BriskStatus fte3600_brisk_describe_at (const guint8          *image,
-                                               gsize                  length,
-                                               gfloat                 x,
-                                               gfloat                 y,
-                                               Fte3600BriskFeature  *feature);
+Fte3600BriskStatus fte3600_brisk_describe_at (const guint8        *image,
+                                              gsize                length,
+                                              gfloat               x,
+                                              gfloat               y,
+                                              Fte3600BriskFeature *feature);
 
-Fte3600BriskStatus fte3600_brisk_extract (const guint8             *image,
-                                          gsize                     length,
-                                          Fte3600BriskFeatureSet   *features);
+Fte3600BriskStatus fte3600_brisk_extract (const guint8           *image,
+                                          gsize                   length,
+                                          Fte3600BriskFeatureSet *features);
 
 /* Validate the extractor schema and every feature's finite coordinate and
  * orientation range.  If requested, @physical_count receives the number of
@@ -162,7 +166,7 @@ Fte3600BriskStatus fte3600_brisk_extract (const guint8             *image,
  * apart.  Multiple orientation variants at one detector location therefore
  * count as one piece of physical evidence. */
 gboolean fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
-                                              guint                        *physical_count);
+                                             guint                        *physical_count);
 
 Fte3600BriskStatus fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
                                         const Fte3600BriskFeatureSet *reference,

@@ -58,45 +58,44 @@ G_STATIC_ASSERT (FT9361_IMAGE_SIZE == FTE3600_BRISK_IMAGE_SIZE);
 
 struct _FpiDeviceFte3600
 {
-  FpDevice parent;
+  FpDevice                        parent;
 
-  gint spi_fd;
-  gboolean capturing;
-  gboolean armed;
-  gboolean idle_verified;
-  gboolean init_hardware_reset_attempted;
-  gboolean init_firmware_upload_attempted;
-  guint init_mcu_status_attempts;
-  GBytes *firmware_bytes;
-  guint enroll_stages_passed;
+  gint                            spi_fd;
+  gboolean                        capturing;
+  gboolean                        armed;
+  gboolean                        idle_verified;
+  gboolean                        init_hardware_reset_attempted;
+  gboolean                        init_firmware_upload_attempted;
+  guint                           init_mcu_status_attempts;
+  GBytes                         *firmware_bytes;
+  guint                           enroll_stages_passed;
 
-  struct gpiod_line_request *reset_request;
-  struct gpiod_line_request *irq_request;
+  struct gpiod_line_request      *reset_request;
+  struct gpiod_line_request      *irq_request;
   struct gpiod_edge_event_buffer *irq_event_buffer;
-  GSource *irq_source;
-  FpiSsm *irq_wait_ssm;
-  gint64 arm_deadline;
-  guint arm_attempts;
-  gint64 capture_ready_deadline;
-  guint false_irq_count;
-  const Fte3600GpioProfile *gpio_profile;
+  GSource                        *irq_source;
+  FpiSsm                         *irq_wait_ssm;
+  gint64                          arm_deadline;
+  guint                           arm_attempts;
+  gint64                          capture_ready_deadline;
+  guint                           false_irq_count;
+  const Fte3600GpioProfile       *gpio_profile;
 
-  Fte3600Template *enroll_template;
-  Fte3600Template *verify_template;
-  FpImage *captured_image;
+  Fte3600Template                *enroll_template;
+  Fte3600Template                *verify_template;
+  FpImage                        *captured_image;
 
-  guint8 small_rx[FT9361_SMALL_FRAME_SIZE];
-  gboolean small_rx_valid;
-  guint8 *capture_tx;
-  guint8 *capture_rx;
+  guint8                          small_rx[FT9361_SMALL_FRAME_SIZE];
+  gboolean                        small_rx_valid;
+  guint8                         *capture_tx;
+  guint8                         *capture_rx;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FPI,
                       DEVICE_FTE3600, FpDevice);
 G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE);
 
-enum fte3600_init_state
-{
+enum fte3600_init_state {
   FTE3600_INIT_RESET_1,
   FTE3600_INIT_RESET_DELAY,
   FTE3600_INIT_RESET_2,
@@ -151,8 +150,7 @@ enum fte3600_init_state
   FTE3600_INIT_NSTATES,
 };
 
-enum fte3600_arm_state
-{
+enum fte3600_arm_state {
   FTE3600_ARM_READ_MCU_STATUS,
   FTE3600_ARM_CHECK_MCU_STATUS,
   FTE3600_ARM_RECOVERY_RESET_1,
@@ -174,8 +172,7 @@ enum fte3600_arm_state
   FTE3600_ARM_NSTATES,
 };
 
-enum fte3600_capture_state
-{
+enum fte3600_capture_state {
   FTE3600_CAPTURE_PREPARE_ARM,
   FTE3600_CAPTURE_WAIT_FINGER_IRQ,
   FTE3600_CAPTURE_POLL_MCU_STATUS,
@@ -203,8 +200,7 @@ enum fte3600_capture_state
   FTE3600_CAPTURE_NSTATES,
 };
 
-enum fte3600_reset_state
-{
+enum fte3600_reset_state {
   FTE3600_RESET_1,
   FTE3600_RESET_DELAY,
   FTE3600_RESET_2,
@@ -214,8 +210,7 @@ enum fte3600_reset_state
   FTE3600_RESET_NSTATES,
 };
 
-typedef enum
-{
+typedef enum {
   FTE3600_RESET_FOR_OPEN_ERROR,
   FTE3600_RESET_FOR_CLOSE,
   FTE3600_RESET_FOR_ACTION_ERROR,
@@ -224,35 +219,35 @@ typedef enum
 typedef struct
 {
   Fte3600ResetPurpose purpose;
-  GError *operation_error;
+  GError             *operation_error;
 } Fte3600ResetData;
 
 typedef struct
 {
-  guint8 image[FT9361_IMAGE_SIZE];
-  Fte3600Template *enroll_template;
+  guint8                image[FT9361_IMAGE_SIZE];
+  Fte3600Template      *enroll_template;
   Fte3600TemplateStatus status;
   Fte3600TemplateStatus encode_status;
-  Fte3600BriskStatus extract_status;
-  GBytes *encoded_template;
+  Fte3600BriskStatus    extract_status;
+  GBytes               *encoded_template;
 } Fte3600EnrollJob;
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
 typedef struct
 {
-  guint8 image[FT9361_IMAGE_SIZE];
-  Fte3600Template *verify_template;
-  Fte3600BriskStatus extract_status;
-  Fte3600TemplateStatus compare_status;
+  guint8                       image[FT9361_IMAGE_SIZE];
+  Fte3600Template             *verify_template;
+  Fte3600BriskStatus           extract_status;
+  Fte3600TemplateStatus        compare_status;
   Fte3600TemplateCompareResult comparison;
 } Fte3600VerifyJob;
 #endif
 
-static void fte3600_start_reset (FpiDeviceFte3600 *self,
+static void fte3600_start_reset (FpiDeviceFte3600   *self,
                                  Fte3600ResetPurpose purpose,
-                                 GError *operation_error);
+                                 GError             *operation_error);
 static void fte3600_complete_action_error (FpiDeviceFte3600 *self,
-                                           GError *error);
+                                           GError           *error);
 
 static void
 fte3600_secure_clear (gpointer data,
@@ -301,8 +296,8 @@ fte3600_deassert_hardware_reset_best_effort (FpiDeviceFte3600 *self,
   if (self->reset_request && self->gpio_profile &&
       self->gpio_profile->allow_hardware_reset &&
       gpiod_line_request_set_value (
-          self->reset_request, self->gpio_profile->reset_offset,
-          fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
+        self->reset_request, self->gpio_profile->reset_offset,
+        fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
     fp_warn ("Failed to leave the FTE3600 hardware reset line deasserted while %s: "
              "%s", context, g_strerror (errno));
 }
@@ -320,13 +315,14 @@ fte3600_release_gpio (FpiDeviceFte3600 *self)
 }
 
 static gboolean
-fte3600_read_dmi_value (const gchar  *name,
-                        gchar       **value,
-                        GError      **error)
+fte3600_read_dmi_value (const gchar *name,
+                        gchar      **value,
+                        GError     **error)
 {
   g_autofree gchar *path = NULL;
   g_autofree gchar *contents = NULL;
-  g_autoptr (GError) read_error = NULL;
+
+  g_autoptr(GError) read_error = NULL;
 
   path = g_build_filename ("/sys/class/dmi/id", name, NULL);
   if (!g_file_get_contents (path, &contents, NULL, &read_error))
@@ -367,7 +363,7 @@ fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
   fte3600_read_dmi_value ("board_name", &board_name, NULL);
 
   self->gpio_profile = fte3600_lookup_gpio_profile (
-      sys_vendor, product_name, product_version, board_name);
+    sys_vendor, product_name, product_version, board_name);
   if (self->gpio_profile)
     return TRUE;
 
@@ -382,11 +378,12 @@ fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
 
 
 static gchar *
-fte3600_find_gpiochip (const gchar  *target_acpi_path,
-                       GError      **error)
+fte3600_find_gpiochip (const gchar *target_acpi_path,
+                       GError     **error)
 {
   const gchar *subsystems[] = { "gpio", NULL };
-  g_autoptr (GUdevClient) client = NULL;
+
+  g_autoptr(GUdevClient) client = NULL;
   g_autofree gchar *result = NULL;
   GList *gpio_devices;
 
@@ -400,7 +397,7 @@ fte3600_find_gpiochip (const gchar  *target_acpi_path,
       const gchar *sysfs_path;
       g_autofree gchar *controller_path_file = NULL;
       g_autofree gchar *controller_path = NULL;
-      g_autoptr (GError) read_error = NULL;
+      g_autoptr(GError) read_error = NULL;
 
       device_file = g_udev_device_get_device_file (gpio_device);
       sysfs_path = g_udev_device_get_sysfs_path (gpio_device);
@@ -408,12 +405,12 @@ fte3600_find_gpiochip (const gchar  *target_acpi_path,
         continue;
 
       controller_path_file =
-          g_build_filename (sysfs_path, "firmware_node", "path", NULL);
+        g_build_filename (sysfs_path, "firmware_node", "path", NULL);
       if (!g_file_test (controller_path_file, G_FILE_TEST_EXISTS))
         {
           g_clear_pointer (&controller_path_file, g_free);
           controller_path_file =
-              g_build_filename (sysfs_path, "device", "firmware_node", "path", NULL);
+            g_build_filename (sysfs_path, "device", "firmware_node", "path", NULL);
         }
       if (!g_file_get_contents (controller_path_file, &controller_path, NULL,
                                 &read_error))
@@ -430,10 +427,12 @@ fte3600_find_gpiochip (const gchar  *target_acpi_path,
   g_list_free_full (gpio_devices, g_object_unref);
 
   if (!result)
-    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                 "Could not find the GPIO controller %s required by the "
-                 "FTE3600 ACPI resource profile",
-                 target_acpi_path);
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                   "Could not find the GPIO controller %s required by the "
+                   "FTE3600 ACPI resource profile",
+                   target_acpi_path);
+    }
 
   return g_steal_pointer (&result);
 }
@@ -470,15 +469,15 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 
   /* Resolve required GPIO controllers first before requesting any lines */
   irq_gpiochip_path = fte3600_find_gpiochip (
-      self->gpio_profile->irq_controller_acpi_path, error);
+    self->gpio_profile->irq_controller_acpi_path, error);
   if (!irq_gpiochip_path)
     return FALSE;
 
-  if (self->gpio_profile->allow_hardware_reset
-      && self->gpio_profile->reset_controller_acpi_path != NULL)
+  if (self->gpio_profile->allow_hardware_reset &&
+      self->gpio_profile->reset_controller_acpi_path != NULL)
     {
       reset_gpiochip_path = fte3600_find_gpiochip (
-          self->gpio_profile->reset_controller_acpi_path, error);
+        self->gpio_profile->reset_controller_acpi_path, error);
       if (!reset_gpiochip_path)
         return FALSE;
 
@@ -505,7 +504,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 
       gpiod_request_config_set_consumer (reset_req_config, "libfprint-fte3600-reset");
       if (gpiod_line_settings_set_direction (
-              reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0)
+            reset_settings, GPIOD_LINE_DIRECTION_OUTPUT) < 0)
         {
           saved_errno = errno ? errno : EIO;
           failed_op = "set reset GPIO direction";
@@ -515,8 +514,8 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
           goto fail;
         }
       if (gpiod_line_settings_set_output_value (
-              reset_settings,
-              fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
+            reset_settings,
+            fte3600_reset_line_value (self->gpio_profile, FALSE)) < 0)
         {
           saved_errno = errno ? errno : EIO;
           failed_op = "set reset GPIO inactive value";
@@ -526,7 +525,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
           goto fail;
         }
       if (gpiod_line_config_add_line_settings (
-              reset_line_config, &reset_offset, 1, reset_settings) < 0)
+            reset_line_config, &reset_offset, 1, reset_settings) < 0)
         {
           saved_errno = errno ? errno : EIO;
           failed_op = "add reset GPIO to line configuration";
@@ -537,7 +536,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
         }
 
       self->reset_request = gpiod_chip_request_lines (
-          reset_chip, reset_req_config, reset_line_config);
+        reset_chip, reset_req_config, reset_line_config);
       if (!self->reset_request)
         {
           saved_errno = errno ? errno : EIO;
@@ -585,7 +584,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
 
   gpiod_request_config_set_consumer (irq_req_config, "libfprint-fte3600-irq");
   if (gpiod_line_settings_set_direction (
-          irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0)
+        irq_settings, GPIOD_LINE_DIRECTION_INPUT) < 0)
     {
       saved_errno = errno ? errno : EIO;
       failed_op = "set finger IRQ GPIO direction";
@@ -595,7 +594,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
       goto fail;
     }
   if (gpiod_line_settings_set_edge_detection (
-          irq_settings, GPIOD_LINE_EDGE_RISING) < 0)
+        irq_settings, GPIOD_LINE_EDGE_RISING) < 0)
     {
       saved_errno = errno ? errno : EIO;
       failed_op = "set finger IRQ GPIO edge detection";
@@ -605,7 +604,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
       goto fail;
     }
   if (gpiod_line_config_add_line_settings (
-          irq_line_config, &irq_offset, 1, irq_settings) < 0)
+        irq_line_config, &irq_offset, 1, irq_settings) < 0)
     {
       saved_errno = errno ? errno : EIO;
       failed_op = "add finger IRQ GPIO to line configuration";
@@ -616,7 +615,7 @@ fte3600_request_gpio (FpiDeviceFte3600 *self, GError **error)
     }
 
   self->irq_request = gpiod_chip_request_lines (
-      irq_chip, irq_req_config, irq_line_config);
+    irq_chip, irq_req_config, irq_line_config);
   if (!self->irq_request)
     {
       saved_errno = errno ? errno : EIO;
@@ -676,18 +675,24 @@ fail:
     gpiod_chip_close (irq_chip);
 
   if (failed_op && failed_target && failed_n_offsets == 1)
-    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                 "Failed to %s on %s line %u: %s",
-                 failed_op, failed_target, failed_offset,
-                 g_strerror (saved_errno));
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+                   "Failed to %s on %s line %u: %s",
+                   failed_op, failed_target, failed_offset,
+                   g_strerror (saved_errno));
+    }
   else if (failed_op && failed_target)
-    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                 "Failed to %s on %s: %s",
-                 failed_op, failed_target, g_strerror (saved_errno));
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+                   "Failed to %s on %s: %s",
+                   failed_op, failed_target, g_strerror (saved_errno));
+    }
   else
-    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                 "Failed to claim FTE3600 GPIO lines: %s",
-                 g_strerror (saved_errno));
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+                   "Failed to claim FTE3600 GPIO lines: %s",
+                   g_strerror (saved_errno));
+    }
   return FALSE;
 }
 
@@ -713,8 +718,8 @@ fte3600_drain_irq_events (FpiDeviceFte3600 *self, GError **error)
 
       do
         count = gpiod_line_request_read_edge_events (
-            self->irq_request, self->irq_event_buffer,
-            gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
+          self->irq_request, self->irq_event_buffer,
+          gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
       while (count < 0 && errno == EINTR);
 
       if (count < 0)
@@ -761,7 +766,8 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (user_data);
   FpiSsm *ssm = self->irq_wait_ssm;
-  g_autoptr (GError) error = NULL;
+
+  g_autoptr(GError) error = NULL;
   gboolean have_rising_edge = FALSE;
   gint count;
 
@@ -777,8 +783,8 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
 
   do
     count = gpiod_line_request_read_edge_events (
-        self->irq_request, self->irq_event_buffer,
-        gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
+      self->irq_request, self->irq_event_buffer,
+      gpiod_edge_event_buffer_get_capacity (self->irq_event_buffer));
   while (count < 0 && errno == EINTR);
 
   if (count < 0)
@@ -792,12 +798,12 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
   for (gint i = 0; i < count; i++)
     {
       struct gpiod_edge_event *event =
-          gpiod_edge_event_buffer_get_event (self->irq_event_buffer, i);
+        gpiod_edge_event_buffer_get_event (self->irq_event_buffer, i);
 
       if (gpiod_edge_event_get_event_type (event)
-              == GPIOD_EDGE_EVENT_RISING_EDGE
-          && gpiod_edge_event_get_line_offset (event)
-                 == self->gpio_profile->irq_offset)
+          == GPIOD_EDGE_EVENT_RISING_EDGE &&
+          gpiod_edge_event_get_line_offset (event)
+          == self->gpio_profile->irq_offset)
         have_rising_edge = TRUE;
     }
 
@@ -806,7 +812,7 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
 
   self->armed = FALSE;
   self->capture_ready_deadline =
-      g_get_monotonic_time () + FT9361_CAPTURE_READY_TIMEOUT_MS * 1000;
+    g_get_monotonic_time () + FT9361_CAPTURE_READY_TIMEOUT_MS * 1000;
 
 out:
   fte3600_clear_irq_source (self);
@@ -829,7 +835,7 @@ fte3600_wait_for_irq (FpiSsm *ssm)
 
   fd = gpiod_line_request_get_fd (self->irq_request);
   self->irq_source = g_unix_fd_source_new (
-      fd, G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL);
+    fd, G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL);
   self->irq_wait_ssm = ssm;
   g_source_set_name (self->irq_source, "FTE3600 finger IRQ");
   g_source_set_callback (self->irq_source,
@@ -845,8 +851,8 @@ fte3600_submit_transfer (FpiSsm *ssm, FpiSpiTransfer *transfer,
 
   transfer->ssm = ssm;
   fpi_spi_transfer_submit (
-      transfer, cancellable ? fpi_device_get_cancellable (dev) : NULL,
-      fpi_ssm_spi_transfer_cb, NULL);
+    transfer, cancellable ? fpi_device_get_cancellable (dev) : NULL,
+    fpi_ssm_spi_transfer_cb, NULL);
 }
 
 static void
@@ -891,8 +897,8 @@ fte3600_load_firmware (const gchar *path, GError **error)
   g_return_val_if_fail (path != NULL, NULL);
 
   /* A firmware override must not make the device-open callback block on a
-   * FIFO or allocate an arbitrary file size. Inspect the opened descriptor
-   * and bound the read, including one byte to detect concurrent growth. */
+  * FIFO or allocate an arbitrary file size. Inspect the opened descriptor
+  * and bound the read, including one byte to detect concurrent growth. */
   fd = open (path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   if (fd < 0)
     {
@@ -1020,9 +1026,9 @@ fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
   if (G_UNLIKELY (!FPI_IS_DEVICE_FTE3600 (device)))
     {
       fpi_ssm_mark_failed (
-          ssm, fpi_device_error_new_msg (
-                   FP_DEVICE_ERROR_GENERAL,
-                   "FTE3600 register-read state machine has no valid device"));
+        ssm, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "FTE3600 register-read state machine has no valid device"));
       return;
     }
   self = FPI_DEVICE_FTE3600 (device);
@@ -1042,8 +1048,8 @@ fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
   fpi_spi_transfer_set_full_duplex (transfer, TRUE);
   transfer->ssm = ssm;
   fpi_spi_transfer_submit (
-      transfer, cancellable ? fpi_device_get_cancellable (device) : NULL,
-      fte3600_reg_read_cb, NULL);
+    transfer, cancellable ? fpi_device_get_cancellable (device) : NULL,
+    fte3600_reg_read_cb, NULL);
 }
 
 static void
@@ -1072,37 +1078,37 @@ fte3600_read_result_byte (FpiDeviceFte3600 *self)
 static gboolean
 fte3600_mcu_is_idle (FpiDeviceFte3600 *self)
 {
-  return self->small_rx_valid
-         && self->small_rx[FT9361_REG_READ_HEADER_SIZE] == 0xa5
-         && self->small_rx[FT9361_REG_READ_HEADER_SIZE + 1] == 0x5a;
+  return self->small_rx_valid &&
+         self->small_rx[FT9361_REG_READ_HEADER_SIZE] == 0xa5 &&
+         self->small_rx[FT9361_REG_READ_HEADER_SIZE + 1] == 0x5a;
 }
 
 static void
-fte3600_set_hardware_reset (FpiSsm            *ssm,
-                            FpiDeviceFte3600  *self,
-                            gboolean           asserted)
+fte3600_set_hardware_reset (FpiSsm           *ssm,
+                            FpiDeviceFte3600 *self,
+                            gboolean          asserted)
 {
   enum gpiod_line_value value;
 
-  if (!self->gpio_profile || !self->gpio_profile->allow_hardware_reset
-      || !self->reset_request)
+  if (!self->gpio_profile || !self->gpio_profile->allow_hardware_reset ||
+      !self->reset_request)
     {
       fpi_ssm_mark_failed (
-          ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                    "Hardware reset recovery is not enabled or verified for this platform"));
+        ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                  "Hardware reset recovery is not enabled or verified for this platform"));
       return;
     }
 
   value = fte3600_reset_line_value (self->gpio_profile, asserted);
   self->idle_verified = FALSE;
   if (gpiod_line_request_set_value (
-          self->reset_request, self->gpio_profile->reset_offset, value) < 0)
+        self->reset_request, self->gpio_profile->reset_offset, value) < 0)
     {
       fpi_ssm_mark_failed (
-          ssm, g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),
-                            "Failed to %s the FTE3600 hardware reset line: %s",
-                            asserted ? "assert" : "deassert",
-                            g_strerror (errno)));
+        ssm, g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),
+                          "Failed to %s the FTE3600 hardware reset line: %s",
+                          asserted ? "assert" : "deassert",
+                          g_strerror (errno)));
       return;
     }
 
@@ -1119,8 +1125,8 @@ fte3600_fail_if_cancelled (FpiSsm *ssm, FpDevice *dev)
     return FALSE;
 
   cancellable = fpi_device_get_cancellable (dev);
-  if (!cancellable
-      || !g_cancellable_set_error_if_cancelled (cancellable, &error))
+  if (!cancellable ||
+      !g_cancellable_set_error_if_cancelled (cancellable, &error))
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
                                  "Fingerprint operation was cancelled");
 
@@ -1137,9 +1143,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
   /* Once reset or firmware upload has been asserted, always finish the complete
    * pulse train and return the active-low line high before observing cancellation. */
-  if (!((state >= FTE3600_INIT_FW_RESET_PREPARE && state <= FTE3600_INIT_FW_UPLOAD_SETTLE)
-        || (state >= FTE3600_INIT_HARD_RESET_PREPARE_1 && state <= FTE3600_INIT_HARD_RESET_BOOT))
-      && fte3600_fail_if_cancelled (ssm, dev))
+  if (!((state >= FTE3600_INIT_FW_RESET_PREPARE && state <= FTE3600_INIT_FW_UPLOAD_SETTLE) ||
+        (state >= FTE3600_INIT_HARD_RESET_PREPARE_1 && state <= FTE3600_INIT_HARD_RESET_BOOT)) &&
+      fte3600_fail_if_cancelled (ssm, dev))
     return;
 
   switch (state)
@@ -1171,13 +1177,13 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
               ++self->init_mcu_status_attempts < FT9361_INIT_MCU_MAX_ATTEMPTS)
             {
               fpi_ssm_jump_to_state_delayed (
-                  ssm, FTE3600_INIT_READ_MCU_STATUS, FT9361_INIT_MCU_POLL_MS);
+                ssm, FTE3600_INIT_READ_MCU_STATUS, FT9361_INIT_MCU_POLL_MS);
               return;
             }
 
-          if (!self->init_hardware_reset_attempted
-              && self->gpio_profile
-              && self->gpio_profile->allow_hardware_reset)
+          if (!self->init_hardware_reset_attempted &&
+              self->gpio_profile &&
+              self->gpio_profile->allow_hardware_reset)
             {
               self->init_hardware_reset_attempted = TRUE;
               self->armed = FALSE;
@@ -1218,13 +1224,13 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
           fpi_ssm_mark_failed (
             ssm, fpi_device_error_new_msg (
-                   FP_DEVICE_ERROR_PROTO,
-                   self->init_firmware_upload_attempted
-                     ? "FT9361 MCU did not return to idle after cold-boot firmware recovery (%02x %02x)"
-                     : self->init_hardware_reset_attempted
-                       ? "FT9361 MCU did not return to idle after hardware recovery (%02x %02x)"
-                       : "FT9361 MCU did not return to idle (%02x %02x)",
-                   self->small_rx[4], self->small_rx[5]));
+              FP_DEVICE_ERROR_PROTO,
+              self->init_firmware_upload_attempted ?
+              "FT9361 MCU did not return to idle after cold-boot firmware recovery (%02x %02x)" :
+              self->init_hardware_reset_attempted ?
+              "FT9361 MCU did not return to idle after hardware recovery (%02x %02x)" :
+              "FT9361 MCU did not return to idle (%02x %02x)",
+              self->small_rx[4], self->small_rx[5]));
           return;
         }
       /* Give the later post-configuration idle check its own polling budget. */
@@ -1237,8 +1243,8 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
                                             self->reset_request != NULL))
         {
           fpi_ssm_mark_failed (
-              ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                        "Firmware recovery is not verified for this platform"));
+            ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                      "Firmware recovery is not verified for this platform"));
           return;
         }
       G_GNUC_FALLTHROUGH;
@@ -1291,7 +1297,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       /* FT9361's download callback is ReturnIdleByReset.  InitMcuConfig is
        * a later runtime step, not the bootloader's jump-to-application command. */
       fpi_ssm_jump_to_state_delayed (
-          ssm, FTE3600_INIT_HARD_RESET_PREPARE_1, FT9361_RESET_SETTLE_MS);
+        ssm, FTE3600_INIT_HARD_RESET_PREPARE_1, FT9361_RESET_SETTLE_MS);
       return;
 
     case FTE3600_INIT_HARD_RESET_ASSERT_1:
@@ -1319,7 +1325,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_INIT_HARD_RESET_BOOT:
       fpi_ssm_jump_to_state_delayed (
-          ssm, FTE3600_INIT_RESET_1, FT9361_HARD_RESET_BOOT_MS);
+        ssm, FTE3600_INIT_RESET_1, FT9361_HARD_RESET_BOOT_MS);
       return;
 
     case FTE3600_INIT_READ_ID_HIGH:
@@ -1331,9 +1337,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       if (value != FT9361_SENSOR_ID_HIGH)
         {
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_NOT_SUPPORTED,
-                       "Unexpected FTE3600 sensor ID high byte %02x", value));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_NOT_SUPPORTED,
+              "Unexpected FTE3600 sensor ID high byte %02x", value));
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1348,9 +1354,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       if (value != FT9361_SENSOR_ID_LOW)
         {
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_NOT_SUPPORTED,
-                       "Unexpected FTE3600 sensor ID low byte %02x", value));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_NOT_SUPPORTED,
+              "Unexpected FTE3600 sensor ID low byte %02x", value));
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1366,9 +1372,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
         {
           fpi_ssm_mark_failed (ssm,
                                fpi_device_error_new_msg (
-                                   FP_DEVICE_ERROR_PROTO,
-                                   "Unexpected FT9361 firmware version %02x",
-                                   value));
+                                 FP_DEVICE_ERROR_PROTO,
+                                 "Unexpected FT9361 firmware version %02x",
+                                 value));
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1383,9 +1389,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       if (value != FT9361_AGC_VERSION)
         {
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                                        FP_DEVICE_ERROR_PROTO,
-                                        "Unexpected FT9361 AGC version %02x",
-                                        value));
+                                 FP_DEVICE_ERROR_PROTO,
+                                 "Unexpected FT9361 AGC version %02x",
+                                 value));
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1399,7 +1405,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       if (fte3600_read_result_byte (self) == 0xbb)
         {
           fpi_ssm_jump_to_state (
-              ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS);
+            ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS);
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1435,10 +1441,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       if (value != 0xbb)
         {
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_PROTO,
-                       "FT9361 MCU configuration verification failed (%02x)",
-                       value));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_PROTO,
+              "FT9361 MCU configuration verification failed (%02x)",
+              value));
           return;
         }
       fpi_ssm_next_state (ssm);
@@ -1462,16 +1468,16 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
           if (++self->init_mcu_status_attempts < FT9361_INIT_MCU_MAX_ATTEMPTS)
             {
               fpi_ssm_jump_to_state_delayed (
-                  ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS,
-                  FT9361_INIT_MCU_POLL_MS);
+                ssm, FTE3600_INIT_FINAL_READ_MCU_STATUS,
+                FT9361_INIT_MCU_POLL_MS);
               return;
             }
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_PROTO,
-                       "FT9361 MCU left idle during initialization "
-                       "(%02x %02x)",
-                       self->small_rx[4], self->small_rx[5]));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_PROTO,
+              "FT9361 MCU left idle during initialization "
+              "(%02x %02x)",
+              self->small_rx[4], self->small_rx[5]));
           return;
         }
       self->idle_verified = TRUE;
@@ -1497,7 +1503,7 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       self->idle_verified = FALSE;
       fte3600_deassert_hardware_reset_best_effort (
-          self, "recovering from initialization failure");
+        self, "recovering from initialization failure");
       fte3600_start_reset (self, FTE3600_RESET_FOR_OPEN_ERROR, error);
       return;
     }
@@ -1522,7 +1528,9 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_ARM_CHECK_MCU_STATUS:
       if (fte3600_mcu_is_idle (self))
-        fpi_ssm_jump_to_state (ssm, FTE3600_ARM_READ_MODE);
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_READ_MODE);
+        }
       else
         {
           fp_dbg ("FT9361 unexpectedly busy before mode-1 rearm; recovering");
@@ -1573,7 +1581,7 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_ARM_WRITE_MODE:
       {
-        g_autoptr (GError) error = NULL;
+        g_autoptr(GError) error = NULL;
 
         if (!fte3600_drain_irq_events (self, &error))
           {
@@ -1608,19 +1616,19 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_ARM_CHECK_ARMED_MCU_STATUS:
       if (fte3600_mcu_is_idle (self))
         {
-          if (self->arm_attempts >= FT9361_ARM_MAX_ATTEMPTS
-              || g_get_monotonic_time () >= self->arm_deadline)
+          if (self->arm_attempts >= FT9361_ARM_MAX_ATTEMPTS ||
+              g_get_monotonic_time () >= self->arm_deadline)
             {
               fpi_ssm_mark_failed (
-                  ssm, g_error_new_literal (
-                           G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-                           "FT9361 failed to enter armed mode after bounded "
-                           "mode-1 retries"));
+                ssm, g_error_new_literal (
+                  G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                  "FT9361 failed to enter armed mode after bounded "
+                  "mode-1 retries"));
               return;
             }
           fp_dbg ("Discarded an FT9361 event which raced with arming");
           fpi_ssm_jump_to_state_delayed (
-              ssm, FTE3600_ARM_READ_MCU_STATUS, FT9361_POLL_DELAY_MS);
+            ssm, FTE3600_ARM_READ_MCU_STATUS, FT9361_POLL_DELAY_MS);
         }
       else
         {
@@ -1642,7 +1650,7 @@ fte3600_new_arm_ssm (FpiDeviceFte3600 *self)
 {
   self->arm_attempts = 0;
   self->arm_deadline =
-      g_get_monotonic_time () + FT9361_ARM_TIMEOUT_MS * 1000;
+    g_get_monotonic_time () + FT9361_ARM_TIMEOUT_MS * 1000;
   return fpi_ssm_new (FP_DEVICE (self), fte3600_arm_handler,
                       FTE3600_ARM_NSTATES);
 }
@@ -1654,8 +1662,8 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
   gint state = fpi_ssm_get_cur_state (ssm);
   guint8 finger_status;
 
-  if (state < FTE3600_CAPTURE_CLEANUP_DISPATCH
-      && fte3600_fail_if_cancelled (ssm, dev))
+  if (state < FTE3600_CAPTURE_CLEANUP_DISPATCH &&
+      fte3600_fail_if_cancelled (ssm, dev))
     return;
 
   switch (state)
@@ -1678,15 +1686,21 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_CAPTURE_CHECK_MCU_STATUS:
       if (fte3600_mcu_is_idle (self))
-        fpi_ssm_next_state (ssm);
+        {
+          fpi_ssm_next_state (ssm);
+        }
       else if (g_get_monotonic_time () >= self->capture_ready_deadline)
-        fpi_ssm_mark_failed (
+        {
+          fpi_ssm_mark_failed (
             ssm, g_error_new_literal (
-                     G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-                     "FT9361 did not become ready after its finger IRQ"));
+              G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+              "FT9361 did not become ready after its finger IRQ"));
+        }
       else
-        fpi_ssm_jump_to_state_delayed (ssm, FTE3600_CAPTURE_POLL_MCU_STATUS,
-                                       FT9361_POLL_DELAY_MS);
+        {
+          fpi_ssm_jump_to_state_delayed (ssm, FTE3600_CAPTURE_POLL_MCU_STATUS,
+                                         FT9361_POLL_DELAY_MS);
+        }
       return;
 
     case FTE3600_CAPTURE_READ_FINGER_STATUS:
@@ -1699,7 +1713,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
         {
           self->false_irq_count = 0;
           fpi_device_report_finger_status (
-              dev, FP_FINGER_STATUS_NEEDED | FP_FINGER_STATUS_PRESENT);
+            dev, FP_FINGER_STATUS_NEEDED | FP_FINGER_STATUS_PRESENT);
           fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_READ_IMAGE);
         }
       else
@@ -1708,10 +1722,10 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
           if (self->false_irq_count >= FT9361_MAX_FALSE_IRQS)
             {
               fpi_ssm_mark_failed (
-                  ssm, g_error_new_literal (
-                           G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "FT9361 produced too many consecutive non-finger "
-                           "interrupts"));
+                ssm, g_error_new_literal (
+                  G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "FT9361 produced too many consecutive non-finger "
+                  "interrupts"));
               return;
             }
           fp_dbg ("Ignoring non-finger status %02x and entering quick mode",
@@ -1726,7 +1740,9 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_CAPTURE_QUICK_CHECK_MCU_STATUS:
       if (fte3600_mcu_is_idle (self))
-        fpi_ssm_next_state (ssm);
+        {
+          fpi_ssm_next_state (ssm);
+        }
       else
         {
           fp_warn ("FT9361 became busy before quick-mode rearm; recovering");
@@ -1769,13 +1785,13 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_CAPTURE_PROCESS_IMAGE:
       fte3600_clear_captured_image (self);
       self->captured_image =
-          fp_image_new (FT9361_IMAGE_WIDTH, FT9361_IMAGE_HEIGHT);
+        fp_image_new (FT9361_IMAGE_WIDTH, FT9361_IMAGE_HEIGHT);
       self->captured_image->ppmm = FT9361_IMAGE_PPMM;
       self->captured_image->flags |= FPI_IMAGE_PARTIAL;
 
       for (gsize i = 0; i < FT9361_IMAGE_SIZE; i++)
         self->captured_image->data[i] =
-            (guint8)~self->capture_rx[FT9361_CAPTURE_DATA_OFFSET + i];
+          (guint8) ~self->capture_rx[FT9361_CAPTURE_DATA_OFFSET + i];
 
       fp_dbg ("Captured FT9361 image (turnaround %02x %02x)",
               self->capture_rx[6], self->capture_rx[7]);
@@ -1796,9 +1812,9 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
           self->armed = FALSE;
           fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_CLEANUP_RESET_1);
         }
-      else if (fpi_device_get_current_action (dev) != FPI_DEVICE_ACTION_ENROLL
-               || self->enroll_stages_passed + 1 >=
-                    (guint) fp_device_get_nr_enroll_stages (dev))
+      else if (fpi_device_get_current_action (dev) != FPI_DEVICE_ACTION_ENROLL ||
+               self->enroll_stages_passed + 1 >=
+               (guint) fp_device_get_nr_enroll_stages (dev))
         {
           fp_dbg ("Resetting FT9361 before terminal action completion");
           self->armed = FALSE;
@@ -1834,6 +1850,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
       self->idle_verified = FALSE;
       fte3600_clear_irq_source (self);
       G_GNUC_FALLTHROUGH;
+
     case FTE3600_CAPTURE_CLEANUP_RESET_2:
       fte3600_submit_command (ssm, 0x70, FALSE);
       return;
@@ -1854,11 +1871,11 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
       if (!fte3600_mcu_is_idle (self))
         {
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_PROTO,
-                       "FT9361 MCU did not return to idle after reset "
-                       "(%02x %02x)",
-                       self->small_rx[4], self->small_rx[5]));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_PROTO,
+              "FT9361 MCU did not return to idle after reset "
+              "(%02x %02x)",
+              self->small_rx[4], self->small_rx[5]));
           return;
         }
       self->idle_verified = TRUE;
@@ -1892,8 +1909,8 @@ fte3600_enroll_retry_error (Fte3600TemplateStatus status)
 
     case FTE3600_TEMPLATE_RETRY_INCONSISTENT:
       return fpi_device_retry_new_msg (
-          FP_DEVICE_RETRY_CENTER_FINGER,
-          "Place the same finger near the previously accepted position");
+        FP_DEVICE_RETRY_CENTER_FINGER,
+        "Place the same finger near the previously accepted position");
 
     case FTE3600_TEMPLATE_OK:
     case FTE3600_TEMPLATE_NEED_MORE_SAMPLES:
@@ -1915,18 +1932,18 @@ fte3600_enroll_fatal_error (const Fte3600EnrollJob *job)
     {
     case FTE3600_TEMPLATE_INVALID_WIRE:
       return fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_DATA_INVALID,
-          "FTE3600 BRISK enrollment data was invalid (extract %u, template %u)",
-          (guint) job->extract_status, (guint) job->status);
+        FP_DEVICE_ERROR_DATA_INVALID,
+        "FTE3600 BRISK enrollment data was invalid (extract %u, template %u)",
+        (guint) job->extract_status, (guint) job->status);
 
     case FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA:
     case FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR:
     case FTE3600_TEMPLATE_UNSUPPORTED_POLICY:
     case FTE3600_TEMPLATE_NOT_CALIBRATED:
       return fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_NOT_SUPPORTED,
-          "FTE3600 BRISK enrollment format is unsupported (template %u)",
-          (guint) job->status);
+        FP_DEVICE_ERROR_NOT_SUPPORTED,
+        "FTE3600 BRISK enrollment format is unsupported (template %u)",
+        (guint) job->status);
 
     case FTE3600_TEMPLATE_OK:
     case FTE3600_TEMPLATE_NEED_MORE_SAMPLES:
@@ -1990,7 +2007,7 @@ fte3600_enroll_worker (GTask        *task,
     goto out;
 
   job->extract_status =
-      fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -1998,7 +2015,7 @@ fte3600_enroll_worker (GTask        *task,
   if (job->extract_status != FTE3600_BRISK_OK)
     {
       job->status =
-          fte3600_extract_status_to_template_status (job->extract_status);
+        fte3600_extract_status_to_template_status (job->extract_status);
     }
   else
     {
@@ -2010,8 +2027,8 @@ fte3600_enroll_worker (GTask        *task,
       if (job->status == FTE3600_TEMPLATE_OK)
         {
           job->encode_status =
-              fte3600_template_encode (job->enroll_template,
-                                       &job->encoded_template);
+            fte3600_template_encode (job->enroll_template,
+                                     &job->encoded_template);
         }
     }
 
@@ -2024,7 +2041,7 @@ out:
 
 static void
 fte3600_enroll_process (FpiDeviceFte3600 *self,
-                        Fte3600EnrollJob  *job)
+                        Fte3600EnrollJob *job)
 {
   FpDevice *dev = FP_DEVICE (self);
   const guint completed_stages = self->enroll_stages_passed + 1;
@@ -2033,10 +2050,10 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
       job->encode_status != FTE3600_TEMPLATE_OK)
     {
       fte3600_complete_action_error (
-          self, fpi_device_error_new_msg (
-                    FP_DEVICE_ERROR_DATA_INVALID,
-                    "FTE3600 encoder rejected a completed template (%u)",
-                    (guint) job->encode_status));
+        self, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_DATA_INVALID,
+          "FTE3600 encoder rejected a completed template (%u)",
+          (guint) job->encode_status));
       return;
     }
 
@@ -2067,9 +2084,9 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
           job->encoded_template != NULL)
         {
           fte3600_complete_action_error (
-              self, fpi_device_error_new_msg (
-                        FP_DEVICE_ERROR_DATA_INVALID,
-                        "FTE3600 template did not finish at its declared stage"));
+            self, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_DATA_INVALID,
+              "FTE3600 template did not finish at its declared stage"));
           return;
         }
       break;
@@ -2079,9 +2096,9 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
           job->encoded_template == NULL)
         {
           fte3600_complete_action_error (
-              self, fpi_device_error_new_msg (
-                        FP_DEVICE_ERROR_DATA_INVALID,
-                        "FTE3600 template finished at an unexpected stage"));
+            self, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_DATA_INVALID,
+              "FTE3600 template finished at an unexpected stage"));
           return;
         }
       break;
@@ -2099,7 +2116,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
     }
 
   {
-    g_autoptr (GVariant) data = NULL;
+    g_autoptr(GVariant) data = NULL;
     FpPrint *print = NULL;
     const guint8 *wire_data;
     gsize wire_size;
@@ -2109,15 +2126,15 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
         wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
       {
         fte3600_complete_action_error (
-            self, fpi_device_error_new_msg (
-                      FP_DEVICE_ERROR_DATA_INVALID,
-                      "FTE3600 encoder produced an invalid template length"));
+          self, fpi_device_error_new_msg (
+            FP_DEVICE_ERROR_DATA_INVALID,
+            "FTE3600 encoder produced an invalid template length"));
         return;
       }
 
     data = g_variant_ref_sink (
-        g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, wire_data, wire_size,
-                                   sizeof (*wire_data)));
+      g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, wire_data, wire_size,
+                                 sizeof (*wire_data)));
     g_assert (g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")));
     fpi_device_get_enroll_data (dev, &print);
     fpi_print_set_type (print, FPI_PRINT_RAW);
@@ -2138,7 +2155,8 @@ fte3600_enroll_complete (GObject      *source_object,
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (source_object);
   GTask *task = G_TASK (result);
   Fte3600EnrollJob *job = g_task_get_task_data (task);
-  g_autoptr (GError) error = NULL;
+
+  g_autoptr(GError) error = NULL;
 
   (void) user_data;
 
@@ -2156,7 +2174,8 @@ fte3600_enroll_capture_async (FpiDeviceFte3600 *self)
 {
   FpDevice *dev = FP_DEVICE (self);
   Fte3600EnrollJob *job;
-  g_autoptr (GTask) task = NULL;
+
+  g_autoptr(GTask) task = NULL;
 
   g_assert (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_ENROLL);
   g_assert (self->captured_image != NULL);
@@ -2169,9 +2188,9 @@ fte3600_enroll_capture_async (FpiDeviceFte3600 *self)
     {
       fte3600_enroll_job_free (job);
       fte3600_complete_action_error (
-          self, fpi_device_error_new_msg (
-                    FP_DEVICE_ERROR_DATA_INVALID,
-                    "FTE3600 enrollment template state was missing"));
+        self, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_DATA_INVALID,
+          "FTE3600 enrollment template state was missing"));
       return;
     }
 
@@ -2195,18 +2214,18 @@ fte3600_verify_template_error (Fte3600TemplateStatus status)
     case FTE3600_TEMPLATE_RETRY_DUPLICATE:
     case FTE3600_TEMPLATE_RETRY_INCONSISTENT:
       return fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_DATA_INVALID,
-          "FTE3600 verification template or query was invalid (%u)",
-          (guint) status);
+        FP_DEVICE_ERROR_DATA_INVALID,
+        "FTE3600 verification template or query was invalid (%u)",
+        (guint) status);
 
     case FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA:
     case FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR:
     case FTE3600_TEMPLATE_UNSUPPORTED_POLICY:
     case FTE3600_TEMPLATE_NOT_CALIBRATED:
       return fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_NOT_SUPPORTED,
-          "FTE3600 verification template policy is unsupported (%u)",
-          (guint) status);
+        FP_DEVICE_ERROR_NOT_SUPPORTED,
+        "FTE3600 verification template policy is unsupported (%u)",
+        (guint) status);
 
     case FTE3600_TEMPLATE_OK:
       g_assert_not_reached ();
@@ -2220,6 +2239,7 @@ fte3600_verify_load_template (FpiDeviceFte3600 *self)
 {
   FpDevice *dev = FP_DEVICE (self);
   FpPrint *print = NULL;
+
   g_autoptr(GVariant) data = NULL;
   g_autoptr(GBytes) wire = NULL;
   const guint8 *wire_data;
@@ -2230,37 +2250,37 @@ fte3600_verify_load_template (FpiDeviceFte3600 *self)
   if (print == NULL || !fp_print_compatible (print, dev) ||
       fpi_print_get_type (print) != FPI_PRINT_RAW)
     return fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_DATA_INVALID,
-        "FTE3600 verification requires a compatible raw template");
+      FP_DEVICE_ERROR_DATA_INVALID,
+      "FTE3600 verification requires a compatible raw template");
 
   g_object_get (print, "fpi-data", &data, NULL);
   if (data == NULL ||
       !g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")) ||
       !g_variant_is_normal_form (data))
     return fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_DATA_INVALID,
-        "FTE3600 verification template has an invalid container");
+      FP_DEVICE_ERROR_DATA_INVALID,
+      "FTE3600 verification template has an invalid container");
 
   wire_data = g_variant_get_fixed_array (data, &wire_size,
                                          sizeof (*wire_data));
   if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
       wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
     return fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_DATA_INVALID,
-        "FTE3600 verification template has an invalid length");
+      FP_DEVICE_ERROR_DATA_INVALID,
+      "FTE3600 verification template has an invalid length");
 
   wire = g_bytes_new (wire_data, wire_size);
   g_clear_pointer (&self->verify_template, fte3600_template_free);
   status = fte3600_template_decode (
-      wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &self->verify_template);
+    wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &self->verify_template);
   if (status != FTE3600_TEMPLATE_OK)
     return fte3600_verify_template_error (status);
   if (!fte3600_template_is_ready (self->verify_template))
     {
       g_clear_pointer (&self->verify_template, fte3600_template_free);
       return fpi_device_error_new_msg (
-          FP_DEVICE_ERROR_DATA_INVALID,
-          "FTE3600 verification template was incomplete");
+        FP_DEVICE_ERROR_DATA_INVALID,
+        "FTE3600 verification template was incomplete");
     }
 
   return NULL;
@@ -2294,15 +2314,15 @@ fte3600_verify_worker (GTask        *task,
     goto out;
 
   job->extract_status =
-      fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
   if (job->extract_status == FTE3600_BRISK_OK)
     job->compare_status = fte3600_template_compare_features (
-        job->verify_template, &features,
-        FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &job->comparison);
+      job->verify_template, &features,
+      FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &job->comparison);
 
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
@@ -2313,7 +2333,7 @@ out:
 
 static void
 fte3600_verify_report_retry (FpiDeviceFte3600 *self,
-                             FpDeviceRetry      retry)
+                             FpDeviceRetry     retry)
 {
   FpDevice *dev = FP_DEVICE (self);
 
@@ -2331,6 +2351,7 @@ fte3600_verify_complete (GObject      *source_object,
   FpDevice *dev = FP_DEVICE (self);
   GTask *task = G_TASK (result);
   Fte3600VerifyJob *job = g_task_get_task_data (task);
+
   g_autoptr(GError) error = NULL;
 
   (void) user_data;
@@ -2354,9 +2375,9 @@ fte3600_verify_complete (GObject      *source_object,
 
     case FTE3600_BRISK_INVALID_ARGUMENT:
       fte3600_complete_action_error (
-          self, fpi_device_error_new_msg (
-                    FP_DEVICE_ERROR_DATA_INVALID,
-                    "FTE3600 extractor rejected a verification image"));
+        self, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_DATA_INVALID,
+          "FTE3600 extractor rejected a verification image"));
       return;
 
     case FTE3600_BRISK_OK:
@@ -2372,17 +2393,17 @@ fte3600_verify_complete (GObject      *source_object,
   if (job->compare_status != FTE3600_TEMPLATE_OK)
     {
       fte3600_complete_action_error (
-          self, fte3600_verify_template_error (job->compare_status));
+        self, fte3600_verify_template_error (job->compare_status));
       return;
     }
 
   fp_dbg ("Personal verification compared %u subtemplates; strict passes %u",
           job->comparison.n_compared, job->comparison.diagnostic_passes);
   fpi_device_verify_report (
-      dev,
-      job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS :
-                                                FPI_MATCH_FAIL,
-      NULL, NULL);
+    dev,
+    job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS :
+    FPI_MATCH_FAIL,
+    NULL, NULL);
   fpi_device_verify_complete (dev, NULL);
 }
 
@@ -2391,6 +2412,7 @@ fte3600_verify_capture_async (FpiDeviceFte3600 *self)
 {
   FpDevice *dev = FP_DEVICE (self);
   Fte3600VerifyJob *job;
+
   g_autoptr(GTask) task = NULL;
 
   g_assert (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY);
@@ -2406,9 +2428,9 @@ fte3600_verify_capture_async (FpiDeviceFte3600 *self)
     {
       fte3600_verify_job_free (job);
       fte3600_complete_action_error (
-          self, fpi_device_error_new_msg (
-                    FP_DEVICE_ERROR_DATA_INVALID,
-                    "FTE3600 verification template state was missing"));
+        self, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_DATA_INVALID,
+          "FTE3600 verification template state was missing"));
       return;
     }
 
@@ -2489,7 +2511,7 @@ fte3600_capture_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     case FPI_DEVICE_ACTION_CAPTURE:
       self->armed = FALSE;
       fpi_device_capture_complete (
-          dev, g_steal_pointer (&self->captured_image), NULL);
+        dev, g_steal_pointer (&self->captured_image), NULL);
       return;
 
     case FPI_DEVICE_ACTION_VERIFY:
@@ -2510,9 +2532,9 @@ fte3600_capture_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     case FPI_DEVICE_ACTION_CLEAR_STORAGE:
       fte3600_clear_captured_image (self);
       fpi_device_action_error (
-          dev, fpi_device_error_new_msg (
-                   FP_DEVICE_ERROR_GENERAL,
-                   "Unexpected action completed an FTE3600 capture"));
+        dev, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "Unexpected action completed an FTE3600 capture"));
       return;
     }
 }
@@ -2527,6 +2549,7 @@ fte3600_reset_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_RESET_1:
       self->idle_verified = FALSE;
       G_GNUC_FALLTHROUGH;
+
     case FTE3600_RESET_2:
       fte3600_submit_command (ssm, 0x70, FALSE);
       return;
@@ -2547,11 +2570,11 @@ fte3600_reset_handler (FpiSsm *ssm, FpDevice *dev)
       if (!fte3600_mcu_is_idle (self))
         {
           fpi_ssm_mark_failed (
-              ssm, fpi_device_error_new_msg (
-                       FP_DEVICE_ERROR_PROTO,
-                       "FT9361 MCU did not return to idle after reset "
-                       "(%02x %02x)",
-                       self->small_rx[4], self->small_rx[5]));
+            ssm, fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_PROTO,
+              "FT9361 MCU did not return to idle after reset "
+              "(%02x %02x)",
+              self->small_rx[4], self->small_rx[5]));
           return;
         }
       self->idle_verified = TRUE;
@@ -2590,8 +2613,8 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
         {
           if (close (self->spi_fd) < 0)
             fp_warn (
-                "Failed to close FTE3600 SPI device after open failure: %s",
-                g_strerror (errno));
+              "Failed to close FTE3600 SPI device after open failure: %s",
+              g_strerror (errno));
           self->spi_fd = -1;
         }
       fte3600_release_gpio (self);
@@ -2604,8 +2627,8 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
         {
           if (close (self->spi_fd) < 0 && !reset_error)
             g_set_error (
-                &reset_error, G_IO_ERROR, g_io_error_from_errno (errno),
-                "Failed to close FTE3600 SPI device: %s", g_strerror (errno));
+              &reset_error, G_IO_ERROR, g_io_error_from_errno (errno),
+              "Failed to close FTE3600 SPI device: %s", g_strerror (errno));
           self->spi_fd = -1;
         }
       fte3600_release_gpio (self);
@@ -2641,13 +2664,13 @@ fte3600_start_reset (FpiDeviceFte3600 *self, Fte3600ResetPurpose purpose,
   data->operation_error = operation_error;
 
   /* RESET_DELAY is deliberately the first cleanup state.  An error from the
-   * first 0x70 jumps there, and each later cleanup error advances exactly one
-   * state while retaining the first error.  Consequently the second 0x70 and
-   * the bounded status read are still attempted, with one final callback. */
+  * first 0x70 jumps there, and each later cleanup error advances exactly one
+  * state while retaining the first error.  Consequently the second 0x70 and
+  * the bounded status read are still attempted, with one final callback. */
   ssm = fpi_ssm_new_full (FP_DEVICE (self), fte3600_reset_handler,
                           FTE3600_RESET_NSTATES, FTE3600_RESET_DELAY,
                           "FT9361 safe reset");
-  fpi_ssm_set_data (ssm, data, (GDestroyNotify)fte3600_reset_data_free);
+  fpi_ssm_set_data (ssm, data, (GDestroyNotify) fte3600_reset_data_free);
   fpi_ssm_start (ssm, fte3600_reset_complete);
 }
 
@@ -2715,9 +2738,9 @@ fte3600_open (FpDevice *dev)
   if (!path)
     {
       fpi_device_open_complete (
-          dev, fpi_device_error_new_msg (
-                   FP_DEVICE_ERROR_GENERAL,
-                   "No spidev node was provided for FTE3600"));
+        dev, fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "No spidev node was provided for FTE3600"));
       return;
     }
 
@@ -2821,7 +2844,8 @@ fte3600_cancel (FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
   FpiSsm *ssm = self->irq_wait_ssm;
-  g_autoptr (GError) error = NULL;
+
+  g_autoptr(GError) error = NULL;
   GCancellable *cancellable;
 
   /* Cancellable SPI transfers and BRISK jobs finish through their normal
@@ -2832,8 +2856,8 @@ fte3600_cancel (FpDevice *dev)
 
   fte3600_clear_irq_source (self);
   cancellable = fpi_device_get_cancellable (dev);
-  if (!cancellable
-      || !g_cancellable_set_error_if_cancelled (cancellable, &error))
+  if (!cancellable ||
+      !g_cancellable_set_error_if_cancelled (cancellable, &error))
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
                                  "Fingerprint operation was cancelled");
   fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));

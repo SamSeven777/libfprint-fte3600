@@ -58,31 +58,48 @@ static guint mock_cli_expected_transfers;
 #define ORIGINAL_LSB 1
 #define MOCK_SPI_SYSFS "/sys/devices/test-controller/spi-FTE3600:00"
 
-static int mock_ioctl (int fd, unsigned long request, ...);
-static int mock_gpio_set (struct gpiod_line_request *request, unsigned int offset,
-                          enum gpiod_line_value value);
+static int mock_ioctl (int           fd,
+                       unsigned long request,
+                       ...);
+static int mock_gpio_set (struct gpiod_line_request *request,
+                          unsigned int               offset,
+                          enum gpiod_line_value      value);
 static enum gpiod_line_value mock_gpio_get (struct gpiod_line_request *request,
-                                           unsigned int offset);
+                                            unsigned int               offset);
 static void mock_gpio_release (struct gpiod_line_request *request);
 static void mock_sleep (gulong usec);
-static int mock_open (const char *path, int flags, ...);
-static int mock_fstat (int fd, struct stat *st);
-static ssize_t mock_read (int fd, void *buffer, size_t count);
+static int mock_open (const char *path,
+                      int         flags,
+                      ...);
+static int mock_fstat (int          fd,
+                       struct stat *st);
+static ssize_t mock_read (int    fd,
+                          void  *buffer,
+                          size_t count);
 static int mock_close (int fd);
-static gboolean mock_file_get_contents (const gchar *filename, gchar **contents,
-                                        gsize *length, GError **error);
+static gboolean mock_file_get_contents (const gchar *filename,
+                                        gchar      **contents,
+                                        gsize       *length,
+                                        GError     **error);
 static GUdevClient *mock_udev_client_new (const gchar * const *subsystems);
-static GList *mock_udev_query (GUdevClient *client, const gchar *subsystem);
+static GList *mock_udev_query (GUdevClient *client,
+                               const gchar *subsystem);
 static GUdevDevice *mock_udev_parent (GUdevDevice *device);
 static const gchar *mock_udev_sysfs (GUdevDevice *device);
 static const gchar *mock_udev_file (GUdevDevice *device);
-static char *mock_realpath (const char *path, char *resolved);
-static gboolean mock_power_prepare (MedionPower *power, const gchar *device_path,
-                                     const gchar *root, GError **error);
-static gboolean mock_power_restore (MedionPower *power, GError **error);
-static void mock_power_report (MedionPower *power, const gchar *tag);
+static char *mock_realpath (const char *path,
+                            char       *resolved);
+static gboolean mock_power_prepare (MedionPower *power,
+                                    const gchar *device_path,
+                                    const gchar *root,
+                                    GError     **error);
+static gboolean mock_power_restore (MedionPower *power,
+                                    GError     **error);
+static void mock_power_report (MedionPower *power,
+                               const gchar *tag);
 static struct gpiod_chip *mock_gpio_open (const char *path);
-static int medion_diagnostic_main (int argc, char **argv);
+static int medion_diagnostic_main (int    argc,
+                                   char **argv);
 
 #define main medion_diagnostic_main
 #define ioctl mock_ioctl
@@ -179,16 +196,28 @@ mock_ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (request, !=, SPI_IOC_WR_MAX_SPEED_HZ);
       switch (request)
         {
-        case SPI_IOC_RD_MODE32: *(guint32 *) value = mock_spi_mode; return 0;
-        case SPI_IOC_RD_MODE: *(guint8 *) value = mock_spi_mode & 0xff; return 0;
-        case SPI_IOC_RD_BITS_PER_WORD: *(guint8 *) value = mock_spi_bits; return 0;
-        case SPI_IOC_RD_LSB_FIRST: *(guint8 *) value = mock_spi_lsb; return 0;
+        case SPI_IOC_RD_MODE32: *(guint32 *) value = mock_spi_mode;
+          return 0;
+
+        case SPI_IOC_RD_MODE: *(guint8 *) value = mock_spi_mode & 0xff;
+          return 0;
+
+        case SPI_IOC_RD_BITS_PER_WORD: *(guint8 *) value = mock_spi_bits;
+          return 0;
+
+        case SPI_IOC_RD_LSB_FIRST: *(guint8 *) value = mock_spi_lsb;
+          return 0;
+
         case SPI_IOC_WR_MODE32:
           if (mock_restore_failure)
-            { errno = EIO; return -1; }
+            {
+              errno = EIO;
+              return -1;
+            }
           mock_spi_mode = *(guint32 *) value;
           mock_spi_lsb = !!(mock_spi_mode & SPI_LSB_FIRST);
           return 0;
+
         case SPI_IOC_WR_MODE:
           /* spidev treats this byte as the complete user-mode value, not a
            * masked update. In particular, it clears SPI_RX_DUAL above bit 7.
@@ -196,17 +225,24 @@ mock_ioctl (int fd, unsigned long request, ...)
           mock_spi_mode = *(guint8 *) value;
           mock_spi_lsb = !!(mock_spi_mode & SPI_LSB_FIRST);
           break;
-        case SPI_IOC_WR_BITS_PER_WORD: mock_spi_bits = *(guint8 *) value; break;
+
+        case SPI_IOC_WR_BITS_PER_WORD: mock_spi_bits = *(guint8 *) value;
+          break;
+
         case SPI_IOC_WR_LSB_FIRST:
           mock_spi_lsb = *(guint8 *) value;
           mock_spi_mode = (mock_spi_mode & ~SPI_LSB_FIRST) |
                           (mock_spi_lsb ? SPI_LSB_FIRST : 0);
           break;
+
         default: g_assert_not_reached ();
         }
       mock_config_writes++;
       if (mock_config_fail_at && mock_config_writes == mock_config_fail_at)
-        { errno = EIO; return -1; }
+        {
+          errno = EIO;
+          return -1;
+        }
       return 0;
     }
   struct spi_ioc_transfer *transfer = value;
@@ -227,7 +263,7 @@ mock_ioctl (int fd, unsigned long request, ...)
   if (expected_speed)
     g_assert_cmpuint (last_speed, ==, expected_speed);
   g_ptr_array_add (tx_frames, g_bytes_new ((const void *) (uintptr_t) transfer->tx_buf,
-                                         transfer->len));
+                                           transfer->len));
   g_string_append_printf (events, "spi:%02x/%u;", last_tx[0], transfer->len);
   if (expected_firmware && transfer->len == FW_SIZE + 7)
     {
@@ -273,7 +309,9 @@ mock_ioctl (int fd, unsigned long request, ...)
               rx[5] = mock_mcu_status & 0xff;
             }
           else if (last_tx[0] == 0x90)
-            rx[2] = mock_boot_edition;
+            {
+              rx[2] = mock_boot_edition;
+            }
           else if (last_tx[0] == 0x04)
             {
               g_assert_cmpuint (transfer->len, ==, 8);
@@ -284,7 +322,9 @@ mock_ioctl (int fd, unsigned long request, ...)
               rx[7] = mock_chip_id & 0xff;
             }
           else
-            g_assert_not_reached ();
+            {
+              g_assert_not_reached ();
+            }
         }
     }
   return transfer->len;
@@ -415,7 +455,9 @@ mock_file_get_contents (const gchar *filename, gchar **contents,
         *length = strlen (*contents);
       return TRUE;
     }
-  static const struct { const gchar *file; const gchar *value; } dmi[] = {
+  static const struct { const gchar *file;
+                        const gchar *value;
+  } dmi[] = {
     { "/sys/class/dmi/id/sys_vendor", "MEDION" },
     { "/sys/class/dmi/id/product_name", "E3224" },
     { "/sys/class/dmi/id/product_version", "FT" },
@@ -633,9 +675,9 @@ test_gpio_readback (gconstpointer data)
     }
   g_test_trap_subprocess (NULL, 0, 0);
   g_test_trap_assert_failed ();
-  g_test_trap_assert_stderr (GPOINTER_TO_INT (data) < 0
-                            ? "*read back reset GPIO value*"
-                            : "*Reset GPIO readback does not match*");
+  g_test_trap_assert_stderr (GPOINTER_TO_INT (data) < 0 ?
+                             "*read back reset GPIO value*" :
+                             "*Reset GPIO readback does not match*");
   g_test_trap_assert_stdout_unmatched ("*UNEXPECTED CONTINUATION*");
 }
 
@@ -643,6 +685,7 @@ static void
 test_cli (gconstpointer data)
 {
   const gchar *option = data;
+
   if (g_test_subprocess ())
     {
       reset_mocks ();
@@ -662,6 +705,7 @@ static void
 test_invalid_firmware (gconstpointer data)
 {
   gboolean wrong_size = GPOINTER_TO_INT (data);
+
   if (g_test_subprocess ())
     {
       reset_mocks ();
@@ -673,8 +717,8 @@ test_invalid_firmware (gconstpointer data)
     }
   g_test_trap_subprocess (NULL, 0, 0);
   g_test_trap_assert_failed ();
-  g_test_trap_assert_stderr (wrong_size ? "*Firmware must be a regular 10396-byte file*"
-                                       : "*Firmware size or SHA256 mismatch*");
+  g_test_trap_assert_stderr (wrong_size ? "*Firmware must be a regular 10396-byte file*" :
+                             "*Firmware size or SHA256 mismatch*");
   g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
   g_test_trap_assert_stdout_unmatched ("*Successfully claimed*");
 }
@@ -700,6 +744,7 @@ assert_tx_frame (guint index, const guint8 *expected, gsize size)
 {
   gsize actual_size;
   const guint8 *actual = g_bytes_get_data (g_ptr_array_index (tx_frames, index), &actual_size);
+
   g_assert_cmpmem (actual, actual_size, expected, size);
 }
 
@@ -759,11 +804,12 @@ test_status_without_reset (gconstpointer data)
 }
 
 /* Run the real parser, DMI/topology checks, setup, dispatch and cleanup. All
- * external interfaces are mocked; unexpected GPIO discovery/access aborts. */
+* external interfaces are mocked; unexpected GPIO discovery/access aborts. */
 static void
 test_status_cli (gconstpointer data)
 {
   guint scenario = GPOINTER_TO_UINT (data);
+
   if (g_test_subprocess ())
     {
       reset_mocks ();
@@ -790,7 +836,7 @@ test_status_cli (gconstpointer data)
   else
     g_test_trap_assert_failed ();
   g_test_trap_assert_stdout (scenario == 8 ? "*MOCK REMAINING SPI RESTORES VERIFIED*" :
-                            "*MOCK SPI RESTORE VERIFIED*");
+                             "*MOCK SPI RESTORE VERIFIED*");
   g_test_trap_assert_stdout ("*MOCK PM RESTORE VERIFIED*");
   if (scenario == 2)
     g_test_trap_assert_stdout ("*Diagnostic exit=2;*");
@@ -917,7 +963,7 @@ main (int argc, char **argv)
   for (guint i = 0; i < G_N_ELEMENTS (status_scenarios); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/status-cli/%s",
-                                               status_scenarios[i]);
+                                                status_scenarios[i]);
       g_test_add_data_func (path, GUINT_TO_POINTER (i), test_status_cli);
     }
   int result = g_test_run ();

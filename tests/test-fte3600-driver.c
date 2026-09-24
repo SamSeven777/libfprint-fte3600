@@ -23,8 +23,9 @@ static void
 test_firmware_valid (void)
 {
   const gchar *path = g_getenv ("FTE3600_TEST_FIRMWARE");
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) firmware = NULL;
+
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) firmware = NULL;
 
   if (!path || !*path)
     {
@@ -42,8 +43,9 @@ static void
 test_firmware_invalid (gconstpointer user_data)
 {
   const gsize length = GPOINTER_TO_SIZE (user_data);
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) firmware = NULL;
+
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) firmware = NULL;
   g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
   g_autofree gchar *path = NULL;
   g_autofree gchar *contents = g_malloc0 (MAX (length, 1));
@@ -62,8 +64,8 @@ test_firmware_invalid (gconstpointer user_data)
 static void
 test_firmware_missing (void)
 {
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) firmware = NULL;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) firmware = NULL;
   g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
   g_autofree gchar *path = NULL;
 
@@ -78,8 +80,8 @@ test_firmware_missing (void)
 static void
 test_firmware_fifo (void)
 {
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) firmware = NULL;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) firmware = NULL;
   g_autofree gchar *directory = g_dir_make_tmp ("fte3600-firmware-XXXXXX", &error);
   g_autofree gchar *path = NULL;
 
@@ -97,9 +99,9 @@ static void
 test_gpio_profiles (void)
 {
   const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
-      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+    "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
   const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
-      "MEDION", "E3224", "FT", "YS13G");
+    "MEDION", "E3224", "FT", "YS13G");
 
   g_assert_nonnull (a1);
   g_assert_true (a1->allow_hardware_reset);
@@ -146,9 +148,9 @@ static void
 test_firmware_platform_gate (void)
 {
   const Fte3600GpioProfile *a1 = fte3600_lookup_gpio_profile (
-      "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
+    "ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1", NULL, NULL);
   const Fte3600GpioProfile *medion = fte3600_lookup_gpio_profile (
-      "MEDION", "E3224", "FT", "YS13G");
+    "MEDION", "E3224", "FT", "YS13G");
   Fte3600GpioProfile restricted;
 
   g_assert_nonnull (a1);

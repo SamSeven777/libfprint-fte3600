@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TEMPLATE_MODEL_ID              0x9361
+#define TEMPLATE_MODEL_ID 0x9361
 #define TEMPLATE_SUBTEMPLATE_HEADER_SIZE 8
 
 static const guint8 template_magic[8] = {
@@ -27,19 +27,22 @@ typedef enum {
   FEATURE_SET_INSUFFICIENT,
 } FeatureSetValidation;
 
-typedef struct {
+typedef struct
+{
   Fte3600BriskFeatureSet features;
   guint                  physical_count;
 } CanonicalSubtemplate;
 
-typedef struct {
+typedef struct
+{
   gint     previous_mode;
   gboolean changed;
 } TemplateRoundingGuard;
 
-struct _Fte3600Template {
-  guint                 n_subtemplates;
-  CanonicalSubtemplate  subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+struct _Fte3600Template
+{
+  guint                n_subtemplates;
+  CanonicalSubtemplate subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
 };
 
 static void
@@ -96,16 +99,16 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (TemplateRoundingGuard,
                                   template_rounding_guard_clear)
 
 static void
-put_uint16_le (guint8  *destination,
-               guint16  value)
+put_uint16_le (guint8 *destination,
+               guint16 value)
 {
   destination[0] = value & 0xff;
   destination[1] = value >> 8;
 }
 
 static void
-put_uint32_le (guint8  *destination,
-               guint32  value)
+put_uint32_le (guint8 *destination,
+               guint32 value)
 {
   destination[0] = value & 0xff;
   destination[1] = (value >> 8) & 0xff;
@@ -306,10 +309,13 @@ validation_to_status (FeatureSetValidation validation)
     {
     case FEATURE_SET_VALID:
       return FTE3600_TEMPLATE_OK;
+
     case FEATURE_SET_UNSUPPORTED_EXTRACTOR:
       return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
+
     case FEATURE_SET_INSUFFICIENT:
       return FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES;
+
     case FEATURE_SET_INVALID:
     default:
       return FTE3600_TEMPLATE_INVALID_WIRE;
@@ -433,7 +439,7 @@ fte3600_template_encode (const Fte3600Template *templ,
     return FTE3600_TEMPLATE_INVALID_WIRE;
   if (wire == NULL || !fte3600_template_is_ready (templ))
     return templ == NULL || wire == NULL ? FTE3600_TEMPLATE_INVALID_WIRE :
-                                          FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+           FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
 
   for (guint i = 0; i < templ->n_subtemplates; i++)
     {
@@ -522,9 +528,9 @@ validate_header (const guint8 *data,
       FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
   if (get_uint16_le (&data[26]) !=
-        FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION ||
+      FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION ||
       get_uint16_le (&data[28]) !=
-        FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION)
+      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_POLICY;
   if (size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
     return FTE3600_TEMPLATE_INVALID_WIRE;
@@ -532,9 +538,9 @@ validate_header (const guint8 *data,
 }
 
 Fte3600TemplateStatus
-fte3600_template_decode (GBytes                      *wire,
-                         Fte3600TemplateLoadPurpose  purpose,
-                         Fte3600Template           **templ)
+fte3600_template_decode (GBytes                    *wire,
+                         Fte3600TemplateLoadPurpose purpose,
+                         Fte3600Template          **templ)
 {
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
   const guint8 *data;
@@ -611,7 +617,7 @@ fte3600_template_decode (GBytes                      *wire,
         return FTE3600_TEMPLATE_INVALID_WIRE;
       for (guint i = 0; i < feature_count; i++)
         if (feature_compare (&parsed.features.features[i],
-                            &canonical.features.features[i]) != 0)
+                             &canonical.features.features[i]) != 0)
           return FTE3600_TEMPLATE_INVALID_WIRE;
       if (sample > 0 &&
           subtemplate_compare (&decoded->subtemplates[sample - 1],

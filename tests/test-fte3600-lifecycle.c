@@ -85,38 +85,38 @@ static gint mock_requests[2];
 
 static struct
 {
-  GMutex        lock;
+  GMutex              lock;
   const TestPlatform *platform;
-  gint          spi_fd;
-  gint          irq_pipe[2];
-  guint         opens;
-  guint         closes;
-  guint         claims;
-  guint         chip_opens;
-  guint         releases;
-  guint         resets;
-  guint         hardware_asserts;
-  guint         hardware_deasserts;
-  guint         images;
-  guint         irq_source;
-  guint8        registers[256];
-  guint         claimed;
-  gboolean      fail_irq_claim;
-  gboolean      armed;
-  gboolean      finger_ready;
-  gboolean      bad_id;
-  gboolean      fail_config;
-  gboolean      fail_claim;
-  gboolean      fail_image;
-  gboolean      fail_reset;
-  gboolean      cancel_image;
-  gboolean      hardware_recovery;
-  gboolean      cold_start;
-  gboolean      reset_asserted;
-  gboolean      cancel_hardware_reset;
-  gboolean      fail_hardware_reset;
-  IrqAction     irq_action;
-  GCancellable *cancellable;
+  gint                spi_fd;
+  gint                irq_pipe[2];
+  guint               opens;
+  guint               closes;
+  guint               claims;
+  guint               chip_opens;
+  guint               releases;
+  guint               resets;
+  guint               hardware_asserts;
+  guint               hardware_deasserts;
+  guint               images;
+  guint               irq_source;
+  guint8              registers[256];
+  guint               claimed;
+  gboolean            fail_irq_claim;
+  gboolean            armed;
+  gboolean            finger_ready;
+  gboolean            bad_id;
+  gboolean            fail_config;
+  gboolean            fail_claim;
+  gboolean            fail_image;
+  gboolean            fail_reset;
+  gboolean            cancel_image;
+  gboolean            hardware_recovery;
+  gboolean            cold_start;
+  gboolean            reset_asserted;
+  gboolean            cancel_hardware_reset;
+  gboolean            fail_hardware_reset;
+  IrqAction           irq_action;
+  GCancellable       *cancellable;
 } sensor;
 
 int
@@ -200,15 +200,15 @@ __wrap_g_udev_client_query_by_subsystem (GUdevClient *client,
 const gchar *
 __wrap_g_udev_device_get_device_file (GUdevDevice *device)
 {
-  return g_object_get_data (G_OBJECT (device), "irq-controller")
-           ? "/mock/gpiochip-irq" : "/mock/gpiochip-reset";
+  return g_object_get_data (G_OBJECT (device), "irq-controller") ?
+         "/mock/gpiochip-irq" : "/mock/gpiochip-reset";
 }
 
 const gchar *
 __wrap_g_udev_device_get_sysfs_path (GUdevDevice *device)
 {
-  return g_object_get_data (G_OBJECT (device), "irq-controller")
-           ? "/mock/gpio-irq" : "/mock/gpio-reset";
+  return g_object_get_data (G_OBJECT (device), "irq-controller") ?
+         "/mock/gpio-irq" : "/mock/gpio-reset";
 }
 
 struct gpiod_chip *
@@ -247,12 +247,14 @@ __wrap_gpiod_chip_request_lines (struct gpiod_chip           *chip,
   g_assert_cmpuint (offset, ==, (reset ? sensor.platform->reset_offset : sensor.platform->irq_offset));
   /* A1 resolves both lines to one chip; Medion must resolve distinct chips. */
   g_assert_true (chip == (struct gpiod_chip *)
-      &mock_chips[reset || g_str_equal (sensor.platform->controller_path,
-                                       sensor.platform->irq_controller_path) ? 0 : 1]);
+                 &mock_chips[reset || g_str_equal (sensor.platform->controller_path,
+                                                   sensor.platform->irq_controller_path) ? 0 : 1]);
   g_assert_false (gpiod_line_settings_get_active_low (settings));
   if (reset)
-    g_assert_cmpint (gpiod_line_settings_get_output_value (settings), ==,
-                     GPIOD_LINE_VALUE_ACTIVE);
+    {
+      g_assert_cmpint (gpiod_line_settings_get_output_value (settings), ==,
+                       GPIOD_LINE_VALUE_ACTIVE);
+    }
   else
     {
       g_assert_cmpint (gpiod_line_settings_get_direction (settings), ==,
@@ -610,6 +612,7 @@ static void
 test_unknown_dmi (void)
 {
   TestPlatform platform = platforms[0];
+
   g_autoptr(GError) error = NULL;
   FpDevice *device;
 
@@ -627,6 +630,7 @@ test_hardware_reset (gconstpointer data)
 {
   guint scenario = GPOINTER_TO_UINT (data);
   FpDevice *device = new_device ();
+
   g_autoptr(GError) error = NULL;
 
   sensor.hardware_recovery = TRUE;
@@ -646,7 +650,7 @@ test_hardware_reset (gconstpointer data)
     {
       g_assert_false (fp_device_open_sync (device, sensor.cancellable, &error));
       g_assert_error (error, G_IO_ERROR,
-                       (scenario == 1 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+                      (scenario == 1 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
       g_assert_false (fp_device_is_open (device));
       g_assert_cmpint (sensor.spi_fd, ==, -1);
       g_assert_false (sensor.claimed);

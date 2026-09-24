@@ -12,8 +12,8 @@
 
 typedef struct
 {
-  gchar *path;
-  gchar *saved_control;
+  gchar   *path;
+  gchar   *saved_control;
   gboolean changed;
 } MedionPowerNode;
 
@@ -21,15 +21,19 @@ typedef struct
 {
   GPtrArray *nodes; /* Parent first; restoration runs in reverse. */
   /* Optional test backend; production uses write(2). */
-  ssize_t (*io_write) (int fd, const void *data, size_t size, gpointer user_data);
+  ssize_t (*io_write) (int         fd,
+                       const void *data,
+                       size_t      size,
+                       gpointer    user_data);
   gpointer user_data;
-  guint timeout_ms; /* Zero selects the production default of one second. */
+  guint    timeout_ms; /* Zero selects the production default of one second. */
 } MedionPower;
 
 static inline void
 medion_power_node_free (gpointer data)
 {
   MedionPowerNode *node = data;
+
   g_free (node->path);
   g_free (node->saved_control);
   g_free (node);
@@ -40,6 +44,7 @@ medion_power_read (const gchar *path, const gchar *attribute, GError **error)
 {
   g_autofree gchar *filename = g_build_filename (path, "power", attribute, NULL);
   gchar *value = NULL;
+
   if (!g_file_get_contents (filename, &value, NULL, error))
     return NULL;
   return g_strstrip (value);
@@ -53,6 +58,7 @@ medion_power_write (MedionPower *power, const gchar *path,
   g_autofree gchar *payload = g_strconcat (value, "\n", NULL);
   gsize size = strlen (payload);
   int fd = open (filename, O_WRONLY | O_CLOEXEC);
+
   if (fd < 0)
     {
       int saved_errno = errno;
@@ -63,8 +69,8 @@ medion_power_write (MedionPower *power, const gchar *path,
 
   ssize_t written;
   do
-    written = power->io_write ? power->io_write (fd, payload, size, power->user_data)
-                              : write (fd, payload, size);
+    written = power->io_write ? power->io_write (fd, payload, size, power->user_data) :
+              write (fd, payload, size);
   while (written < 0 && errno == EINTR);
 
   int saved_errno = errno;
@@ -113,6 +119,7 @@ static inline gboolean
 medion_power_verify_control (MedionPowerNode *node, const gchar *expected, GError **error)
 {
   g_autofree gchar *actual = medion_power_read (node->path, "control", error);
+
   if (!actual)
     return FALSE;
   if (g_strcmp0 (actual, expected) == 0)
@@ -126,10 +133,11 @@ static inline gboolean
 medion_power_restore (MedionPower *power, GError **error)
 {
   gboolean success = TRUE;
+
   for (guint i = power->nodes ? power->nodes->len : 0; i > 0; i--)
     {
       MedionPowerNode *node = g_ptr_array_index (power->nodes, i - 1);
-      g_autoptr (GError) local_error = NULL;
+      g_autoptr(GError) local_error = NULL;
       if (!node->changed)
         continue;
       if (!medion_power_write (power, node->path, node->saved_control, &local_error) ||
@@ -157,6 +165,7 @@ medion_power_wait (MedionPower *power, MedionPowerNode *node, GError **error)
 {
   gint64 deadline = g_get_monotonic_time () +
                     (power->timeout_ms ? power->timeout_ms : 1000) * (gint64) 1000;
+
   for (;;)
     {
       g_autofree gchar *status = medion_power_read (node->path, "runtime_status", error);
@@ -186,7 +195,8 @@ medion_power_prepare (MedionPower *power, const gchar *device_path,
   g_autofree gchar *root = realpath (sysfs_devices_root, NULL);
   g_autofree gchar *root_prefix = root ? g_strconcat (root, "/", NULL) : NULL;
   g_autofree gchar *cursor = NULL;
-  g_autoptr (GError) local_error = NULL;
+
+  g_autoptr(GError) local_error = NULL;
   if (power->nodes)
     {
       g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,

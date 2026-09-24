@@ -35,19 +35,20 @@ assert_authentication_policy_result (const Fte3600BriskMatchResult *result)
   g_assert_cmpint (result->authentication_accepted, ==,
                    result->diagnostic_policy_passed);
   g_assert_cmpint (
-      fte3600_brisk_result_meets_authentication_policy (result), ==,
-      result->diagnostic_policy_passed);
+    fte3600_brisk_result_meets_authentication_policy (result), ==,
+    result->diagnostic_policy_passed);
 #else
   g_assert_false (result->authentication_accepted);
   g_assert_false (
-      fte3600_brisk_result_meets_authentication_policy (result));
+    fte3600_brisk_result_meets_authentication_policy (result));
 #endif
 }
 
 static void
 make_visual_pattern (guint8 *image)
 {
-  static const struct {
+  static const struct
+  {
     gdouble x;
     gdouble y;
     gdouble sigma;
@@ -190,7 +191,7 @@ warp_pattern (const guint8 *source,
 static void
 initialize_rigid_fixture (Fte3600BriskFeatureSet *query,
                           Fte3600BriskFeatureSet *reference,
-                          gboolean                 clustered)
+                          gboolean                clustered)
 {
   const gdouble angle = 6.0 * TEST_PI / 180.0;
   const gdouble cosine = cos (angle);
@@ -315,7 +316,8 @@ test_pattern_and_pairs (void)
     g_assert_cmpstr (hash, ==, FTE3600_BRISK_PAIR_TABLE_SHA256);
   }
   {
-    static const struct {
+    static const struct
+    {
       guint bit;
       guint first;
       guint second;
@@ -330,7 +332,7 @@ test_pattern_and_pairs (void)
         guint second;
 
         g_assert_true (fte3600_brisk_descriptor_pair (golden_pairs[i].bit,
-                                                       &first, &second));
+                                                      &first, &second));
         g_assert_cmpuint (first, ==, golden_pairs[i].first);
         g_assert_cmpuint (second, ==, golden_pairs[i].second);
       }
@@ -424,16 +426,16 @@ test_rounding_mode_isolation (void)
   g_assert_true (fte3600_brisk_pattern_point (17, &point_x_nearest,
                                               &point_y_nearest));
   g_assert_cmpint (fte3600_brisk_describe_at (
-                       image, sizeof (image), 32.0f, 40.0f,
-                       &described_nearest), ==, FTE3600_BRISK_OK);
+                     image, sizeof (image), 32.0f, 40.0f,
+                     &described_nearest), ==, FTE3600_BRISK_OK);
   g_assert_cmpint (fte3600_brisk_extract (image, sizeof (image),
                                           &extracted_nearest), ==,
                    FTE3600_BRISK_OK);
   g_assert_true (fte3600_brisk_validate_feature_set (&extracted_nearest,
-                                                      NULL));
+                                                     NULL));
   match_status_nearest = fte3600_brisk_match (&extracted_nearest,
-                                               &extracted_nearest,
-                                               &match_nearest);
+                                              &extracted_nearest,
+                                              &match_nearest);
   diagnostic_nearest =
     fte3600_brisk_result_meets_diagnostic_policy (&match_nearest);
 
@@ -456,7 +458,7 @@ test_rounding_mode_isolation (void)
                        &point_y_nearest, sizeof (point_y_nearest));
 
       g_assert_cmpint (fte3600_brisk_describe_at (
-                           image, sizeof (image), 32.0f, 40.0f, &described),
+                         image, sizeof (image), 32.0f, 40.0f, &described),
                        ==, FTE3600_BRISK_OK);
       g_assert_cmpint (fegetround (), ==, modes[i]);
       g_assert_cmpmem (&described, sizeof (described),
