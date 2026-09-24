@@ -428,7 +428,25 @@ if 'fte3600' in drivers
         env: envs,
     )
 
+    fte3600_benchmark = executable('benchmark-fte3600',
+        sources: [
+            'benchmark-fte3600.c',
+            '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-ipa.c',
+            '../libfprint/drivers/fte3600-template.c',
+        ],
+        dependencies: [glib_dep, mathlib_dep],
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('benchmark-fte3600',
+        fte3600_benchmark,
+        suite: ['benchmarks'],
+        env: envs,
+    )
+
 endif
+
 
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)

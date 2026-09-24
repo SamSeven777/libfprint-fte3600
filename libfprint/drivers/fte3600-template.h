@@ -52,6 +52,12 @@ typedef enum {
 
 typedef struct _Fte3600Template Fte3600Template;
 
+typedef enum {
+  FTE3600_ENGINE_MODE_BRISK_ONLY  = 0,
+  FTE3600_ENGINE_MODE_IPA_ONLY    = 1,
+  FTE3600_ENGINE_MODE_DUAL_FUSION = 2,
+} Fte3600EngineMode;
+
 typedef struct
 {
   guint                   n_compared;
@@ -62,6 +68,7 @@ typedef struct
   gboolean                brisk_accepted;
   gboolean                ipa_accepted;
   gboolean                authentication_accepted;
+  Fte3600EngineMode       engine_mode;
 } Fte3600TemplateCompareResult;
 
 /* Template operations that inspect floating-point feature fields temporarily
@@ -94,17 +101,32 @@ Fte3600TemplateStatus fpi_fte3600_template_decode (GBytes                    *wi
                                                    Fte3600TemplateLoadPurpose purpose,
                                                    Fte3600Template          **templ);
 
-/* Compare query against gallery using dual-engine fusion (BRISK OR 2D-IPA). */
+/* Compare query against gallery using a specific engine mode (BRISK, IPA, or DUAL). */
+Fte3600TemplateStatus fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
+                                                              const Fte3600BriskFeatureSet *query_brisk,
+                                                              const Fte3600IpaFeatureSet   *query_ipa,
+                                                              Fte3600TemplateLoadPurpose    purpose,
+                                                              Fte3600EngineMode             mode,
+                                                              Fte3600TemplateCompareResult *result);
+
+/* Dual-engine helper (BRISK OR 2D-IPA) */
 Fte3600TemplateStatus fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
                                                                   const Fte3600BriskFeatureSet *query_brisk,
                                                                   const Fte3600IpaFeatureSet   *query_ipa,
                                                                   Fte3600TemplateLoadPurpose    purpose,
                                                                   Fte3600TemplateCompareResult *result);
 
+/* Mono-engine helper: BRISK only */
 Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
                                                              const Fte3600BriskFeatureSet *query,
                                                              Fte3600TemplateLoadPurpose    purpose,
                                                              Fte3600TemplateCompareResult *result);
+
+/* Mono-engine helper: 2D-IPA only */
+Fte3600TemplateStatus fpi_fte3600_template_compare_ipa_features (const Fte3600Template      *templ,
+                                                                 const Fte3600IpaFeatureSet *query_ipa,
+                                                                 Fte3600TemplateLoadPurpose  purpose,
+                                                                 Fte3600TemplateCompareResult *result);
 
 G_END_DECLS
 

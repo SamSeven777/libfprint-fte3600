@@ -880,6 +880,96 @@ test_dual_engine_fusion (void)
 #endif
 }
 
+#if FTE3600_ENABLE_PERSONAL_AUTH
+static void
+test_mono_engine_modes (void)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(Fte3600Template) decoded = NULL;
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet ipa_ref = { 0 };
+  Fte3600BriskFeatureSet brisk_match = { 0 };
+  Fte3600BriskFeatureSet brisk_nomatch = { 0 };
+  Fte3600TemplateCompareResult result;
+
+  make_fingerprint_pattern (image);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa_ref),
+                   ==, FTE3600_IPA_OK);
+
+  for (guint sample = 0;
+       sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet features;
+      make_feature_set (&features, sample, FALSE);
+      if (sample == 0)
+        make_feature_set (&brisk_match, sample, FALSE);
+      (void) fpi_fte3600_template_add_dual_features (templ, &features, &ipa_ref, NULL);
+    }
+
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+
+  brisk_nomatch.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  brisk_nomatch.n_features = TEST_FEATURES;
+  for (guint i = 0; i < TEST_FEATURES; i++)
+    {
+      brisk_nomatch.features[i].x = 5.0f + (gfloat) (i % 3) * 15.0f;
+      brisk_nomatch.features[i].y = 5.0f + (gfloat) (i / 3) * 18.0f;
+      brisk_nomatch.features[i].orientation = 0.0f;
+      memset (brisk_nomatch.features[i].descriptor, 0xaa ^ (guint8) i,
+              FTE3600_BRISK_DESCRIPTOR_BYTES);
+    }
+
+  /* 1. Test Mono-Engine BRISK-ONLY Mode */
+  /* Case A: BRISK match -> Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     decoded, &brisk_match, &ipa_ref,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     FTE3600_ENGINE_MODE_BRISK_ONLY, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (result.engine_mode, ==, FTE3600_ENGINE_MODE_BRISK_ONLY);
+  g_assert_true (result.brisk_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* Case B: BRISK no-match -> REJECTED in BRISK-only mode (IPA evaluation skipped) */
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     decoded, &brisk_nomatch, &ipa_ref,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     FTE3600_ENGINE_MODE_BRISK_ONLY, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+
+  /* 2. Test Mono-Engine 2D-IPA-ONLY Mode */
+  /* Case A: IPA match -> Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_ipa_features (
+                     decoded, &ipa_ref,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (result.engine_mode, ==, FTE3600_ENGINE_MODE_IPA_ONLY);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* Case B: BRISK passes, but IPA fails/nomatch -> REJECTED in IPA-only mode */
+  Fte3600IpaFeatureSet ipa_nomatch = { 0 };
+  ipa_nomatch.n_minutiae = 5;
+  for (guint i = 0; i < 5; i++)
+    {
+      ipa_nomatch.minutiae[i].x = 10.0f + (gfloat) i * 8.0f;
+      ipa_nomatch.minutiae[i].y = 15.0f;
+      ipa_nomatch.minutiae[i].theta = 0.0f;
+      for (int d = 0; d < FTE3600_IPA_DESC_DIM; d++)
+        ipa_nomatch.minutiae[i].desc[d] = 0.1f * (gfloat) ((i + d) % 7);
+    }
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     decoded, &brisk_match, &ipa_nomatch,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     FTE3600_ENGINE_MODE_IPA_ONLY, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+}
+#endif
+
 int
 main (int   argc,
       char *argv[])
@@ -906,5 +996,9 @@ main (int   argc,
                    test_rounding_mode_isolation);
   g_test_add_func ("/fte3600-template/dual-engine-fusion",
                    test_dual_engine_fusion);
+#if FTE3600_ENABLE_PERSONAL_AUTH
+  g_test_add_func ("/fte3600-template/mono-engine-modes",
+                   test_mono_engine_modes);
+#endif
   return g_test_run ();
 }
