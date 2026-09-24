@@ -1,95 +1,52 @@
+# FTE3600 / FT9361 Linux Driver
 
+[![FTE3600 CI](https://github.com/SamSeven777/libfprint-fte3600/actions/workflows/fte3600-ci.yml/badge.svg)](https://github.com/SamSeven777/libfprint-fte3600/actions/workflows/fte3600-ci.yml)
 
-<div align="center">
+Open-source `libfprint` driver for the FocalTech FT9361 SPI capacitive fingerprint sensor:
+supports discovery, image capture, eight-stage enrollment, native cold-boot recovery,
+and opt-in host-side verification.
 
-# LibFPrint
+> [!NOTE]
+> Default builds expose image capture only. Host-side authentication requires
+> `-Dfte3600_personal_auth=true`. See [SECURITY.md](SECURITY.md) for policy details.
 
-*LibFPrint is part of the **[FPrint][Website]** project.*
+## Supported hardware
 
-<br/>
+The driver targets the **FocalTech FT9361** SPI sensor (`ACPI\FTE3600`, 64 × 80 pixels).
+Platform status:
+- **One-Netbook A1** (`ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`): Verified on real hardware (discovery, capture, enrollment, verification, and native cold-boot recovery).
+- **Medion Akoya E3224** (`MEDION / E3224`): Experimental profile in development (routing identified; real-hardware verification in progress on `medion-e3224` branch).
 
-[![Button Website]][Website]
-[![Button Documentation]][Documentation]
+Because GPIO routing and pin polarities vary by motherboard, unknown hardware profiles
+fail closed during device probe to prevent invalid GPIO assertions. See [hardware status](docs/fte3600/status.md)
+for platform details or to contribute a new profile.
 
-[![Button Supported]][Supported]
-[![Button Unsupported]][Unsupported]
+## Quick start
 
-[![Button Contribute]][Contribute]
-[![Button Contributors]][Contributors]
+```sh
+git clone --branch main https://github.com/SamSeven777/libfprint-fte3600.git
+cd libfprint-fte3600
 
-</div>
+# Download and install runtime firmware for cold-boot recovery
+./scripts/install-firmware.sh
+```
 
-## History
+- [Installation guide](docs/fte3600/install.md): dependencies, firmware setup, build/test, packaging, and safe enrollment.
+- [Hardware status](docs/fte3600/status.md): verified specifications and calibration metrics.
+- [Troubleshooting](docs/fte3600/troubleshooting.md): diagnostics, SPI buffer configuration, and Fedora SELinux setup.
+- [Clean-room implementation](docs/fte3600/clean-room.md): architecture, algorithm references, and provenance.
+- [Contributing](CONTRIBUTING.md) · [Release history](CHANGELOG.md).
 
-**LibFPrint** was originally developed as part of an
-academic project at the **[University Of Manchester]**.
+## License and provenance
 
-It aimed to hide the differences between consumer
-fingerprint scanners and provide a single uniform
-API to application developers.
+Based on upstream [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint)
+(commit [`c4654fdc85c25afdd9115bec2f95a44145ae3b94`](https://gitlab.freedesktop.org/libfprint/libfprint/-/commit/c4654fdc85c25afdd9115bec2f95a44145ae3b94),
+version `1.94.100`). New FTE3600 code is licensed under `LGPL-2.1-or-later`; see [COPYING](COPYING).
 
-## Goal
+The driver and BRISK matcher are clean-room implementations developed without vendor source code
+or proprietary libraries. No proprietary firmware binary is distributed in this repository.
 
-The ultimate goal of the **FPrint** project is to make
-fingerprint scanners widely and easily usable under
-common Linux environments.
-
-## License
-
-`Section 6` of the license states that for compiled works that use
-this library, such works must include **LibFPrint** copyright notices
-alongside the copyright notices for the other parts of the work.
-
-**LibFPrint** includes code from **NIST's** **[NBIS]** software distribution.
-
-We include **Bozorth3** from the **[US Export Controlled]**
-distribution, which we have determined to be fine
-being shipped in an open source project.
-
-## Get in *touch*
-
- - [IRC] - `#fprint` @ `irc.oftc.net`
- - [Matrix] - `#fprint:matrix.org` bridged to the IRC channel
- - [MailingList] - low traffic, not much used these days
-
-<br/>
-
-<div align="right">
-
-[![Badge License]][License]
-
-</div>
-
-
-<!----------------------------------------------------------------------------->
-
-[Documentation]: https://fprint.freedesktop.org/libfprint-dev/
-[Contributors]: https://gitlab.freedesktop.org/libfprint/libfprint/-/graphs/master
-[Unsupported]: https://gitlab.freedesktop.org/libfprint/wiki/-/wikis/Unsupported-Devices
-[Supported]: https://fprint.freedesktop.org/supported-devices.html
-[Website]: https://fprint.freedesktop.org/
-[MailingList]: https://lists.freedesktop.org/mailman/listinfo/fprint
-[IRC]: ircs://irc.oftc.net:6697/#fprint
-[Matrix]: https://matrix.to/#/#fprint:matrix.org
-
-[Contribute]: ./HACKING.md
-[License]: ./COPYING
-
-[University Of Manchester]: https://www.manchester.ac.uk/
-[US Export Controlled]: https://fprint.freedesktop.org/us-export-control.html
-[NBIS]: http://fingerprint.nist.gov/NBIS/index.html
-
-
-<!---------------------------------[ Badges ]---------------------------------->
-
-[Badge License]: https://img.shields.io/badge/License-LGPL2.1-015d93.svg?style=for-the-badge&labelColor=blue
-
-
-<!---------------------------------[ Buttons ]--------------------------------->
-
-[Button Documentation]: https://img.shields.io/badge/Documentation-04ACE6?style=for-the-badge&logoColor=white&logo=BookStack
-[Button Contributors]: https://img.shields.io/badge/Contributors-FF4F8B?style=for-the-badge&logoColor=white&logo=ActiGraph
-[Button Unsupported]: https://img.shields.io/badge/Unsupported_Devices-EF2D5E?style=for-the-badge&logoColor=white&logo=AdBlock
-[Button Contribute]: https://img.shields.io/badge/Contribute-66459B?style=for-the-badge&logoColor=white&logo=Git
-[Button Supported]: https://img.shields.io/badge/Supported_Devices-428813?style=for-the-badge&logoColor=white&logo=AdGuard
-[Button Website]: https://img.shields.io/badge/Homepage-3B80AE?style=for-the-badge&logoColor=white&logo=freedesktopDotOrg
+Thanks to libfprint/fprintd contributors and [Omarchy](https://omarchy.org/) for the
+integration environment. [OpenAI Codex](https://openai.com/codex/) and
+[Google Antigravity](https://deepmind.google/) substantially assisted implementation,
+testing, review, and documentation. These acknowledgements imply no endorsement or official support.

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup questions and discussion
+    url: https://github.com/SamSeven777/libfprint-fte3600/discussions
+    about: Ask usage, packaging, and compatibility questions without posting biometric or proprietary data.
+  - name: Security policy
+    url: https://github.com/SamSeven777/libfprint-fte3600/security/policy
+    about: Read the private-reporting and biometric-data rules before reporting a vulnerability.

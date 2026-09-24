@@ -1,3 +1,12 @@
 *.o
 *.swp
 _build
+build*/
+__pycache__/
+*.py[cod]
+*.plist
+*.pkg.tar.*
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/libfprint/
+firmware/*.bin

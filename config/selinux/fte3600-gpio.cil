@@ -1,0 +1,8 @@
+; SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
+; SPDX-License-Identifier: LGPL-2.1-or-later
+
+; Optional local policy for Fedora 43/44 installations of the FTE3600 driver.
+; Fedora labels every /dev/gpiochip* node gpio_device_t, so this necessarily
+; permits fprintd_t to perform the listed operations on all GPIO character
+; devices. Install only after verifying an AVC denial and the local contexts.
+(allow fprintd_t gpio_device_t (chr_file (getattr open read write ioctl)))
