@@ -1,43 +1,68 @@
-# FTE3600 / FT9361 Hardware & Feature Status
+# FTE3600 hardware and validation status
 
-## Hardware Profiles
+A configured hardware profile is not evidence of successful operation. The
+status below distinguishes implementation, maintainer reports and missing
+validation; it is not a general authentication-safety certification.
 
-| Parameter | One-Netbook A1 | Medion Akoya E3224 |
-| :--- | :--- | :--- |
-| **Status** | **Fully Verified** (main branch) | **In Progress** (`medion-e3224` branch) |
-| **DMI sys_vendor** | `ONE-NETBOOK TECHNOLOGY CO., LTD.` | `MEDION` |
-| **DMI product_name** | `A1` | `E3224` |
-| **ACPI Device ID** | `FTE3600` | `FTE3600` |
-| **Sensor IC** | FocalTech FT9361 (64 × 80 px) | Expected FT9361; hardware ID not yet read successfully |
-| **SPI Configuration** | Mode 0, 8-bit, 1 MHz | Mode 0, 8-bit, 1 MHz |
-| **Reset GPIO** | `\_SB_.PCI0.GPI0` offset `0x55` (ActiveLow) | `\_SB_.GPO1` offset `0x27` (ActiveLow, pending real-device test) |
-| **IRQ GPIO** | `\_SB_.PCI0.GPI0` offset `0x56` (ActiveHigh) | `\_SB_.GPO2` offset `0x00` (ActiveHigh) |
-| **SPI Buffers** | 5,128 B (image) / 10,403 B (fw) | 5,128 B (image) / 10,403 B (fw) |
-| **Ready MCU Status** | `a5 5a` | `a5 5a` (cold-boot recovery under test) |
+| Platform | Evidence and scope | Reset route | IRQ route |
+| --- | --- | --- | --- |
+| One-Netbook A1 | Maintainer reports discovery, capture, enrollment, verification and cold-boot recovery on A1. Independent replication and a complete power/cancellation matrix remain needed. | `\_SB_.PCI0.GPI0`, 85 (`0x55`), active-low | Same controller, 86 (`0x56`), active-high |
+| GPD Pocket 3, Jasper Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT34C8`. | `\_SB_.GPI0`, 211, active-low | Same controller, 56, active-high |
+| GPD Pocket 3, Tiger Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT3455`. | `\_SB_.GPI0`, 179, active-low | Same controller, 24, active-high |
+| Medion E3224 | Separate experimental `medion-e3224` branch. Current implementation has not produced a successful identity/capture result on the reported machine. | `\_SB_.GPO1`, 39 (`0x27`); active-low is the current hypothesis, not a completed board-level validation | `\_SB_.GPO2`, 0; reported active-high IRQ |
 
-Unknown hardware profiles fail closed during device probe to prevent invalid GPIO assertions.
+DMI names are `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`,
+`GPD / Pocket 3` or `GPD / GPD Pocket 3`, and `MEDION / E3224`,
+respectively. Do not infer support for a similar product name. Main/upstream
+do not include the Medion profile; the Medion branch does not thereby inherit
+main's GPD support.
 
-## Verified Capabilities (One-Netbook A1)
+GPD routing requires an exact supported controller HID; absent or unknown HID
+must be rejected before configuring GPIO. A1 has a separately defined stable
+route. These checks constrain configuration; they do not establish electrical
+safety or successful operation of an experimental board.
 
-- **Device lifecycle**: Discovery, probe filtering, opening, cancellation, close, and clean release.
-- **Image acquisition**: Single-frame 64 × 80 image capture over full-duplex SPI.
-- **Enrollment**: Standard 8-stage enrollment with quality filtering, duplicate rejection, and cross-stage spatial dispersion.
-- **Template persistence**: Versioned binary template serialization (Policy Version 3).
-- **Cold-boot recovery**: Automatic RAM firmware injection on cold boot when sensor MCU status is `00 00`.
-- **Power management**: Seamless operation across kernel runtime-PM and suspend/resume cycles.
+## Medion evidence and next comparison
 
-## Authentication Calibration & Limitations (Policy Version 3)
+The Medion report identifies separate GPO1/GPO2 controllers; the reset-controller
+log identifies `INT3453`, not `INT3452`. Do not substitute reset 40 / IRQ 39.
+The module's exact sensor IC has not been confirmed by a valid device response.
+Neither the shared ACPI ID nor all-zero responses proves FT9361, FT9362 or a
+missing power rail.
 
-The host-side BRISK matcher operates with empirical geometric consensus gates (Policy Version 3)
-evaluated against 342,720 offline test comparisons (synthetic spatial perturbations and FVC2002 DB3_B datasets):
+The same reported machine worked with an older Mint software stack. Preserve
+that known-good comparison as the starting point. Compare initialization,
+firmware, transport, GPIO and power-management behavior with that stack before
+requesting another experiment. Do not ask the reporter to repeat an unchanged
+recovery sequence that already failed. See the [hardware discussion](https://github.com/SamSeven777/libfprint-fte3600/issues/1).
 
-- **Observed False Acceptances**: 0 false acceptances across the 342,720 evaluated pairs under controlled test conditions.
-- **Minimum inliers & mutual matches**: `5`.
-- **Geometric consistency**: Rigid/affine RANSAC with strict error bounds (`median_error < 1.25 px`, `rms_error < 1.40 px`, `inlier_ratio >= 0.20`).
-- **Spatial distribution**: Bounding box span (`x_span >= 6.0`, `y_span >= 8.0`), spatial cell coverage (`>= 2`), and descriptor variance bounds.
+## Implemented functions and test limits
 
-> [!WARNING]
-> Multi-person, multi-session population FAR/FRR metrics across the full 8-subtemplate authentication pipeline
-> (where any subtemplate matching authorizes access) remain unmeasured.
-> Default builds expose image capture only. Opt-in authentication (`-Dfte3600_personal_auth=true`) is for
-> experimental personal use and must not be used for high-assurance security domains.
+The A1 implementation supports 64 × 80 capture, eight-stage enrollment and
+host-side verification when explicitly enabled. The intended FT9361 recovery
+uses a 10,396-byte external image and a 10,403-byte continuous SPI transaction;
+image transactions need 5,128 bytes. A buffer setting of 32,768 bytes accommodates
+both. Expected application idle is `a5 5a`; `00 00` only means the expected
+response was not obtained and is not a diagnosis by itself.
+
+Unit tests and mock lifecycle tests do not establish successful cold boot,
+suspend/resume, GPIO polarity, population accuracy or complete memory erasure.
+A CI definition is not an executed result; retain logs tied to the exact
+commit, branch and build options. Medion diagnostic/power tests are not
+interchangeable with main's production-driver lifecycle tests.
+
+## Authentication evidence
+
+BRISK personal policy version 3 uses at least five mutual matches/inliers and
+spatial/residual gates. Historical maintainer reports describe zero observed
+acceptances in 342,720 offline non-matching comparisons. The repository does not
+currently provide a complete independently reproducible protocol, independent
+evaluation split and deployment-level report for that result. Do not present it
+as measured population FAR=0 or as a latency/FRR guarantee.
+
+Multi-person, multi-session FAR/FRR for the actual eight-subtemplate decision,
+including retries and failed captures/enrollments, remains unmeasured. This is
+an evidence gap, not merely a missing laboratory certificate. Default
+authentication is disabled; opt-in use remains experimental with a working
+password fallback. Do not enable experimental biometric authentication for
+system-wide sudo or root access.

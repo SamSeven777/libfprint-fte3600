@@ -1,52 +1,29 @@
-# FTE3600 / FT9361 Linux Driver
+# Medion E3224 experimental FTE3600 support
 
-[![FTE3600 CI](https://github.com/SamSeven777/libfprint-fte3600/actions/workflows/fte3600-ci.yml/badge.svg)](https://github.com/SamSeven777/libfprint-fte3600/actions/workflows/fte3600-ci.yml)
+This branch contains the Medion-specific GPIO routing, power diagnostics and
+recovery work. It is not a successful Medion driver release. The latest reported
+tests of this implementation did not obtain a valid device response or capture;
+the exact module chip remains unconfirmed.
 
-Open-source `libfprint` driver for the FocalTech FT9361 SPI capacitive fingerprint sensor:
-supports discovery, image capture, eight-stage enrollment, native cold-boot recovery,
-and opt-in host-side verification.
+The same user's machine worked with an older Mint software stack. Preserve
+that known-good result and compare startup/transport/firmware behavior against
+it. Do not request another run of an unchanged recovery sequence that already
+failed. A new hardware experiment needs a narrow question and an explicit
+description of the state it changes.
 
-> [!NOTE]
-> Default builds expose image capture only. Host-side authentication requires
-> `-Dfte3600_personal_auth=true`. See [SECURITY.md](SECURITY.md) for policy details.
+Reset is currently modeled on `\_SB_.GPO1` pin 39 and IRQ on
+`\_SB_.GPO2` pin 0. Active-low reset remains a hypothesis requiring validation.
+The diagnostic recovery command resets hardware, uploads firmware and temporarily
+changes runtime-power policy; it is not a read-only probe.
 
-## Supported hardware
+- [Evidence and hardware routes](docs/fte3600/status.md)
+- [Diagnostic boundaries and known-good comparison](docs/fte3600/troubleshooting.md)
+- [Build, installation and rollback](docs/fte3600/install.md)
+- [Security and biometric privacy](SECURITY.md)
+- [Implementation provenance](docs/fte3600/clean-room.md)
 
-The driver targets the **FocalTech FT9361** SPI sensor (`ACPI\FTE3600`, 64 × 80 pixels).
-Platform status:
-- **One-Netbook A1** (`ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`): Verified on real hardware (discovery, capture, enrollment, verification, and native cold-boot recovery).
-- **Medion Akoya E3224** (`MEDION / E3224`): Experimental profile in development (routing identified; real-hardware verification in progress on `medion-e3224` branch).
-
-Because GPIO routing and pin polarities vary by motherboard, unknown hardware profiles
-fail closed during device probe to prevent invalid GPIO assertions. See [hardware status](docs/fte3600/status.md)
-for platform details or to contribute a new profile.
-
-## Quick start
-
-```sh
-git clone --branch main https://github.com/SamSeven777/libfprint-fte3600.git
-cd libfprint-fte3600
-
-# Download and install runtime firmware for cold-boot recovery
-./scripts/install-firmware.sh
-```
-
-- [Installation guide](docs/fte3600/install.md): dependencies, firmware setup, build/test, packaging, and safe enrollment.
-- [Hardware status](docs/fte3600/status.md): verified specifications and calibration metrics.
-- [Troubleshooting](docs/fte3600/troubleshooting.md): diagnostics, SPI buffer configuration, and Fedora SELinux setup.
-- [Clean-room implementation](docs/fte3600/clean-room.md): architecture, algorithm references, and provenance.
-- [Contributing](CONTRIBUTING.md) · [Release history](CHANGELOG.md).
-
-## License and provenance
-
-Based on upstream [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint)
-(commit [`c4654fdc85c25afdd9115bec2f95a44145ae3b94`](https://gitlab.freedesktop.org/libfprint/libfprint/-/commit/c4654fdc85c25afdd9115bec2f95a44145ae3b94),
-version `1.94.100`). New FTE3600 code is licensed under `LGPL-2.1-or-later`; see [COPYING](COPYING).
-
-The driver and BRISK matcher are clean-room implementations developed without vendor source code
-or proprietary libraries. No proprietary firmware binary is distributed in this repository.
-
-Thanks to libfprint/fprintd contributors and [Omarchy](https://omarchy.org/) for the
-integration environment. [OpenAI Codex](https://openai.com/codex/) and
-[Google Antigravity](https://deepmind.google/) substantially assisted implementation,
-testing, review, and documentation. These acknowledgements imply no endorsement or official support.
+A1 results do not establish Medion support. Default authentication is disabled;
+the downstream Arch package explicitly opts into experimental personal
+authentication. Keep a working password fallback and do not enable system-wide
+sudo/root biometrics. The host code is LGPL-2.1-or-later; external vendor firmware
+is not bundled or made open source by its extraction script.

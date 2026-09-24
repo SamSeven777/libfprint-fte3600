@@ -1,32 +1,54 @@
-# Security Policy
+# FTE3600 security and privacy policy
 
-## Authentication Policy
+## Experimental authentication
 
-Default builds expose image capture only. Opt-in host-side verification is enabled with
-`-Dfte3600_personal_auth=true`.
+With `-Ddrivers=fte3600` and the default
+`-Dfte3600_personal_auth=false`, the driver exposes capture but not host
+authentication. Personal authentication requires explicit opt-in.
 
-Host-side authentication (policy version 3) operates with geometric consensus gates
-(minimum 5 mutual matches and inliers, spatial variance constraints, and error residual bounds).
-In offline evaluation across 342,720 pairwise test comparisons, zero false accepts were observed
-under specific test conditions. However, multi-person, multi-session population FAR/FRR across
-the full 8-subtemplate pipeline has not been independently measured. Authentication is provided
-strictly for experimental personal use; always ensure a reliable root/password fallback is available.
+Historical offline comparisons do not establish population accuracy. The full
+eight-subtemplate decision, retries, capture/enrollment failures and multi-person,
+multi-session FAR/FRR have not been independently measured. This is not merely
+a missing laboratory certificate. A small synthetic rejection test is not a
+measured FAR. Keep a working password fallback; do not enable experimental
+biometrics for system-wide sudo, root, or high-assurance authentication.
 
-## Hardware Safety & Gating
+Persisted extractor/decision-policy versions must change when their semantics
+change. An incompatible template must be rejected and re-enrolled, not silently
+accepted under a different policy.
 
-The driver enforces a fail-closed hardware profile table during device probe. Reset and
-interrupt GPIO lines are claimed and operated only on verified platforms (One-Netbook A1 in main).
-Unknown hardware identities fail probe to protect unverified motherboards from incorrect GPIO assertions.
+## Hardware and external firmware
 
-Cold-boot recovery uploads only the size-pinned (10,396 bytes) and SHA256-verified firmware
-directly into volatile sensor SRAM. Persistent flash/OTP writes and unverified firmware updates
-are not implemented.
+Unknown DMI profiles are rejected; model-specific controller HID requirements
+must also be satisfied before GPIO configuration. A profile's existence is not
+hardware validation. A1 has maintainer-reported results; GPD profiles and the
+separate Medion implementation remain experimental. See [status](docs/fte3600/status.md).
 
-## Privacy & Data Handling
+The driver has no production force-probe or GPIO-offset override intended to
+bypass this selection. GPIO access still grants the process substantial
+privilege. The downstream systemd/SELinux examples permit a class of GPIO
+devices, not an isolation boundary around only fingerprint pins. Install a
+policy only after confirming the relevant denial; do not disable SELinux.
 
-- SPI transfer payloads containing raw biometric images or firmware are marked sensitive and redacted in debug logs.
-- The driver explicitly zeroes its primary owned capture and template buffers after processing, though transient heap copies or GLib/GBytes buffers during serialization are not cryptographically sanitized.
-- Enrolled templates are persisted by `libfprint` / `fprintd` in `/var/lib/fprint/`.
-- Please report security vulnerabilities via GitHub Private Vulnerability Reporting.
-- Public issue reports should include only sanitized diagnostics, hardware IDs, and error messages.
-  Never share raw biometric images, enrolled templates, or proprietary binaries.
+Implemented recovery targets volatile sensor RAM and validates the expected
+image length and SHA256. It does not implement persistent flash/OTP updates.
+The device executes external proprietary firmware: the host-code license and
+content hash neither establish its redistribution rights nor certify hardware
+compatibility.
+
+## Biometric data
+
+Sensitive SPI payloads are excluded from normal byte-dump logging. Major owned
+capture and template buffers are explicitly cleared on release. This does not
+guarantee erasure of temporary feature copies, worker stacks, GLib/GBytes
+serialization, allocator copies, dumps, swap, or framework-managed data.
+
+fprintd handles persistent templates; verify the actual permissions and retention
+policy on the target distribution. Do not assume that driver-side cleanup
+removes enrolled templates. Delete enrollment only deliberately, with a working
+password fallback.
+
+Report vulnerabilities privately through the repository's Security reporting
+channel when available. Public reports should contain only reviewed, sanitized
+hardware identifiers and errors, never fingerprint images, templates,
+descriptor dumps, process dumps, proprietary binaries or decompiler listings.

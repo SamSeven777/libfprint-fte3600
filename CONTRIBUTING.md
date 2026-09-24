@@ -15,7 +15,7 @@ All new matcher fixtures must be generated mathematical patterns. Never add a
 real fingerprint image, template, descriptor dump, or raw image-bearing SPI
 transaction to the repository.
 
-Keep runtime code clean-room and redistributable. Do not copy vendor source,
+Keep runtime code independently written and redistributable. Do not copy vendor source,
 decompiler output, descriptor tables, firmware, DLL/ELF files, or proprietary
 templates. Public papers and specifications may inform a new implementation
 when the source is cited and the code is independently written.
@@ -42,7 +42,19 @@ Wait for a maintainer to identify a narrower, redistributable diagnostic.
 
 ## Scope of pull requests
 
-Prefer separate commits for SPI infrastructure, hardware transport, clean-room
+Prefer separate commits for SPI infrastructure, hardware transport, independent
 matching/template changes, packaging, and documentation. Changes to a
 persisted template schema or authentication policy must increment the
 corresponding version and add golden-format tests.
+
+## Evidence and audit claims
+
+Record the source commit, build options and actual test logs. Distinguish mock
+tests, hardware observations, offline pair comparisons and full authentication
+attempts. Do not describe CI configuration as executed sanitizer evidence or
+a configured GPIO profile as verified hardware support.
+
+For authentication-policy changes, provide the data provenance, evaluation
+protocol, independent test split, counts, failure handling and eight-subtemplate
+decision rule. Synthetic tests are useful regressions, not population FAR/FRR.
+Do not add unsupported provenance, memory-erasure or production-safety claims.
