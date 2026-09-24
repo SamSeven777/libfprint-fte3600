@@ -1,0 +1,79 @@
+# Maintainer: FTE3600 Linux contributors
+
+pkgname=libfprint-fte3600-personal-git
+# makepkg replaces this bootstrap value with pkgver() from the committed HEAD.
+pkgver=1.94.100.r9
+pkgrel=1
+pkgdesc='libfprint with experimental FTE3600/FT9361 SPI support'
+arch=(x86_64)
+url='https://github.com/SamSeven777/libfprint-fte3600'
+license=(LGPL-2.1-or-later)
+groups=(fprint)
+depends=(libgcc glib2 glibc libgudev libgusb openssl pixman libgpiod)
+makedepends=(cairo git glib2-devel gobject-introspection meson ninja python)
+provides=("libfprint=$pkgver" 'libfprint-2.so=2-64')
+conflicts=(libfprint)
+install=fte3600.install
+
+# This developer PKGBUILD packages the committed checkout containing it. A
+# release tag can replace this local VCS source with a fixed GitHub archive.
+source=(
+  "libfprint::git+file://${startdir}/../.."
+  fte3600-gpio.conf
+  fte3600-spidev.conf
+)
+sha256sums=(
+  SKIP
+  'f0fce5dd6685227aa22c54e045fd5ba518631a9afc2c2467fbbbae765f43df26'
+  '4ba92238b116e3d9f931d0f8c56f8ed929f261ddaad97049bd79b4febd7e18a9'
+)
+
+# Upstream libfprint development snapshot from which the FTE3600 work starts.
+_fte_upstream_base=c4654fdc85c25afdd9115bec2f95a44145ae3b94
+
+pkgver() {
+  cd libfprint
+
+  local upstream_version revision short_commit
+  upstream_version=$(awk -F"'" \
+    '/^[[:space:]]*version:/ { print $2; exit }' meson.build)
+  revision=$(git rev-list --count "${_fte_upstream_base}..HEAD")
+  short_commit=$(git rev-parse --short=7 HEAD)
+
+  printf '%s.r%s.g%s' "$upstream_version" "$revision" "$short_commit"
+}
+
+build() {
+  local meson_args=(
+    --prefix=/usr
+    --libdir=lib
+    --buildtype=release
+    -Db_lto=true
+    -Dwerror=true
+    -Ddrivers=all,fte3600
+    -Dfte3600_personal_auth=true
+    -Dgtk-examples=false
+    -Ddoc=false
+    -Dinstalled-tests=false
+  )
+
+  meson setup "$srcdir/build" "$srcdir/libfprint" "${meson_args[@]}"
+  meson compile -C "$srcdir/build"
+}
+
+check() {
+  meson test -C "$srcdir/build" --print-errorlogs --no-rebuild \
+    fpi-spi-transfer fte3600-driver fte3600-lifecycle fte3600-brisk fte3600-template
+}
+
+package() {
+  DESTDIR="$pkgdir" meson install -C "$srcdir/build"
+
+  install -Dm644 "$srcdir/fte3600-gpio.conf" \
+    "$pkgdir/usr/lib/systemd/system/fprintd.service.d/10-fte3600-gpio.conf"
+  install -Dm644 "$srcdir/fte3600-spidev.conf" \
+    "$pkgdir/usr/lib/modprobe.d/fte3600-spidev.conf"
+
+  # Firmware is supplied separately by the device owner. Never silently
+  # bundle an ignored local blob into an otherwise reproducible package.
+}
