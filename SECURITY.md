@@ -1,57 +1,55 @@
-# Security & Privacy Policy
+# FTE3600 security and privacy policy
 
-This policy outlines the security architecture, hardware gating boundaries, cryptographic integrity guarantees, and vulnerability reporting procedures for `libfprint-fte3600`.
+## Experimental authentication
 
----
+With `-Ddrivers=fte3600` and the default
+`-Dfte3600_personal_auth=false`, the driver exposes capture but not host
+authentication. Personal authentication requires explicit opt-in.
 
-## 1. Authentication Security Model
+Historical offline comparisons do not establish population accuracy. The full
+eight-subtemplate decision, retries, capture/enrollment failures and multi-person,
+multi-session FAR/FRR have not been independently measured. This is not merely
+a missing laboratory certificate. A small synthetic rejection test is not a
+measured FAR. Keep a working password fallback; do not enable experimental
+biometrics for system-wide sudo, root, or high-assurance authentication.
 
-### Dual-Policy Build System
-- **Default Build (Capture-Only)**: Standard builds configure `-Dfte3600_personal_auth=false`. In this mode, the driver exposes raw image capture only and disables host-side biometric verification interfaces.
-- **Opt-in Authentication**: Host-side biometric verification requires explicitly setting `-Dfte3600_personal_auth=true`.
+Persisted extractor/decision-policy versions must change when their semantics
+change. An incompatible template must be rejected and re-enrolled, not silently
+accepted under a different policy.
 
-### Calibration Bounds (Policy Version 3)
-Authentication uses geometric consensus gating over BRISK descriptors and rigid/affine RANSAC:
-- Minimum of 5 mutual descriptor matches and 5 geometric inliers.
-- Strict inlier ratio requirement (`>= 0.20`).
-- Error residual bounds (`median_error < 1.25 px`, `rms_error < 1.40 px`).
-- Spatial span (`x_span >= 6.0 px`, `y_span >= 8.0 px`) and spatial cell diversity (`>= 2` cells).
+## Hardware and external firmware
 
-### Security Scope & Limitations
-In offline evaluation across **342,720 pairwise comparisons** (incorporating synthetic affine perturbations, noise models, and FVC2002 DB3_B datasets), zero false acceptances were observed under controlled test conditions.
-However, population-level FAR/FRR metrics across the full 8-subtemplate interactive pipeline have not been independently certified by a formal biometric laboratory. Biometric authentication is intended strictly for personal experiments (e.g. lock screens) and must always have a working root/password fallback. Do not use as the sole factor for mission-critical or multi-user enterprise systems.
+Unknown DMI profiles are rejected; model-specific controller HID requirements
+must also be satisfied before GPIO configuration. A profile's existence is not
+hardware validation. A1 has maintainer-reported results; GPD profiles and the
+separate Medion implementation remain experimental. See [status](docs/fte3600/status.md).
 
----
+The driver has no production force-probe or GPIO-offset override intended to
+bypass this selection. GPIO access still grants the process substantial
+privilege. The downstream systemd/SELinux examples permit a class of GPIO
+devices, not an isolation boundary around only fingerprint pins. Install a
+policy only after confirming the relevant denial; do not disable SELinux.
 
-## 2. Hardware Safety & Fail-Closed Gating
+Implemented recovery targets volatile sensor RAM and validates the expected
+image length and SHA256. It does not implement persistent flash/OTP updates.
+The device executes external proprietary firmware: the host-code license and
+content hash neither establish its redistribution rights nor certify hardware
+compatibility.
 
-### Fail-Closed DMI Gating
-Because the driver directly manipulates Linux kernel GPIO character devices (`/dev/gpiochip*`), asserting incorrect lines could damage motherboard circuitry or interfere with critical platform peripherals.
-The driver enforces strict fail-closed gating:
-- ACPI and DMI tables (`sys_vendor` and `product_name`) are checked before any GPIO or SPI handle is opened.
-- Only verified platforms (**One-Netbook A1** and **GPD Pocket 3** on `main` / `upstream-submission`) are allowed to proceed.
-- Unrecognized systems fail probe immediately with `-ENODEV`, preventing any line configuration.
+## Biometric data
 
-### Volatile SRAM Firmware Injection
-- The driver interacts with the sensor MCU strictly through volatile SRAM injection during cold boot.
-- The microcode payload is pinned to exactly `10,396` bytes and must match the known SHA256 checksum (`027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`).
-- The driver does not write to persistent flash, OTP (One-Time Programmable) memory, or perform permanent firmware reflashing.
+Sensitive SPI payloads are excluded from normal byte-dump logging. Major owned
+capture and template buffers are explicitly cleared on release. This does not
+guarantee erasure of temporary feature copies, worker stacks, GLib/GBytes
+serialization, allocator copies, dumps, swap, or framework-managed data.
 
----
+fprintd handles persistent templates; verify the actual permissions and retention
+policy on the target distribution. Do not assume that driver-side cleanup
+removes enrolled templates. Delete enrollment only deliberately, with a working
+password fallback.
 
-## 3. Privacy & Biometric Data Handling
-
-- **Log Sanitization**: Raw biometric image data and microcode transfer payloads are treated as sensitive. They are redacted and truncated in debug logs (`FP_SPI_SENSITIVE`).
-- **Buffer Sanitization**: Primary frame buffers and intermediate template structures allocated by the driver are explicitly zeroed upon deallocation.
-- **Template Storage**: Biometric templates are managed by `libfprint` and `fprintd`, serialized to root-owned storage at `/var/lib/fprint/` with restricted filesystem permissions (`0700`).
-
----
-
-## 4. Reporting Vulnerabilities
-
-If you discover a potential security vulnerability (e.g., memory corruption, buffer overflow, GPIO misdirection, or authentication bypass), please report it responsibly:
-
-- **Preferred Method**: Open a report using **GitHub Private Vulnerability Reporting** via the repository's "Security" tab.
-- **Diagnostics**: Please provide sanitized reproduction steps, distribution details, and kernel versions.
-- **Data Protection**: **Never attach raw biometric images, core dumps containing biometric state, or serialized user templates to bug reports or public discussion threads.**
+Report vulnerabilities privately through the repository's Security reporting
+channel when available. Public reports should contain only reviewed, sanitized
+hardware identifiers and errors, never fingerprint images, templates,
+descriptor dumps, process dumps, proprietary binaries or decompiler listings.
 

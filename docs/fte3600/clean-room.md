@@ -1,64 +1,58 @@
-# Clean-Room Implementation & Upstream Architectural Rationale
+# Implementation, provenance and architecture
 
-This document outlines the legal provenance, reverse-engineering methodology, and architectural rationale for the `fte3600` driver in `libfprint`. It is intended to accompany upstream code review and downstream security audits.
+The FTE3600 host driver and matcher are independently written
+LGPL-2.1-or-later code. Windows transport/binary analysis and A1 hardware
+experiments informed register framing and RAM firmware startup. The host code
+does not execute a vendor DLL/ELF, use a proprietary host matching library,
+or import the vendor's descriptor table or biometric template format.
 
----
+These statements describe the implementation boundary. They do not claim that
+protocol knowledge came solely from bus captures, provide a legal assessment,
+or establish a formally documented clean-room separation. Contributions must
+identify their sources and must not copy vendor code, decompiler listings,
+firmware, or private biometric material into the repository.
 
-## Clean-Room Provenance & Legal Basis
+## Why a host matcher
 
-The `fte3600` driver and its integrated host-side biometric matcher are an independent, clean-room implementation released under the **GNU Lesser General Public License version 2.1 or later (LGPL-2.1-or-later)**:
+The FT9361 provides small 64 × 80 images. The author reports that the existing
+NBIS path did not give usable matching in A1 experiments. No reproducible
+comparative dataset establishes a general minimum sensor size, average
+minutiae count, or numerical NBIS false-rejection rate here.
 
-- **Zero Proprietary Code Execution**: The driver executes entirely in native Linux user space (`libfprint` / `fprintd`). It does not run vendor binaries, execute Windows DLL/ELF binaries, or invoke proprietary dynamic libraries.
-- **Protocol Discovery**: Register framing, SPI command sequences, and the volatile SRAM firmware injection protocol were deduced solely via non-invasive bus transport analysis (USB/SPI capture of public Windows driver exchanges) and black-box hardware validation on physical devices.
-- **No Proprietary Formats**: The driver does not read, write, or convert vendor biometric templates or vendor descriptor formats. All feature extraction, spatial filtering, and template serialization are implemented from published mathematical algorithms.
-- **Excluded Vendor Artifacts**: The repository explicitly excludes proprietary Windows binaries, decompiler listings, and private fingerprint image/template databases.
+This driver consequently derives from `FpDevice` and implements host-side
+enrollment, verification and versioned templates itself; it is not a
+match-on-chip driver. The common `FpImageDevice`/NBIS route and this proposed
+alternative need upstream architecture review. The rationale does not establish
+population-level authentication accuracy.
 
----
+The BRISK-style implementation combines Gaussian/DoG features,
+orientation-normalized descriptors and geometric consensus. The sampling-pair
+seed is recorded in `fte3600-brisk.h`. References:
 
-## Architectural Rationale: Why `FpDevice` Instead of `FpImageDevice`?
+- Lowe, [SIFT](https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf), 2004.
+- Leutenegger et al., [BRISK](https://doi.org/10.1109/ICCV.2011.6126542), 2011.
+- Fischler and Bolles, [RANSAC](https://doi.org/10.1145/358669.358692), 1981.
 
-`libfprint` traditionally separates drivers into two primary classes:
-1. `FpImageDevice`: Designed for imaging sensors where raw frames are passed to libfprint's built-in NBIS (Bozorth3) minutiae matcher.
-2. `FpDevice`: Designed for "match-on-chip" smart sensors that perform biometric enrollment and verification in hardware firmware.
+## External device firmware
 
-The FocalTech FT9361 sensor is a **raw image sensor**, but the `fte3600` driver deliberately derives from `FpDevice`:
+Cold-boot recovery expects an external image at
+`/usr/lib/firmware/fte3600/ft9361.bin`, exactly 10,396 bytes, SHA256
+`027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`.
+The sensor executes that vendor firmware; saying that the Linux host uses no
+proprietary matching library does not make the device firmware open source.
 
-### 1. The Minutiae Starvation Problem on 64 × 80 Sensors
-The FT9361 has an exceptionally small active sensing area of **64 × 80 pixels** (approximately 3.2 mm × 4.0 mm). Standard forensic fingerprint algorithms like NBIS (NIST Biometric Image Software):
-- Require a typical contact area of at least 256 × 256 or 500 DPI over a large finger surface.
-- Rely on detecting a minimum of 12 to 20 reliable ridge minutiae (ridge endings and bifurcations).
-- On a 64 × 80 surface, NBIS detects an average of **fewer than 4 reliable minutiae**, leading to complete failure of the Bozorth3 matching pipeline (FRR near 100%).
+Size/hash checks establish that the input equals the expected image, not a
+right to redistribute it, a signature-verification claim, or compatibility
+with every device sharing the ACPI ID. The repository excludes firmware and
+vendor binaries. Acquisition/distribution terms must be checked separately.
+The implemented recovery targets volatile RAM, not persistent flash/OTP.
 
-### 2. Host-Side Geometric Consensus Matcher
-To make the FT9361 functional on Linux, the driver implements a custom host-side matcher based on dense scale-space keypoints and geometric consensus:
-- **Feature Extraction**: Gaussian/Difference-of-Gaussians (DoG) scale-space feature extraction capable of locating 20–40 stable keypoints even in small contact areas.
-- **Descriptors**: Orientation-normalized binary descriptors (BRISK) evaluated over deterministic concentric sampling patterns.
-- **Verification Consensus**: Rigid/affine RANSAC geometric consensus with strict spatial span, bounding box, and residual error bounds (Policy Version 3).
+## Privacy and validation limits
 
-Because `FpImageDevice` in `libfprint` does not support custom host matchers or versioned keypoint template serialization, deriving from `FpDevice` allows the driver to manage the full capture-to-match lifecycle directly, fulfilling libfprint's public D-Bus API without altering the core library matcher architecture.
-
----
-
-## Algorithmic Foundation & Literature References
-
-All biometric processing algorithms in `fte3600` are based on established, published academic literature:
-
-1. **Scale-Space Extrema Detection (DoG)**:
-   - Lowe, D. G. (2004). *Distinctive Image Features from Scale-Invariant Keypoints*. International Journal of Computer Vision, 60(2), 91–110. [DOI: 10.1023/B:VISI.0000029664.99615.94](https://doi.org/10.1023/B:VISI.0000029664.99615.94)
-2. **Binary Robust Invariant Scalable Keypoints (BRISK)**:
-   - Leutenegger, S., Chli, M., & Siegwart, R. Y. (2011). *BRISK: Binary Robust Invariant Scalable Keypoints*. IEEE International Conference on Computer Vision (ICCV), 2548–2555. [DOI: 10.1109/ICCV.2011.6126542](https://doi.org/10.1109/ICCV.2011.6126542)
-3. **Random Sample Consensus (RANSAC)**:
-   - Fischler, M. A., & Bolles, R. C. (1981). *Random Sample Consensus: A Paradigm for Model Fitting with Applications to Image Analysis and Automated Cartography*. Communications of the ACM, 24(6), 381–395. [DOI: 10.1145/358669.358692](https://doi.org/10.1145/358669.358692)
-
----
-
-## Firmware Distribution & Integrity Model
-
-- **Volatile SRAM Injection**: The FT9361 sensor lacks non-volatile flash memory for its MCU runtime code. When main power is removed (cold boot), the sensor reverts to a raw bootloader state (`00 00` idle code). The driver restores functionality by uploading a 10,396-byte runtime microcode block over SPI.
-- **Zero-Binary Repository Policy**: To respect third-party copyright, the microcode binary is not distributed in this Git repository.
-- **Automated Upstream Extraction**: The included script [`./scripts/install-firmware.sh`](../../scripts/install-firmware.sh) downloads the officially signed vendor driver CAB directly from the Microsoft Update Catalog, extracts the payload at a verified byte offset, validates its SHA256 checksum, and installs it to `/usr/lib/firmware/fte3600/ft9361.bin`.
-- **Integrity Guarantee**:
-  - Size: Exactly `10,396` bytes.
-  - Expected SHA256: `027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`.
-  - Cold-boot recovery checks size and hash before initiating any SPI transfer.
+Major owned capture/template buffers are explicitly cleared on release.
+That is not comprehensive erasure: temporary feature copies, worker stacks,
+GLib/GBytes serialization copies, process dumps and framework-managed storage
+may retain biometric-derived data. Do not publish real images, templates,
+descriptors or memory dumps. Existing upstream fixtures retain their own
+provenance. See [hardware and validation status](status.md) for evidence limits.
 
