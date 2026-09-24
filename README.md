@@ -46,7 +46,6 @@ version `1.94.100`). New FTE3600 code is licensed under `LGPL-2.1-or-later`; see
 The driver and BRISK matcher are clean-room implementations developed without vendor source code
 or proprietary libraries. No proprietary firmware binary is distributed in this repository.
 
-Thanks to libfprint/fprintd contributors and [Omarchy](https://omarchy.org/) for the
-integration environment. [OpenAI Codex](https://openai.com/codex/) and
+Thanks to upstream libfprint/fprintd contributors. [OpenAI Codex](https://openai.com/codex/) and
 [Google Antigravity](https://deepmind.google/) substantially assisted implementation,
 testing, review, and documentation. These acknowledgements imply no endorsement or official support.

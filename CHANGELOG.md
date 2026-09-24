@@ -27,7 +27,7 @@ libfprint driver.
   IRQ-driven 64 x 80 capture;
 - eight-stage enrollment, versioned template persistence, genuine verification,
   and local impostor smoke testing;
-- `fprintd` verification and Omarchy lock-screen unlock with a password fallback;
+- `fprintd` verification and desktop lock-screen unlock with a password fallback;
 - both authentication-policy build configurations on Fedora 43 and Ubuntu 26.04
   CI, plus local Arch package and sanitizer testing.
 
