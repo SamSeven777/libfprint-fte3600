@@ -145,12 +145,13 @@ drivers_info = {
     'fpcmoc': {},
     'realtek': {},
     'focaltech_moc': {},
+    'focaltech0752': { 'helper': ['fte_matcher'] },
     'mafpmoc': {},
     'secugen': {},
 
     # SPI drivers (fte3600 is optional/experimental)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
-    'fte3600': { 'spi': true, 'helper': ['udev', 'gpiod'], 'optional': true },
+    'fte3600': { 'spi': true, 'helper': ['udev', 'gpiod', 'fte_matcher'], 'optional': true },
 
     # Virtual drivers (test-only, optional)
     'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },

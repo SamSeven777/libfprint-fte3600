@@ -414,6 +414,25 @@ if 'fte3600' in drivers
 
 endif
 
+if 'focaltech0752' in drivers
+    focaltech0752_test = executable('test-focaltech0752',
+        sources: [
+            'test-focaltech0752.c',
+            '../libfprint/drivers/focaltech0752-img.c',
+            '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-template.c',
+        ],
+        dependencies: [glib_dep, mathlib_dep],
+        c_args: common_cflags + ['-DFTE3600_ENABLE_PERSONAL_AUTH=1'],
+        install: false,
+    )
+    test('focaltech0752',
+        focaltech0752_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
+
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)
         missing_deps = false

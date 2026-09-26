@@ -122,11 +122,7 @@ driver_sources = {
     'elan' : files('drivers/elan.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
-    'fte3600' : files(
-        'drivers/fte3600.c',
-        'drivers/fte3600-brisk.c',
-        'drivers/fte3600-template.c',
-    ),
+    'fte3600' : files('drivers/fte3600.c'),
     'nb1010' : files('drivers/nb1010.c'),
     'virtual_image' : files('drivers/virtual-image.c'),
     'virtual_device' : files('drivers/virtual-device.c'),
@@ -142,6 +138,10 @@ driver_sources = {
     'fpcmoc' : files('drivers/fpcmoc/fpc.c'),
     'realtek' : files('drivers/realtek/realtek.c'),
     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
+    'focaltech0752' : files(
+        'drivers/focaltech0752.c',
+        'drivers/focaltech0752-img.c',
+    ),
     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
     'secugen' : files('drivers/secugen.c'),
 }
@@ -155,6 +155,7 @@ helper_sources = {
     'udev': files(),
     'gpiod': files(),
     'virtual': files('drivers/virtual-device-listener.c'),
+    'fte_matcher': files('drivers/fte3600-brisk.c', 'drivers/fte3600-template.c'),
 }
 
 drivers_sources = []
@@ -162,8 +163,17 @@ drivers_cflags = []
 foreach driver: drivers
     drivers_sources += driver_sources[driver]
 endforeach
+if 'focaltech0752' in drivers
+    if '-DFTE3600_ENABLE_PERSONAL_AUTH=1' not in drivers_cflags
+        drivers_cflags += '-DFTE3600_ENABLE_PERSONAL_AUTH=1'
+    endif
+endif
 if 'fte3600' in drivers
-    drivers_cflags += fte3600_personal_auth_cflags
+    foreach cflag : fte3600_personal_auth_cflags
+        if cflag not in drivers_cflags
+            drivers_cflags += cflag
+        endif
+    endforeach
 endif
 foreach helper : driver_helpers
     drivers_sources += helper_sources[helper]

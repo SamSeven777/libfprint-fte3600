@@ -202,6 +202,11 @@ usb:v2808p6553*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver focaltech0752 (GPD Pocket 4)
+usb:v2808p0752*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver fpcmoc
 usb:v10A5pFFE0*
 usb:v10A5pA305*
