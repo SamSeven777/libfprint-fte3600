@@ -1922,8 +1922,12 @@ fte3600_enroll_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
+  guint8 normalized_image[sizeof (job->image)];
+  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
+                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
+  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -2229,8 +2233,12 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
+  guint8 normalized_image[sizeof (job->image)];
+  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
+                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
+    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
+  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -2278,6 +2286,33 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
+  /* 1. If authentication was accepted, report SUCCESS immediately */
+  if (job->compare_status == FTE3600_TEMPLATE_OK && job->comparison.authentication_accepted)
+    {
+      fp_dbg ("Personal verification compared %u subtemplates; strict passes %u -> MATCH",
+              job->comparison.n_compared, job->comparison.diagnostic_passes);
+      fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
+      fpi_device_verify_complete (dev, NULL);
+      return;
+    }
+
+  /* 2. If comparison executed cleanly but was rejected, report NO_MATCH */
+  if (job->compare_status == FTE3600_TEMPLATE_OK)
+    {
+      fp_dbg ("Personal verification compared %u subtemplates; strict passes %u -> NO_MATCH",
+              job->comparison.n_compared, job->comparison.diagnostic_passes);
+      fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+      fpi_device_verify_complete (dev, NULL);
+      return;
+    }
+
+  /* 3. Comparison could not be cleanly executed: check template status or extractor status */
+  if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
+    {
+      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
+      return;
+    }
+
   switch (job->extract_status)
     {
     case FTE3600_BRISK_LOW_CONTRAST:
@@ -2300,27 +2335,12 @@ fte3600_verify_complete (GObject      *source_object,
       break;
     }
 
-  if (job->compare_status ==
-      FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
-    {
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
-      return;
-    }
   if (job->compare_status != FTE3600_TEMPLATE_OK)
     {
       fte3600_complete_action_error (
         self, fte3600_verify_template_error (job->compare_status));
       return;
     }
-
-  fp_dbg ("Personal verification compared %u subtemplates; strict passes %u",
-          job->comparison.n_compared, job->comparison.diagnostic_passes);
-  fpi_device_verify_report (
-    dev,
-    job->comparison.authentication_accepted ? FPI_MATCH_SUCCESS :
-    FPI_MATCH_FAIL,
-    NULL, NULL);
-  fpi_device_verify_complete (dev, NULL);
 }
 
 static void

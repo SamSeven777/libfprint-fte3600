@@ -181,4 +181,14 @@ gboolean fpi_fte3600_brisk_result_meets_diagnostic_policy (const Fte3600BriskMat
  * policy version 2 without claiming population calibration. */
 gboolean fpi_fte3600_brisk_result_meets_authentication_policy (const Fte3600BriskMatchResult *result);
 
+/*
+ * Zero-mean Integral Image Local Contrast Normalization (LCN) using a 13x13 window
+ * (~1.5 ridge wavelengths at 508 DPI) with noise-floor regularization.
+ * Enhances ridge-valley contrast on dry/low-contrast captures while suppressing empty sensor noise.
+ */
+void fpi_fte3600_normalize_image_contrast (const guint8 *src,
+                                           guint8       *dst,
+                                           guint         width,
+                                           guint         height);
+
 G_END_DECLS

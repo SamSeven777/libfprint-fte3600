@@ -761,12 +761,49 @@ test_malformed_sets_rejected (void)
   assert_authentication_policy_result (&result);
 }
 
+static void
+test_image_contrast_normalization (void)
+{
+  guint8 src[FTE3600_BRISK_IMAGE_SIZE];
+  guint8 dst[FTE3600_BRISK_IMAGE_SIZE];
+  guint8 flat[FTE3600_BRISK_IMAGE_SIZE];
+
+  /* 1. NULL safety */
+  fpi_fte3600_normalize_image_contrast (NULL, dst, FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
+  fpi_fte3600_normalize_image_contrast (src, NULL, FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
+  fpi_fte3600_normalize_image_contrast (src, dst, 0, FTE3600_BRISK_HEIGHT);
+  fpi_fte3600_normalize_image_contrast (src, dst, FTE3600_BRISK_WIDTH, 0);
+
+  /* 2. Flat / noise-floor input should map uniformly to neutral 128 */
+  memset (flat, 100, sizeof (flat));
+  memset (dst, 0, sizeof (dst));
+  fpi_fte3600_normalize_image_contrast (flat, dst, FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
+  for (guint i = 0; i < sizeof (dst); i++)
+    g_assert_cmpuint (dst[i], ==, 128);
+
+  /* 3. Visual pattern normalization: output values stay bounded and well-distributed */
+  make_visual_pattern (src);
+  memset (dst, 0, sizeof (dst));
+  fpi_fte3600_normalize_image_contrast (src, dst, FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
+
+  guint min_val = 255, max_val = 0;
+  for (guint i = 0; i < sizeof (dst); i++)
+    {
+      if (dst[i] < min_val) min_val = dst[i];
+      if (dst[i] > max_val) max_val = dst[i];
+    }
+  g_assert_cmpuint (min_val, <, 110);
+  g_assert_cmpuint (max_val, >, 145);
+}
+
 int
 main (int   argc,
       char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
 
+  g_test_add_func ("/fte3600-brisk/contrast-normalization",
+                   test_image_contrast_normalization);
   g_test_add_func ("/fte3600-brisk/pattern-and-pairs", test_pattern_and_pairs);
   g_test_add_func ("/fte3600-brisk/descriptor-deterministic",
                    test_descriptor_deterministic);
