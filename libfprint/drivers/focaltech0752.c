@@ -19,6 +19,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define FOCALTECH_VENDOR_ID   0x2808
+#define FOCALTECH_PRODUCT_ID  0x0752
+
 #define EP_IN   0x81
 #define EP_OUT  0x03
 
@@ -210,7 +213,7 @@ capture_read_cb (FpiUsbTransfer *transfer,
           fp_info ("Verify result: %s (inliers: %u, median_err: %.2f)",
                    match ? "MATCH" : "NO_MATCH",
                    comp_res.best.inliers,
-                   comp_res.best.median_residual);
+                   comp_res.best.median_error);
 
           fpi_device_verify_report (dev,
                                     match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
@@ -540,7 +543,14 @@ dev_cancel (FpDevice *dev)
       g_steal_pointer (&error);
       break;
 
-    default:
+    case FPI_DEVICE_ACTION_NONE:
+    case FPI_DEVICE_ACTION_PROBE:
+    case FPI_DEVICE_ACTION_OPEN:
+    case FPI_DEVICE_ACTION_CLOSE:
+    case FPI_DEVICE_ACTION_CAPTURE:
+    case FPI_DEVICE_ACTION_LIST:
+    case FPI_DEVICE_ACTION_DELETE:
+    case FPI_DEVICE_ACTION_CLEAR_STORAGE:
       break;
     }
 }
