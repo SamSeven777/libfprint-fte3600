@@ -999,7 +999,15 @@ clear_device_cancel_action (FpDevice *device)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
-  g_clear_pointer (&priv->current_idle_cancel_source, g_source_destroy);
+  /* Stop forwarding external cancellation, then wait for any internal cancel
+   * handler to finish publishing/attaching its source. Clearing the source
+   * first could destroy it before attach, or miss a source published later. */
+  if (priv->current_task_cancellable_id)
+    {
+      g_cancellable_disconnect (g_task_get_cancellable (priv->current_task),
+                                priv->current_task_cancellable_id);
+      priv->current_task_cancellable_id = 0;
+    }
 
   if (priv->current_cancellable_id)
     {
@@ -1008,12 +1016,7 @@ clear_device_cancel_action (FpDevice *device)
       priv->current_cancellable_id = 0;
     }
 
-  if (priv->current_task_cancellable_id)
-    {
-      g_cancellable_disconnect (g_task_get_cancellable (priv->current_task),
-                                priv->current_task_cancellable_id);
-      priv->current_task_cancellable_id = 0;
-    }
+  g_clear_pointer (&priv->current_idle_cancel_source, g_source_destroy);
 }
 
 typedef enum _FpDeviceTaskReturnType {
