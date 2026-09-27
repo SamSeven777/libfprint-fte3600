@@ -1770,3 +1770,74 @@ fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
     fpi_fte3600_brisk_result_meets_authentication_policy (result);
   return FTE3600_BRISK_OK;
 }
+
+void
+fpi_fte3600_normalize_image_contrast (const guint8 *src,
+                                      guint8       *dst,
+                                      guint         width,
+                                      guint         height)
+{
+  const guint stride = width + 1;
+  const gint r = 6; /* 13x13 local window (~1.5 ridge wavelengths at 508 DPI) */
+  g_autofree gint32 *sat1 = NULL;
+  g_autofree guint32 *sat2 = NULL;
+
+  if (src == NULL || dst == NULL || width == 0 || height == 0)
+    return;
+
+  sat1 = g_new0 (gint32, (height + 1) * stride);
+  sat2 = g_new0 (guint32, (height + 1) * stride);
+
+  for (guint y = 0; y < height; y++)
+    {
+      gint32 row_sum1 = 0;
+      guint32 row_sum2 = 0;
+      for (guint x = 0; x < width; x++)
+        {
+          gint32 val = (gint32) src[y * width + x] - 128;
+          row_sum1 += val;
+          row_sum2 += (guint32) (val * val);
+          sat1[(y + 1) * stride + (x + 1)] = sat1[y * stride + (x + 1)] + row_sum1;
+          sat2[(y + 1) * stride + (x + 1)] = sat2[y * stride + (x + 1)] + row_sum2;
+        }
+    }
+
+  for (guint y = 0; y < height; y++)
+    {
+      gint y0 = ((gint) y - r < 0) ? 0 : (gint) y - r;
+      gint y1 = ((gint) y + r >= (gint) height) ? (gint) height - 1 : (gint) y + r;
+      for (guint x = 0; x < width; x++)
+        {
+          gint x0 = ((gint) x - r < 0) ? 0 : (gint) x - r;
+          gint x1 = ((gint) x + r >= (gint) width) ? (gint) width - 1 : (gint) x + r;
+          gint area = (x1 - x0 + 1) * (y1 - y0 + 1);
+
+          gint32 sum1 = sat1[(y1 + 1) * stride + (x1 + 1)] -
+                        sat1[y0 * stride + (x1 + 1)] -
+                        sat1[(y1 + 1) * stride + x0] +
+                        sat1[y0 * stride + x0];
+          guint32 sum2 = sat2[(y1 + 1) * stride + (x1 + 1)] -
+                         sat2[y0 * stride + (x1 + 1)] -
+                         sat2[(y1 + 1) * stride + x0] +
+                         sat2[y0 * stride + x0];
+
+          gfloat mean = (gfloat) sum1 / (gfloat) area;
+          gfloat variance = ((gfloat) sum2 / (gfloat) area) - (mean * mean);
+          gfloat std_dev = variance > 0.0f ? sqrtf (variance) : 0.0f;
+
+          guint p_idx = y * width + x;
+          gint32 cur_val = (gint32) src[p_idx] - 128;
+
+          if (std_dev < 1.0f)
+            {
+              dst[p_idx] = 128;
+            }
+          else
+            {
+              /* Noise-floor regularized local contrast normalization */
+              gfloat norm_val = 128.0f + 36.0f * ((gfloat) cur_val - mean) / (std_dev + 4.0f);
+              dst[p_idx] = (guint8) CLAMP ((int) roundf (norm_val), 0, 255);
+            }
+        }
+    }
+}
