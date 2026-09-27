@@ -1561,8 +1561,8 @@ fpi_fte3600_brisk_result_meets_diagnostic_policy (const Fte3600BriskMatchResult 
          result->rms_error < 1.40 &&
          result->mean_hamming <= 60.0 &&
          result->occupied_quadrants >= 1 &&
-         result->occupied_cells >= 2 &&
-         result->x_span >= 6.0 && result->y_span >= 8.0 &&
+         result->occupied_cells >= 1 &&
+         result->x_span >= 4.0 && result->y_span >= 7.0 &&
          result->query_min_variance >= 3.0 &&
          result->reference_min_variance >= 3.0 &&
          result->query_anisotropy >= 0.03 &&
@@ -1617,7 +1617,7 @@ fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
   n_correspondences = collect_mutual_correspondences (query, reference,
                                                       correspondences);
   result->mutual_matches = n_correspondences;
-  if (n_correspondences < 5)
+  if (n_correspondences < FTE3600_BRISK_MIN_MUTUAL_MATCHES)
     return FTE3600_BRISK_NO_CONSENSUS;
 
   maximum_hypotheses = n_correspondences +
@@ -1663,7 +1663,7 @@ fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
           best_model = hypotheses[hypothesis];
         }
     }
-  if (best_inliers < 5)
+  if (best_inliers < FTE3600_BRISK_MIN_INLIERS)
     return FTE3600_BRISK_NO_CONSENSUS;
 
   for (guint iteration = 0; iteration < 2; iteration++)
