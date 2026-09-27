@@ -37,7 +37,7 @@ static MedionPower power_state;
 static volatile sig_atomic_t interrupted;
 static gboolean cleanup_failed;
 static uint32_t cur_speed_hz = 1000000;
-/* Only the no-reset observation temporarily changes shared SPI settings.
+/* Observation and controlled comparison restore shared SPI settings.
  * Keep the full mode word, including flags beyond the legacy 8-bit ioctl. */
 static struct
 {
@@ -304,6 +304,13 @@ spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
     .bits_per_word = 8,
   };
   int rc = ioctl (spi_fd, SPI_IOC_MESSAGE (1), &t);
+  /* Do not send the next command after a signal, even if this ioctl finished
+   * successfully or returned EINTR. atexit still restores SPI and PM settings. */
+  if (interrupted)
+    {
+      fprintf (stderr, "Interrupted during SPI transfer (signal %d).\n", interrupted);
+      exit (128 + interrupted);
+    }
   if (rc != (int) len)
     {
       fprintf (stderr, "SPI transfer failed: len=%zu, rc=%d (%s)\n", len, rc,
@@ -499,6 +506,56 @@ observe_status_without_reset (void)
 }
 
 static void
+check_comparison_power (void)
+{
+  g_autoptr(GError) error = NULL;
+
+  if (interrupted)
+    exit (128 + interrupted);
+  if (!medion_power_verify_medion_active (&power_state, &error))
+    fail (error->message);
+}
+
+/* One shared PM/SPI session; the only additional commands between the two
+ * identical observations are the existing FT9361-path dual soft reset.
+ * Do not add GPIO, ROM queries, identity writes, retries or recovery here. */
+static int
+compare_status_with_soft_reset (void)
+{
+  printf ("Controlled FT9361-path comparison: no GPIO claim, hardware reset, "
+          "ROM query or firmware upload.\n");
+  printf ("This changes sensor state. Stopping fprintd now cannot undo "
+          "earlier sensor operations in this boot.\n");
+  check_comparison_power ();
+  gboolean before_idle = probe_status_and_id ("A: before soft reset", cur_speed_hz);
+
+  check_comparison_power ();
+  printf ("Only intervention: dual 0x70, 5 ms apart, then 2 ms settling.\n");
+  guint8 command = 0x70;
+  spi_xfer (&command, NULL, 1, cur_speed_hz);
+  g_usleep (5000);
+  spi_xfer (&command, NULL, 1, cur_speed_hz);
+  g_usleep (2000);
+
+  check_comparison_power ();
+  gboolean after_idle = probe_status_and_id ("B: after soft reset", cur_speed_hz);
+  check_comparison_power ();
+  printf ("Comparison: A_idle=%s B_idle=%s\n", before_idle ? "yes" : "no",
+          after_idle ? "yes" : "no");
+  if (before_idle && !after_idle)
+    printf ("Idle signature was present before soft reset, absent afterwards.\n");
+  else if (!before_idle && after_idle)
+    printf ("Idle signature appeared after soft reset.\n");
+  else if (after_idle)
+    printf ("Idle signature was present in both observations.\n");
+  else
+    printf ("Neither observation returned the expected idle signature.\n");
+  printf ("No automatic recovery attempted. These signatures do not establish "
+          "exact chip identity, electrical power or working enrollment.\n");
+  return after_idle ? 0 : 2;
+}
+
+static void
 transfer_firmware_and_start (const guint8 *firmware)
 {
   g_autofree guint8 *packet = g_malloc (FW_SIZE + 7);
@@ -542,6 +599,7 @@ main (int argc, char **argv)
   gboolean do_reset = FALSE;
   gboolean chip_id_only = FALSE;
   gboolean status_no_reset = FALSE;
+  gboolean compare_soft_reset = FALSE;
   int result = 0;
   const char *firmware_file = NULL;
   const char *requested_spi = NULL;
@@ -557,6 +615,10 @@ main (int argc, char **argv)
       else if (!strcmp (argv[i], "--status-no-reset"))
         {
           status_no_reset = TRUE;
+        }
+      else if (!strcmp (argv[i], "--compare-soft-reset"))
+        {
+          compare_soft_reset = TRUE;
         }
       else if (!strcmp (argv[i], "--reset"))
         {
@@ -584,6 +646,7 @@ main (int argc, char **argv)
           printf ("Usage: %s [OPTIONS]\n", argv[0]);
           printf ("Options:\n");
           printf ("  --status-no-reset            Status/geometry reads; no GPIO, reset or upload (default)\n");
+          printf ("  --compare-soft-reset         MUTATING: same reads before/after dual 70; no GPIO/ROM/upload\n");
           printf ("  --probe                      MUTATING: dual soft reset, then status/ROM queries\n");
           printf ("  --chip-id                    Explicit scratch-RAM chip-family probe; no GPIO/reset\n");
           printf ("  --test-vendor-recovery <fw>  Test the experimental Medion recovery sequence:\n");
@@ -600,15 +663,17 @@ main (int argc, char **argv)
           printf ("  --help                       Show usage without accessing hardware\n");
           printf ("Run with other fingerprint clients stopped; SPI queries are not passive.\n");
           printf ("Runtime PM overrides are temporary and restored on exit.\n");
-          printf ("No-reset observation also restores SPI settings; cleanup failures are errors.\n");
+          printf ("No-reset observation and soft-reset comparison restore SPI settings; cleanup failures are errors.\n");
           return !strcmp (argv[i], "--help") ? 0 : 1;
         }
     }
 
-  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset)
+  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset && !compare_soft_reset)
     status_no_reset = TRUE;
-  if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset != 1)
-    fail ("Choose exactly one of --status-no-reset, --probe, --reset, --chip-id, or --test-vendor-recovery");
+  if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset + compare_soft_reset != 1)
+    fail ("Choose exactly one of --status-no-reset, --compare-soft-reset, --probe, --reset, --chip-id, or --test-vendor-recovery");
+  if (compare_soft_reset && cur_speed_hz != 1000000)
+    fail ("--compare-soft-reset fixes the SPI speed at 1000000 Hz");
 
   setvbuf (stdout, NULL, _IOLBF, 0);
   signal (SIGINT, sig_handler);
@@ -616,7 +681,7 @@ main (int argc, char **argv)
   atexit (cleanup);
 
   printf ("=== Medion Akoya E3224 Hardware Diagnostic & Recovery Tool ===\n");
-  printf ("Diagnostic revision: 2026-09-24.3 (no-reset baseline with SPI settings restoration)\n");
+  printf ("Diagnostic revision: 2026-09-27.1 (controlled no-GPIO soft-reset comparison)\n");
   check_dmi ();
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
@@ -658,7 +723,7 @@ main (int argc, char **argv)
   g_autofree gchar *opened_sysfs = realpath (char_link, NULL);
   if (!S_ISCHR (spi_stat.st_mode) || g_strcmp0 (opened_sysfs, spi_sysfs) != 0)
     fail ("Opened SPI node does not match FTE3600 sysfs device");
-  if (status_no_reset)
+  if (status_no_reset || compare_soft_reset)
     {
       /* Read all originals before changing anything. No WR_MAX_SPEED_HZ is
        * issued: speed_hz is selected per transfer and does not change that
@@ -670,9 +735,9 @@ main (int argc, char **argv)
     }
   set_spi_mode (SPI_MODE_0);
   uint8_t bits = 8, lsb = 0;
-  saved_spi.bits_changed = status_no_reset;
+  saved_spi.bits_changed = status_no_reset || compare_soft_reset;
   require (ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) == 0, "set SPI 8-bit");
-  saved_spi.lsb_changed = status_no_reset;
+  saved_spi.lsb_changed = status_no_reset || compare_soft_reset;
   require (ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb) == 0, "set SPI MSB-first");
   uint8_t mode_read = 0, bits_read = 0, lsb_read = 0;
   require (ioctl (spi_fd, SPI_IOC_RD_MODE, &mode_read) == 0, "read SPI mode");
@@ -721,6 +786,12 @@ main (int argc, char **argv)
   if (status_no_reset)
     {
       result = observe_status_without_reset ();
+      goto done;
+    }
+
+  if (compare_soft_reset)
+    {
+      result = compare_status_with_soft_reset ();
       goto done;
     }
 
@@ -857,7 +928,8 @@ done:
     report_reset_value (1);
   medion_power_report (&power_state, "after SPI operations");
   cleanup ();
+  result = cleanup_failed ? 1 : (interrupted ? 128 + interrupted : result);
   printf ("\nDiagnostic exit=%d; cleanup (SPI settings / runtime PM)=%s\n", result,
           cleanup_failed ? "FAILED (see errors)" : "complete");
-  return cleanup_failed ? 1 : (interrupted ? 128 + interrupted : result);
+  return result;
 }

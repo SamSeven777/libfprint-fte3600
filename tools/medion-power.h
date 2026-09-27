@@ -130,6 +130,87 @@ medion_power_verify_control (MedionPowerNode *node, const gchar *expected, GErro
 }
 
 static inline gboolean
+medion_power_verify_medion_active (MedionPower *power, GError **error)
+{
+  MedionPowerNode *pci = NULL;
+  MedionPowerNode *controller = NULL;
+  g_autofree gchar *pci_prefix = NULL;
+  g_autofree gchar *state_path = NULL;
+  g_autofree gchar *state = NULL;
+
+  /* This stricter, read-only check is for the Medion comparison experiment.
+  * Inspect only ancestors collected from the caller's resolved SPI device.
+  * Other ancestors and the SPI leaf may legitimately report unsupported. */
+  for (guint i = 0; power->nodes && i < power->nodes->len; i++)
+    {
+      MedionPowerNode *node = g_ptr_array_index (power->nodes, i);
+      g_autofree gchar *name = g_path_get_basename (node->path);
+
+      if (g_str_equal (name, "0000:00:19.0"))
+        {
+          if (pci)
+            goto topology_error;
+          pci = node;
+        }
+    }
+  if (!pci)
+    goto topology_error;
+
+  pci_prefix = g_strconcat (pci->path, "/", NULL);
+  for (guint i = 0; i < power->nodes->len; i++)
+    {
+      MedionPowerNode *node = g_ptr_array_index (power->nodes, i);
+      g_autofree gchar *name = g_path_get_basename (node->path);
+
+      if (g_str_has_prefix (name, "pxa2xx-spi.") && name[strlen ("pxa2xx-spi.")] &&
+          g_str_has_prefix (node->path, pci_prefix))
+        {
+          if (controller)
+            goto topology_error;
+          controller = node;
+        }
+    }
+  if (!controller)
+    goto topology_error;
+
+  MedionPowerNode *required[] = { pci, controller };
+  for (guint i = 0; i < G_N_ELEMENTS (required); i++)
+    {
+      MedionPowerNode *node = required[i];
+      if (!medion_power_verify_control (node, "on", error))
+        return FALSE;
+      g_autofree gchar *status = medion_power_read (node->path, "runtime_status", error);
+      if (!status)
+        return FALSE;
+      if (!g_str_equal (status, "active"))
+        {
+          g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_IO,
+                       "%s/power/runtime_status is '%s'; Medion comparison requires 'active'",
+                       node->path, status);
+          return FALSE;
+        }
+    }
+
+  state_path = g_build_filename (pci->path, "power_state", NULL);
+  if (!g_file_get_contents (state_path, &state, NULL, error))
+    return FALSE;
+  g_strstrip (state);
+  if (!g_str_equal (state, "D0"))
+    {
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_IO,
+                   "%s is '%s'; Medion comparison requires 'D0'", state_path, state);
+      return FALSE;
+    }
+  return TRUE;
+
+topology_error:
+  g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+                       "Medion comparison requires exactly one 0000:00:19.0 PCI power node "
+                       "and one descendant pxa2xx-spi.* power node in the selected SPI hierarchy");
+  return FALSE;
+}
+
+static inline gboolean
 medion_power_restore (MedionPower *power, GError **error)
 {
   gboolean success = TRUE;

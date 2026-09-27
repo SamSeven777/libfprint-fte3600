@@ -16,6 +16,7 @@ jobs:
       - name: Install dependencies
         run: >-
           dnf install -y git gcc gcc-c++ meson ninja-build
+          bash coreutils grep sed util-linux-core
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
           libgpiod-devel systemd systemd-devel cairo-devel
       - uses: actions/checkout@v6
@@ -34,6 +35,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates git meson ninja-build pkg-config \
+            bash coreutils grep sed util-linux \
             libglib2.0-dev libgusb-dev libgudev-1.0-dev libgpiod-dev \
             libudev-dev systemd-dev libcairo2-dev
       - uses: actions/checkout@v6

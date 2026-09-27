@@ -14,6 +14,7 @@ typedef struct
 {
   gchar       *root;
   gchar       *parent;
+  gchar       *controller;
   gchar       *leaf;
   GPtrArray   *writes;
   MedionPower  power;
@@ -88,6 +89,7 @@ fixture_setup (Fixture *fixture, gconstpointer data)
   fixture->root = g_dir_make_tmp ("medion-power-test-XXXXXX", NULL);
   g_assert_nonnull (fixture->root);
   fixture->parent = g_build_filename (fixture->root, "pci0000:00", "0000:00:19.0", NULL);
+  fixture->controller = g_build_filename (fixture->parent, "pxa2xx-spi.12", NULL);
   fixture->leaf = g_build_filename (fixture->parent, "pxa2xx-spi.12", "spi_master", "spi1", "spi-FTE3600:00", NULL);
   const gchar *nodes[] = { fixture->parent, fixture->leaf };
   for (guint i = 0; i < G_N_ELEMENTS (nodes); i++)
@@ -109,7 +111,7 @@ fixture_teardown (Fixture *fixture, gconstpointer data)
   (void) data;
   g_assert_true (medion_power_restore (&fixture->power, NULL));
   medion_power_clear (&fixture->power);
-  const gchar *nodes[] = { fixture->parent, fixture->leaf };
+  const gchar *nodes[] = { fixture->parent, fixture->controller, fixture->leaf, fixture->root };
   const gchar *attributes[] = { "control", "runtime_status", "runtime_error" };
   for (guint i = 0; i < G_N_ELEMENTS (nodes); i++)
     {
@@ -119,8 +121,11 @@ fixture_teardown (Fixture *fixture, gconstpointer data)
           g_unlink (filename);
         }
       g_autofree gchar *directory = g_build_filename (nodes[i], "power", NULL);
-      g_assert_cmpint (g_rmdir (directory), ==, 0);
+      if (g_file_test (directory, G_FILE_TEST_IS_DIR))
+        g_assert_cmpint (g_rmdir (directory), ==, 0);
     }
+  g_autofree gchar *pci_state = g_build_filename (fixture->parent, "power_state", NULL);
+  g_unlink (pci_state);
   gchar *cursor = g_strdup (fixture->leaf);
   while (g_str_has_prefix (cursor, fixture->root))
     {
@@ -134,8 +139,127 @@ fixture_teardown (Fixture *fixture, gconstpointer data)
   g_free (cursor);
   g_ptr_array_unref (fixture->writes);
   g_free (fixture->parent);
+  g_free (fixture->controller);
   g_free (fixture->leaf);
   g_free (fixture->root);
+}
+
+static void
+fixture_setup_comparison (Fixture *fixture, gconstpointer data)
+{
+  fixture_setup (fixture, data);
+  const gchar *nodes[] = { fixture->root, fixture->controller };
+  for (guint i = 0; i < G_N_ELEMENTS (nodes); i++)
+    {
+      g_autofree gchar *directory = g_build_filename (nodes[i], "power", NULL);
+      g_assert_cmpint (g_mkdir_with_parents (directory, 0700), ==, 0);
+      set_attribute (nodes[i], "control", "auto\n");
+      set_attribute (nodes[i], "runtime_status", i == 0 ? "unsupported\n" : "suspended\n");
+    }
+  g_autofree gchar *pci_state = g_build_filename (fixture->parent, "power_state", NULL);
+  g_assert_true (g_file_set_contents (pci_state, "D0\n", -1, NULL));
+}
+
+typedef struct
+{
+  const gchar *name;
+  gboolean     controller;
+  const gchar *attribute;
+  const gchar *value;
+} ComparisonAttribute;
+
+static void
+test_comparison_attributes (Fixture *fixture, gconstpointer data)
+{
+  const ComparisonAttribute *test = data;
+
+  g_autoptr(GError) error = NULL;
+  g_assert_true (medion_power_prepare (&fixture->power, fixture->leaf, fixture->root, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (fixture->power.nodes->len, ==, 4);
+  guint writes_before = fixture->writes->len;
+  g_assert_true (medion_power_verify_medion_active (&fixture->power, &error));
+  g_assert_no_error (error);
+
+  if (test)
+    {
+      const gchar *node = test->controller ? fixture->controller : fixture->parent;
+      gboolean pci_state = g_str_equal (test->attribute, "power_state");
+      g_autofree gchar *filename = pci_state ?
+                                   g_build_filename (node, test->attribute, NULL) :
+                                   g_build_filename (node, "power", test->attribute, NULL);
+      g_autofree gchar *saved = NULL;
+      g_assert_true (g_file_get_contents (filename, &saved, NULL, NULL));
+      if (test->value)
+        g_assert_true (g_file_set_contents (filename, test->value, -1, NULL));
+      else
+        g_assert_cmpint (g_unlink (filename), ==, 0);
+      g_assert_false (medion_power_verify_medion_active (&fixture->power, &error));
+      g_assert_error (error, G_FILE_ERROR, (test->value ? G_FILE_ERROR_IO : G_FILE_ERROR_NOENT));
+      g_assert_nonnull (strstr (error->message, filename));
+      g_assert_true (g_file_set_contents (filename, saved, -1, NULL));
+      g_clear_error (&error);
+    }
+
+  /* Verification neither writes policies nor changes restoration bookkeeping. */
+  g_assert_cmpuint (fixture->writes->len, ==, writes_before);
+  g_assert_true (medion_power_verify_medion_active (&fixture->power, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (fixture->writes->len, ==, writes_before);
+  for (guint i = 0; i < fixture->power.nodes->len; i++)
+    {
+      MedionPowerNode *node = g_ptr_array_index (fixture->power.nodes, i);
+      g_assert_true (node->changed);
+      assert_policy (node->path, "on");
+    }
+}
+
+static void
+test_comparison_topology (Fixture *fixture, gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+
+  g_autoptr(GError) error = NULL;
+  g_assert_true (medion_power_prepare (&fixture->power, fixture->leaf, fixture->root, &error));
+  g_assert_no_error (error);
+  guint writes_before = fixture->writes->len;
+  MedionPower view = { .nodes = g_ptr_array_new () };
+  MedionPowerNode wrong = {0};
+  g_autofree gchar *wrong_path = NULL;
+  if (scenario == 2)
+    wrong_path = g_strconcat (fixture->parent, "0", NULL);
+  else if (scenario == 3)
+    wrong_path = g_build_filename (fixture->parent, "not-pxa2xx-spi.12", NULL);
+  else if (scenario == 4)
+    wrong_path = g_strconcat (fixture->parent, "0/pxa2xx-spi.12", NULL);
+  wrong.path = wrong_path;
+  for (guint i = 0; i < fixture->power.nodes->len; i++)
+    {
+      MedionPowerNode *node = g_ptr_array_index (fixture->power.nodes, i);
+      gboolean pci = g_str_equal (node->path, fixture->parent);
+      gboolean controller = g_str_equal (node->path, fixture->controller);
+      if ((scenario == 0 && pci) || (scenario == 1 && controller))
+        continue;
+      g_ptr_array_add (view.nodes,
+                       (scenario == 2 && pci) || ((scenario == 3 || scenario == 4) && controller) ?
+                       &wrong : node);
+      if ((scenario == 5 && pci) || (scenario == 6 && controller))
+        g_ptr_array_add (view.nodes, node);
+    }
+  g_assert_false (medion_power_verify_medion_active (&view, &error));
+  g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL);
+  g_assert_cmpuint (fixture->writes->len, ==, writes_before);
+  g_ptr_array_unref (view.nodes);
+}
+
+static void
+test_comparison_unprepared (void)
+{
+  MedionPower power = {0};
+
+  g_autoptr(GError) error = NULL;
+  g_assert_false (medion_power_verify_medion_active (&power, &error));
+  g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL);
 }
 
 static void
@@ -311,5 +435,39 @@ main (int argc, char **argv)
   g_test_add ("/medion-power/device-symlink", Fixture, GINT_TO_POINTER (FALSE), fixture_setup, test_symlink, fixture_teardown);
   g_test_add ("/medion-power/escape-symlink", Fixture, GINT_TO_POINTER (TRUE), fixture_setup, test_symlink, fixture_teardown);
   g_test_add ("/medion-power/runtime-error", Fixture, NULL, fixture_setup, test_runtime_error, fixture_teardown);
+  g_test_add ("/medion-power/comparison/active-read-only", Fixture, NULL, fixture_setup_comparison, test_comparison_attributes, fixture_teardown);
+  g_test_add_func ("/medion-power/comparison/unprepared", test_comparison_unprepared);
+  static const ComparisonAttribute attributes[] = {
+    { "pci-unsupported", FALSE, "runtime_status", "unsupported\n" },
+    { "controller-unsupported", TRUE, "runtime_status", "unsupported\n" },
+    { "pci-suspended", FALSE, "runtime_status", "suspended\n" },
+    { "controller-suspended", TRUE, "runtime_status", "suspended\n" },
+    { "pci-error", FALSE, "runtime_status", "error\n" },
+    { "controller-error", TRUE, "runtime_status", "error\n" },
+    { "pci-policy-changed", FALSE, "control", "auto\n" },
+    { "controller-policy-changed", TRUE, "control", "auto\n" },
+    { "pci-d3hot", FALSE, "power_state", "D3hot\n" },
+    { "pci-d3cold", FALSE, "power_state", "D3cold\n" },
+    { "pci-state-unsupported", FALSE, "power_state", "unsupported\n" },
+    { "pci-state-missing", FALSE, "power_state", NULL },
+    { "pci-status-missing", FALSE, "runtime_status", NULL },
+    { "controller-status-missing", TRUE, "runtime_status", NULL },
+    { "pci-control-missing", FALSE, "control", NULL },
+    { "controller-control-missing", TRUE, "control", NULL },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (attributes); i++)
+    {
+      g_autofree gchar *name = g_strconcat ("/medion-power/comparison/", attributes[i].name, NULL);
+      g_test_add (name, Fixture, &attributes[i], fixture_setup_comparison, test_comparison_attributes, fixture_teardown);
+    }
+  const gchar *topologies[] = {
+    "pci-missing", "controller-missing", "pci-name-mismatch", "controller-name-mismatch",
+    "descendant-prefix-boundary", "duplicate-pci", "duplicate-controller",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (topologies); i++)
+    {
+      g_autofree gchar *name = g_strconcat ("/medion-power/comparison/", topologies[i], NULL);
+      g_test_add (name, Fixture, GUINT_TO_POINTER (i), fixture_setup_comparison, test_comparison_topology, fixture_teardown);
+    }
   return g_test_run ();
 }

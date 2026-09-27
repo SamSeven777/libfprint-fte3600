@@ -404,6 +404,12 @@ if 'fte3600' in drivers
     )
     test('medion-diagnostic', medion_diagnostic_test, suite: ['unit-tests'])
 
+    test('medion-soft-reset-wrapper', find_program('bash'),
+        args: files('test-medion-soft-reset-wrapper.sh'),
+        suite: ['unit-tests'],
+        timeout: 60,
+    )
+
     fte3600_brisk_test = executable('test-fte3600-brisk',
         sources: [
             'test-fte3600-brisk.c',

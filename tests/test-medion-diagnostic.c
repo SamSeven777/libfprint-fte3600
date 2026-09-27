@@ -40,13 +40,26 @@ static GPtrArray *tx_frames;
 static guint32 expected_speed;
 static gboolean chip_probe_responses;
 static gboolean status_observation;
+static gboolean soft_reset_comparison;
 static guint16 mock_mcu_status;
+static guint16 mock_after_status;
 static guint8 mock_boot_edition;
 static guint16 mock_chip_id;
 static gboolean full_cli;
 static gboolean mock_power_active;
 static guint mock_config_writes;
 static guint mock_config_fail_at;
+static guint mock_config_reads;
+static guint mock_config_read_fail_at;
+static guint mock_transfer_fail_at;
+static guint mock_signal_at;
+static int mock_signal_number;
+static gboolean mock_signal_eintr;
+static guint mock_sleep_count;
+static guint mock_sleep_signal_at;
+static gint mock_expected_exit;
+static guint mock_power_checks;
+static guint mock_power_check_fail_at;
 static gboolean mock_restore_failure;
 static gboolean mock_assert_restored;
 static guint32 mock_spi_mode;
@@ -95,13 +108,17 @@ static gboolean mock_power_prepare (MedionPower *power,
                                     GError     **error);
 static gboolean mock_power_restore (MedionPower *power,
                                     GError     **error);
+static gboolean mock_power_verify_medion_active (MedionPower *power,
+                                                 GError     **error);
 static void mock_power_report (MedionPower *power,
                                const gchar *tag);
 static struct gpiod_chip *mock_gpio_open (const char *path);
 static int medion_diagnostic_main (int    argc,
                                    char **argv);
+static void mock_exit (int status) G_GNUC_NORETURN;
 
 #define main medion_diagnostic_main
+#define exit mock_exit
 #define ioctl mock_ioctl
 #define gpiod_line_request_set_value mock_gpio_set
 #define gpiod_line_request_get_value mock_gpio_get
@@ -121,9 +138,11 @@ static int medion_diagnostic_main (int    argc,
 #define realpath mock_realpath
 #define medion_power_prepare mock_power_prepare
 #define medion_power_restore mock_power_restore
+#define medion_power_verify_medion_active mock_power_verify_medion_active
 #define medion_power_report mock_power_report
 #include "../tools/test_medion_e3224.c"
 #undef main
+#undef exit
 #undef ioctl
 #undef gpiod_line_request_set_value
 #undef gpiod_line_request_get_value
@@ -143,6 +162,7 @@ static int medion_diagnostic_main (int    argc,
 #undef realpath
 #undef medion_power_prepare
 #undef medion_power_restore
+#undef medion_power_verify_medion_active
 #undef medion_power_report
 
 static void
@@ -160,6 +180,12 @@ reset_mocks (void)
   memset (&saved_spi, 0, sizeof (saved_spi));
   full_cli = mock_power_active = mock_restore_failure = mock_assert_restored = FALSE;
   mock_config_writes = mock_config_fail_at = mock_cli_expected_transfers = 0;
+  mock_config_reads = mock_config_read_fail_at = mock_transfer_fail_at = 0;
+  mock_signal_at = mock_power_checks = mock_power_check_fail_at = 0;
+  mock_signal_eintr = FALSE;
+  mock_signal_number = SIGTERM;
+  mock_sleep_count = mock_sleep_signal_at = 0;
+  mock_expected_exit = -1;
   mock_spi_mode = ORIGINAL_MODE;
   mock_spi_bits = ORIGINAL_BITS;
   mock_spi_lsb = ORIGINAL_LSB;
@@ -175,9 +201,22 @@ reset_mocks (void)
   expected_speed = 0;
   chip_probe_responses = FALSE;
   status_observation = FALSE;
+  soft_reset_comparison = FALSE;
+  mock_after_status = 0;
   mock_mcu_status = mock_boot_edition = mock_chip_id = 0;
   g_clear_pointer (&tx_frames, g_ptr_array_unref);
   tx_frames = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+}
+
+static void
+mock_exit (int status)
+{
+  if (mock_expected_exit >= 0)
+    {
+      g_assert_cmpint (status, ==, mock_expected_exit);
+      printf ("MOCK EXIT STATUS VERIFIED: %d\n", status);
+    }
+  exit (status);
 }
 
 static int
@@ -194,6 +233,16 @@ mock_ioctl (int fd, unsigned long request, ...)
       g_assert_cmpint (fd, ==, 43);
       /* A per-transfer speed never writes the shared max-speed default. */
       g_assert_cmpuint (request, !=, SPI_IOC_WR_MAX_SPEED_HZ);
+      if (request == SPI_IOC_RD_MODE32 || request == SPI_IOC_RD_MODE ||
+          request == SPI_IOC_RD_BITS_PER_WORD || request == SPI_IOC_RD_LSB_FIRST)
+        {
+          mock_config_reads++;
+          if (mock_config_read_fail_at == mock_config_reads)
+            {
+              errno = EIO;
+              return -1;
+            }
+        }
       switch (request)
         {
         case SPI_IOC_RD_MODE32: *(guint32 *) value = mock_spi_mode;
@@ -254,6 +303,9 @@ mock_ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (mock_spi_mode, ==, SPI_MODE_0);
       g_assert_cmpuint (mock_spi_bits, ==, 8);
       g_assert_cmpuint (mock_spi_lsb, ==, 0);
+      g_assert_true (mock_power_active);
+      g_assert_null (req_gpo1);
+      g_assert_cmpuint (gpio_count, ==, 0);
     }
   transfer_count++;
   g_assert_cmpuint (transfer->bits_per_word, ==, 8);
@@ -265,6 +317,27 @@ mock_ioctl (int fd, unsigned long request, ...)
   g_ptr_array_add (tx_frames, g_bytes_new ((const void *) (uintptr_t) transfer->tx_buf,
                                            transfer->len));
   g_string_append_printf (events, "spi:%02x/%u;", last_tx[0], transfer->len);
+  if (soft_reset_comparison)
+    {
+      g_assert_cmpuint (transfer_count, <=, 6);
+      g_assert_cmpuint (transfer->speed_hz, ==, 1000000);
+      g_assert_cmpuint (transfer->cs_change, ==, 0);
+      g_assert_cmpuint (transfer->delay_usecs, ==, 0);
+      if (transfer_count == 3 || transfer_count == 4)
+        {
+          g_assert_cmpuint (transfer->len, ==, 1);
+          g_assert_cmpuint (last_tx[0], ==, 0x70);
+          g_assert_cmpuint (transfer->rx_buf, ==, 0);
+        }
+      else
+        {
+          const guint8 expected[] = { 0x10, 0xef,
+                                      transfer_count == 1 || transfer_count == 5 ? 0x20 : 0x14,
+                                      0, 0, 0 };
+          g_assert_cmpmem (last_tx, transfer->len, expected, sizeof (expected));
+          g_assert_cmpuint (transfer->rx_buf, !=, 0);
+        }
+    }
   if (expected_firmware && transfer->len == FW_SIZE + 7)
     {
       const guint8 *packet = (const guint8 *) (uintptr_t) transfer->tx_buf;
@@ -275,12 +348,21 @@ mock_ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (transfer->rx_buf, ==, 0);
       firmware_packets++;
     }
-  if (transfer_result == MOCK_ERROR)
+  if (mock_signal_at == transfer_count)
+    {
+      sig_handler (mock_signal_number);
+      if (mock_signal_eintr)
+        {
+          errno = EINTR;
+          return -1;
+        }
+    }
+  if (transfer_result == MOCK_ERROR && (!mock_transfer_fail_at || mock_transfer_fail_at == transfer_count))
     {
       errno = EIO;
       return -1;
     }
-  if (transfer_result == MOCK_SHORT)
+  if (transfer_result == MOCK_SHORT && (!mock_transfer_fail_at || mock_transfer_fail_at == transfer_count))
     return transfer->len - 1;
   if (transfer->rx_buf)
     {
@@ -295,8 +377,9 @@ mock_ioctl (int fd, unsigned long request, ...)
           memset (rx, 0, transfer->len);
           if (last_tx[2] == 0x20)
             {
-              rx[4] = mock_mcu_status >> 8;
-              rx[5] = mock_mcu_status & 0xff;
+              guint16 status = soft_reset_comparison && transfer_count >= 5 ? mock_after_status : mock_mcu_status;
+              rx[4] = status >> 8;
+              rx[5] = status & 0xff;
             }
         }
       if (chip_probe_responses)
@@ -367,6 +450,9 @@ static void
 mock_sleep (gulong usec)
 {
   g_string_append_printf (events, "sleep:%lu;", usec);
+  mock_sleep_count++;
+  if (mock_sleep_signal_at == mock_sleep_count)
+    sig_handler (mock_signal_number);
 }
 
 static int
@@ -431,8 +517,16 @@ mock_close (int fd)
             {
               gsize size;
               const guint8 *frame = g_bytes_get_data (g_ptr_array_index (tx_frames, i), &size);
-              const guint8 expected[] = { 0x10, 0xef, i == 0 ? 0x20 : 0x14, 0, 0, 0 };
-              g_assert_cmpmem (frame, size, expected, sizeof (expected));
+              if (soft_reset_comparison && (i == 2 || i == 3))
+                {
+                  const guint8 expected[] = { 0x70 };
+                  g_assert_cmpmem (frame, size, expected, sizeof (expected));
+                }
+              else
+                {
+                  const guint8 expected[] = { 0x10, 0xef, i == 0 || i == 4 ? 0x20 : 0x14, 0, 0, 0 };
+                  g_assert_cmpmem (frame, size, expected, sizeof (expected));
+                }
             }
           puts (mock_restore_failure ? "MOCK REMAINING SPI RESTORES VERIFIED" :
                 "MOCK SPI RESTORE VERIFIED");
@@ -540,6 +634,20 @@ mock_power_prepare (MedionPower *power, const gchar *device_path,
   g_assert_cmpstr (device_path, ==, MOCK_SPI_SYSFS);
   g_assert_cmpstr (root, ==, "/sys/devices");
   mock_power_active = TRUE;
+  return TRUE;
+}
+
+static gboolean
+mock_power_verify_medion_active (MedionPower *power, GError **error)
+{
+  g_assert_true (power == &power_state);
+  g_assert_true (mock_power_active);
+  mock_power_checks++;
+  if (mock_power_check_fail_at == mock_power_checks)
+    {
+      g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_IO, "comparison controller no longer active");
+      return FALSE;
+    }
   return TRUE;
 }
 
@@ -853,6 +961,151 @@ test_status_cli (gconstpointer data)
 }
 
 static void
+test_comparison_cli (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      full_cli = status_observation = soft_reset_comparison = mock_assert_restored = TRUE;
+      mock_cli_expected_transfers = 6;
+      mock_mcu_status = scenario == 2 || scenario == 3 ? 0xa55a :
+                        scenario == 4 ? 0xffff : scenario == 5 ? 0x1234 : 0;
+      mock_after_status = scenario == 1 || scenario == 3 ? 0xa55a :
+                          scenario == 4 ? 0xffff : scenario == 5 ? 0x5678 : 0;
+      if (scenario >= 10 && scenario <= 25)
+        {
+          transfer_result = scenario < 20 ? MOCK_ERROR : MOCK_SHORT;
+          mock_transfer_fail_at = scenario % 10 + 1;
+          mock_cli_expected_transfers = mock_transfer_fail_at;
+        }
+      if (scenario >= 30 && scenario <= 45)
+        {
+          mock_signal_at = scenario % 10 + 1;
+          mock_signal_eintr = scenario < 40;
+          mock_signal_number = scenario < 40 ? SIGTERM : SIGINT;
+          mock_expected_exit = 128 + mock_signal_number;
+          mock_cli_expected_transfers = mock_signal_at;
+        }
+      if (scenario >= 50 && scenario <= 55)
+        {
+          mock_config_read_fail_at = scenario - 49;
+          mock_cli_expected_transfers = 0;
+        }
+      if (scenario >= 60 && scenario <= 62)
+        {
+          mock_config_fail_at = scenario - 59;
+          mock_cli_expected_transfers = 0;
+        }
+      if (scenario >= 70 && scenario <= 73)
+        {
+          mock_power_check_fail_at = scenario - 69;
+          mock_cli_expected_transfers = (scenario - 70) * 2;
+        }
+      mock_restore_failure = scenario == 80;
+      if (scenario >= 90 && scenario <= 93)
+        {
+          mock_sleep_signal_at = scenario % 2 + 1;
+          mock_signal_number = scenario < 92 ? SIGTERM : SIGINT;
+          mock_expected_exit = 128 + mock_signal_number;
+          mock_cli_expected_transfers = mock_sleep_signal_at + 2;
+        }
+      gchar *argv[] = { (gchar *) "diagnostic", (gchar *) "--compare-soft-reset", NULL };
+      int result = medion_diagnostic_main (2, argv);
+      g_assert_cmpint (result, ==, scenario == 80 ? 1 :
+                       mock_after_status == 0xa55a ? 0 : 2);
+      g_assert_cmpuint (mock_power_checks, ==, 4);
+      g_assert_cmpstr (events->str, ==,
+                       "spi:10/6;spi:10/6;spi:70/1;sleep:5000;spi:70/1;sleep:2000;spi:10/6;spi:10/6;");
+      exit (result);
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  if (scenario == 1 || scenario == 3)
+    g_test_trap_assert_passed ();
+  else
+    g_test_trap_assert_failed ();
+  g_test_trap_assert_stdout (scenario == 80 ? "*MOCK REMAINING SPI RESTORES VERIFIED*" :
+                             "*MOCK SPI RESTORE VERIFIED*");
+  g_test_trap_assert_stdout ("*MOCK PM RESTORE VERIFIED*");
+  g_test_trap_assert_stdout_unmatched ("*Successfully claimed*");
+  g_test_trap_assert_stdout_unmatched ("*ROM edition response*");
+  if (scenario < 6)
+    {
+      g_test_trap_assert_stdout ("*A: before soft reset*B: after soft reset*Comparison: A_idle=*B_idle=*");
+      g_test_trap_assert_stdout (scenario == 1 || scenario == 3 ? "*Diagnostic exit=0;*" :
+                                 "*Diagnostic exit=2;*");
+      g_test_trap_assert_stderr ("");
+    }
+  else if (scenario == 80)
+    {
+      g_test_trap_assert_stdout ("*Diagnostic exit=1;*FAILED*");
+      g_test_trap_assert_stderr ("*ERROR: restoring SPI mode*");
+    }
+  else
+    {
+      g_test_trap_assert_stdout_unmatched ("*Comparison: A_idle=*");
+      if (scenario < 30)
+        {
+          g_test_trap_assert_stderr ("*SPI transfer failed:*");
+        }
+      else if (scenario < 50)
+        {
+          g_test_trap_assert_stderr ("*Interrupted during SPI transfer*");
+          g_test_trap_assert_stdout (scenario < 40 ? "*MOCK EXIT STATUS VERIFIED: 143*" :
+                                     "*MOCK EXIT STATUS VERIFIED: 130*");
+        }
+      else if (scenario < 70)
+        {
+          g_test_trap_assert_stderr ("*ERROR:*");
+        }
+      else if (scenario < 90)
+        {
+          g_test_trap_assert_stderr ("*comparison controller no longer active*");
+        }
+      else
+        {
+          g_test_trap_assert_stderr ("");
+          g_test_trap_assert_stdout (scenario < 92 ? "*MOCK EXIT STATUS VERIFIED: 143*" :
+                                     "*MOCK EXIT STATUS VERIFIED: 130*");
+        }
+    }
+}
+
+static void
+test_comparison_exclusive (gconstpointer data)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic", (gchar *) "--compare-soft-reset", (gchar *) data,
+                        (gchar *) "/test/invalid-firmware", NULL };
+      int argc = g_str_equal (data, "--test-vendor-recovery") ? 4 : 3;
+      exit (medion_diagnostic_main (argc, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*Choose exactly one*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
+test_comparison_speed (void)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic", (gchar *) "--compare-soft-reset",
+                        (gchar *) "--speed", (gchar *) "250000", NULL };
+      exit (medion_diagnostic_main (4, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*fixes the SPI speed at 1000000 Hz*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
 test_speed_invalid (gconstpointer data)
 {
   if (g_test_subprocess ())
@@ -966,6 +1219,39 @@ main (int argc, char **argv)
                                                 status_scenarios[i]);
       g_test_add_data_func (path, GUINT_TO_POINTER (i), test_status_cli);
     }
+  const gchar *comparison_results[] = { "neither-idle", "becomes-idle", "loses-idle",
+                                        "both-idle", "all-ff", "unknown-data" };
+  for (guint i = 0; i < G_N_ELEMENTS (comparison_results); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/comparison/%s", comparison_results[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_comparison_cli);
+    }
+  const struct { const gchar *name;
+                 guint        start;
+                 guint        count;
+  } comparison_failures[] = {
+    { "transfer-error", 10, 6 }, { "transfer-short", 20, 6 },
+    { "sigterm-eintr", 30, 6 }, { "sigint-completed-ioctl", 40, 6 },
+    { "config-read", 50, 6 }, { "config-write", 60, 3 },
+    { "controller-state", 70, 4 }, { "restore-error", 80, 1 },
+    { "signal-during-sleep", 90, 4 },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (comparison_failures); i++)
+    for (guint j = 0; j < comparison_failures[i].count; j++)
+      {
+        g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/comparison/%s/%u",
+                                                  comparison_failures[i].name, j + 1);
+        g_test_add_data_func (path, GUINT_TO_POINTER (comparison_failures[i].start + j), test_comparison_cli);
+      }
+  const gchar *comparison_conflicts[] = { "--status-no-reset", "--probe", "--reset",
+                                          "--chip-id", "--test-vendor-recovery" };
+  for (guint i = 0; i < G_N_ELEMENTS (comparison_conflicts); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/comparison/exclusive/%s",
+                                                comparison_conflicts[i] + 2);
+      g_test_add_data_func (path, comparison_conflicts[i], test_comparison_exclusive);
+    }
+  g_test_add_func ("/medion-diagnostic/comparison/fixed-speed", test_comparison_speed);
   int result = g_test_run ();
   if (events)
     g_string_free (events, TRUE);
