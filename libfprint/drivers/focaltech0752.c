@@ -135,13 +135,25 @@ capture_read_cb (FpiUsbTransfer *transfer,
             {
               fp_dbg ("Enrollment sample duplicate; prompt user to shift finger");
               fpi_device_enroll_progress (dev, self->enroll_stage, NULL,
-                                          fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+                                          fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
+                                                                    "Shift finger slightly"));
+              self->finger_on_sensor = FALSE;
+              start_finger_detection (self);
+            }
+          else if (tstatus == FTE3600_TEMPLATE_RETRY_INCONSISTENT)
+            {
+              fp_info ("Enrollment sample inconsistent (inliers: %u, median_err: %.2f, mutual: %u)",
+                       nearest_match.inliers, nearest_match.median_error, nearest_match.mutual_matches);
+              fpi_device_enroll_progress (dev, self->enroll_stage, NULL,
+                                          fpi_device_retry_new_msg (FP_DEVICE_RETRY_CENTER_FINGER,
+                                                                    "Keep finger centered and flat near previous position"));
               self->finger_on_sensor = FALSE;
               start_finger_detection (self);
             }
           else if (tstatus != FTE3600_TEMPLATE_OK && tstatus != FTE3600_TEMPLATE_NEED_MORE_SAMPLES)
             {
-              fp_dbg ("Enrollment template rejected feature set (%d)", tstatus);
+              fp_info ("Enrollment template rejected feature set (%d, inliers: %u)",
+                       tstatus, nearest_match.inliers);
               fpi_device_enroll_progress (dev, self->enroll_stage, NULL,
                                           fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
               self->finger_on_sensor = FALSE;
