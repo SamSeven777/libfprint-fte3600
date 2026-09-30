@@ -23,7 +23,7 @@ G_BEGIN_DECLS
 /* Versioned experimental schema. These gates have no population FAR/FRR
  * calibration. Authentication needs a separate opt-in in addition to the
  * BRISK personal-authentication build; diagnostic matching is always available. */
-#define FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION 2
+#define FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION 3
 #define FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION 2
 #ifndef FTE3600_ENABLE_IPA_AUTH
 #define FTE3600_ENABLE_IPA_AUTH 0
@@ -100,7 +100,7 @@ gboolean fpi_fte3600_ipa_result_meets_policy (const Fte3600IpaMatchResult *resul
 
 gboolean fpi_fte3600_ipa_validate_feature_set (const Fte3600IpaFeatureSet *features);
 
-/* Projection used by schemas v1/v2: normalized Sylvester Hadamard H32.
+/* Projection used by schemas v1/v2/v3: normalized Sylvester Hadamard H32.
  * H[row,column] = (-1)^popcount(row & column) / sqrt(32). */
 gfloat fpi_fte3600_ipa_projection_coefficient (guint row,
                                                guint column);

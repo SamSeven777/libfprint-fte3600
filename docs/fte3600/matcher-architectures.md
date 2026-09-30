@@ -45,7 +45,9 @@ BRISK-only Wire V1 remains version checked. The old experimental Wire V2 format
 is rejected; it did not carry a complete IPA compatibility contract.
 IPA-containing records use Wire V3 with a 48-byte header and independent IPA
 extractor, diagnostic, authentication and fusion policy versions. The current
-contrast-normalized/sub-pixel extractor schema and diagnostic policy are both
+contrast-normalized/sub-pixel extractor schema is version 3: duplicate refined
+detector locations are removed deterministically before applying the point
+budget. Schema 2 templates require re-enrollment. The diagnostic policy remains
 version 2. The IPA authentication policy is version 2 only with its explicit
 build opt-in, otherwise 0; fusion policy is version 1. The earlier experimental
 IPA schema is not interchangeable with these descriptors. Upgrade tests must check
@@ -109,4 +111,3 @@ rotation/accuracy guarantee. Earlier fixed zero-FAR and sub-2-ms summaries must
 not be used as evidence. Reproduce timing on a recorded CPU, compiler, commit
 and options; evaluate real biometric accuracy separately with a documented
 independent dataset and the complete deployment decision process.
-

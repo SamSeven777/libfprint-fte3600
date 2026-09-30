@@ -189,6 +189,37 @@ test_ipa_extract_deterministic (void)
 }
 
 static void
+test_ipa_extract_tied_peaks (void)
+{
+  const guint patterned_rows[] = { 20, FTE3600_IPA_HEIGHT };
+
+  for (guint sample = 0; sample < G_N_ELEMENTS (patterned_rows); sample++)
+    {
+      guint8 image[FTE3600_IPA_IMAGE_SIZE];
+      Fte3600IpaFeatureSet first, second;
+      Fte3600IpaMatchResult result;
+
+      make_fingerprint_pattern (image, 0);
+      /* Adjacent equal Harris peaks used to refine to duplicate locations.
+       * Cover both a periodic frame and a periodic patch in a varied frame. */
+      for (guint y = 0; y < patterned_rows[sample]; y++)
+        for (guint x = 0; x < FTE3600_IPA_WIDTH; x++)
+          image[y * FTE3600_IPA_WIDTH + x] = (guint8) floor (
+            128.0 + 70.0 * cos ((x - 31.5) * G_PI / 3.0) *
+            cos ((y - 39.5) * G_PI / 2.0) + 0.5);
+
+      g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &first),
+                       ==, FTE3600_IPA_OK);
+      g_assert_true (fpi_fte3600_ipa_validate_feature_set (&first));
+      g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &second),
+                       ==, FTE3600_IPA_OK);
+      g_assert_cmpmem (&first, sizeof (first), &second, sizeof (second));
+      g_assert_cmpint (fpi_fte3600_ipa_match (&first, &second, &result),
+                       ==, FTE3600_IPA_OK);
+    }
+}
+
+static void
 test_ipa_self_match (void)
 {
   guint8 image[FTE3600_IPA_IMAGE_SIZE];
@@ -469,6 +500,7 @@ main (int   argc,
 
   g_test_add_func ("/fte3600-ipa/parameter-validation", test_ipa_parameter_validation);
   g_test_add_func ("/fte3600-ipa/extract-deterministic", test_ipa_extract_deterministic);
+  g_test_add_func ("/fte3600-ipa/extract-tied-peaks", test_ipa_extract_tied_peaks);
   g_test_add_func ("/fte3600-ipa/self-match", test_ipa_self_match);
   g_test_add_func ("/fte3600-ipa/translation-invariance", test_ipa_translation_invariance);
   g_test_add_func ("/fte3600-ipa/rotation-invariance", test_ipa_rotation_invariance);

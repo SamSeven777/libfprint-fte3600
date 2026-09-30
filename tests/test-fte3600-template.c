@@ -784,6 +784,34 @@ make_fingerprint_pattern (guint8 *image)
 }
 
 static void
+test_dual_enrollment_tied_peaks (void)
+{
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600BriskFeatureSet brisk;
+  Fte3600IpaFeatureSet ipa;
+  guint physical_count;
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+
+  make_fingerprint_pattern (image);
+  for (guint y = 0; y < 20; y++)
+    for (guint x = 0; x < FTE3600_IPA_WIDTH; x++)
+      image[y * FTE3600_IPA_WIDTH + x] = (guint8) floor (
+        128.0 + 70.0 * cos ((x - 31.5) * G_PI / 3.0) *
+        cos ((y - 39.5) * G_PI / 2.0) + 0.5);
+
+  /* Exercise both production extractors on the same frame. Previously the
+   * successful IPA extraction caused INVALID_WIRE despite usable BRISK data. */
+  g_assert_cmpint (fpi_fte3600_brisk_extract (image, sizeof (image), &brisk),
+                   ==, FTE3600_BRISK_OK);
+  g_assert_true (fpi_fte3600_brisk_validate_feature_set (&brisk, &physical_count));
+  g_assert_cmpuint (physical_count, >=, FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa),
+                   ==, FTE3600_IPA_OK);
+  g_assert_cmpint (fpi_fte3600_template_add_dual_features (templ, &brisk, &ipa, NULL),
+                   ==, FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+}
+
+static void
 test_dual_engine_fusion (void)
 {
   g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
@@ -1047,6 +1075,8 @@ test_ipa_version_isolation (void)
   g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
   assert_header_mutation (wire, 8, FTE3600_TEMPLATE_WIRE_VERSION_V2,
                           FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
+  assert_header_mutation (wire, 40, 2,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
   assert_header_mutation (wire, 40, FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION + 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
   assert_header_mutation (wire, 40, 1, FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
@@ -1125,6 +1155,8 @@ main (int   argc,
                    test_rounding_mode_isolation);
   g_test_add_func ("/fte3600-template/dual-engine-fusion",
                    test_dual_engine_fusion);
+  g_test_add_func ("/fte3600-template/dual-enrollment-tied-peaks",
+                   test_dual_enrollment_tied_peaks);
   g_test_add_func ("/fte3600-template/mixed-ipa-roundtrip", test_mixed_ipa_roundtrip);
   g_test_add_func ("/fte3600-template/ipa-version-isolation", test_ipa_version_isolation);
   g_test_add_func ("/fte3600-template/mode-gates-and-query-fallback", test_mode_gates_and_query_fallback);

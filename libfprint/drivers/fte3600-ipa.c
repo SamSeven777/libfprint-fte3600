@@ -18,7 +18,8 @@
 #define IPA_INV_SQRT_D 0.1767767f  /* 1.0 / sqrt(32) */
 
 /* Schema v2 adds local contrast normalization and sub-pixel locations to
- * the v1 design. Both use a complete, reproducible orthonormal H32 transform for
+ * the v1 design; v3 deduplicates refined detector locations in raster order.
+ * All versions use a complete, reproducible orthonormal H32 transform for
  * Q, K, V and O. There are no learned or partially initialized coefficients.
  * This changes the experimental model; unversioned Wire V2 is not accepted. */
 gfloat
@@ -464,9 +465,25 @@ fpi_fte3600_ipa_extract (const guint8         *image,
                   delta_y = CLAMP (delta_y, -0.5f, 0.5f);
                 }
 
+              const gfloat refined_x = (gfloat) x + delta_x;
+              const gfloat refined_y = (gfloat) y + delta_y;
+              gboolean duplicate = FALSE;
+
+              /* Equal adjacent peaks can refine to their shared midpoint.
+               * Retain the first in raster order before applying the point
+               * budget, so a successful extraction has unique locations. */
+              for (int i = 0; i < n_cands; i++)
+                if (candidates[i].x == refined_x && candidates[i].y == refined_y)
+                  {
+                    duplicate = TRUE;
+                    break;
+                  }
+              if (duplicate)
+                continue;
+
               candidates[n_cands].score = val;
-              candidates[n_cands].x = (gfloat) x + delta_x;
-              candidates[n_cands].y = (gfloat) y + delta_y;
+              candidates[n_cands].x = refined_x;
+              candidates[n_cands].y = refined_y;
               candidates[n_cands].theta = theta;
               n_cands++;
             }
