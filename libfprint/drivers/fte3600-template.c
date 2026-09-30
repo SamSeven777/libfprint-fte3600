@@ -41,10 +41,20 @@ typedef struct
   gboolean changed;
 } TemplateRoundingGuard;
 
+typedef struct
+{
+  gdouble angle;
+  gdouble translate_x;
+  gdouble translate_y;
+} TemplatePose;
+
 struct _Fte3600Template
 {
-  guint                n_subtemplates;
-  CanonicalSubtemplate subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  guint                  n_subtemplates;
+  CanonicalSubtemplate   subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  gboolean               has_mosaic;
+  Fte3600BriskFeatureSet mosaic;
+  TemplatePose           poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
 };
 
 static void
@@ -444,6 +454,179 @@ validation_to_status (FeatureSetValidation validation)
     }
 }
 
+static guint
+template_hamming_distance (const guint8 *first,
+                           const guint8 *second,
+                           gsize         length)
+{
+  guint distance = 0;
+
+  for (gsize i = 0; i < length; i++)
+    distance += (guint) __builtin_popcount ((unsigned int) (first[i] ^ second[i]));
+  return distance;
+}
+
+static gdouble
+template_wrap_angle (gdouble angle)
+{
+  while (angle <= -G_PI)
+    angle += 2.0 * G_PI;
+  while (angle > G_PI)
+    angle -= 2.0 * G_PI;
+  return angle;
+}
+
+static void
+template_stitch_sample (Fte3600Template              *templ,
+                        const Fte3600BriskFeatureSet *sample,
+                        gdouble                       pose_angle,
+                        gdouble                       pose_tx,
+                        gdouble                       pose_ty)
+{
+  const gdouble cosine = cos (pose_angle);
+  const gdouble sine = sin (pose_angle);
+
+  for (guint i = 0; i < sample->n_features; i++)
+    {
+      const Fte3600BriskFeature *feat = &sample->features[i];
+      const gdouble xm = cosine * feat->x - sine * feat->y + pose_tx;
+      const gdouble ym = sine * feat->x + cosine * feat->y + pose_ty;
+      gdouble orient_m = template_wrap_angle (feat->orientation + pose_angle);
+      gboolean fused = FALSE;
+
+      if (orient_m > FTE3600_BRISK_ORIENTATION_LIMIT)
+        orient_m = -FTE3600_BRISK_ORIENTATION_LIMIT;
+
+      if (xm < 0.0 || xm >= FTE3600_BRISK_MOSAIC_WIDTH ||
+          ym < 0.0 || ym >= FTE3600_BRISK_MOSAIC_HEIGHT)
+        continue;
+
+      /* Check for duplicates in existing mosaic (within 2.5px & Hamming <= 40) */
+      for (guint j = 0; j < templ->mosaic.n_features; j++)
+        {
+          Fte3600BriskFeature *existing = &templ->mosaic.features[j];
+          const gdouble dx = xm - existing->x;
+          const gdouble dy = ym - existing->y;
+
+          if (dx * dx + dy * dy < 2.5 * 2.5)
+            {
+              const guint h = template_hamming_distance (feat->descriptor,
+                                                         existing->descriptor,
+                                                         FTE3600_BRISK_DESCRIPTOR_BYTES);
+              if (h <= 40)
+                {
+                  /* Fuse: average coordinates to refine subpixel location */
+                  existing->x = 0.5f * (existing->x + (gfloat) xm);
+                  existing->y = 0.5f * (existing->y + (gfloat) ym);
+                  fused = TRUE;
+                  break;
+                }
+            }
+        }
+
+      if (!fused && templ->mosaic.n_features < FTE3600_BRISK_MAX_FEATURES)
+        {
+          Fte3600BriskFeature *new_f = &templ->mosaic.features[templ->mosaic.n_features++];
+          new_f->x = (gfloat) xm;
+          new_f->y = (gfloat) ym;
+          new_f->orientation = (gfloat) orient_m;
+          memcpy (new_f->descriptor, feat->descriptor, sizeof (new_f->descriptor));
+        }
+    }
+}
+
+static void
+template_reconstruct_mosaic (Fte3600Template *templ)
+{
+  gboolean aligned[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { FALSE };
+
+  if (templ == NULL || templ->n_subtemplates == 0)
+    return;
+
+  memset (&templ->mosaic, 0, sizeof (templ->mosaic));
+  templ->mosaic.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  templ->has_mosaic = FALSE;
+
+  /* Sample 0 is anchor */
+  templ->poses[0].angle = 0.0;
+  templ->poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
+  templ->poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
+  template_stitch_sample (templ, &templ->subtemplates[0].features,
+                          templ->poses[0].angle,
+                          templ->poses[0].translate_x,
+                          templ->poses[0].translate_y);
+  aligned[0] = TRUE;
+
+  /* Align remaining subtemplates by matching against already aligned subtemplates */
+  for (guint step = 1; step < templ->n_subtemplates; step++)
+    {
+      guint best_unaligned = G_MAXUINT;
+      guint best_aligned = G_MAXUINT;
+      Fte3600BriskMatchResult best_match = { 0 };
+      gboolean found_match = FALSE;
+
+      for (guint u = 0; u < templ->n_subtemplates; u++)
+        {
+          if (aligned[u])
+            continue;
+
+          for (guint a = 0; a < templ->n_subtemplates; a++)
+            {
+              if (!aligned[a])
+                continue;
+
+              Fte3600BriskMatchResult match;
+              Fte3600BriskStatus status;
+
+              status = fpi_fte3600_brisk_match (&templ->subtemplates[u].features,
+                                                &templ->subtemplates[a].features,
+                                                &match);
+              if (status == FTE3600_BRISK_OK && match.inliers >= FTE3600_BRISK_MIN_INLIERS)
+                {
+                  if (!found_match || match_is_better (&match, &best_match))
+                    {
+                      best_match = match;
+                      best_unaligned = u;
+                      best_aligned = a;
+                      found_match = TRUE;
+                    }
+                }
+            }
+        }
+
+      if (!found_match)
+        break;
+
+      /* u is matched against a: pose_u = pose_a o pose_{u -> a} */
+      const TemplatePose *pose_a = &templ->poses[best_aligned];
+      const gdouble cos_a = cos (pose_a->angle);
+      const gdouble sin_a = sin (pose_a->angle);
+      TemplatePose *pose_u = &templ->poses[best_unaligned];
+
+      pose_u->angle = template_wrap_angle (pose_a->angle + best_match.angle);
+      pose_u->translate_x = cos_a * best_match.translate_x - sin_a * best_match.translate_y + pose_a->translate_x;
+      pose_u->translate_y = sin_a * best_match.translate_x + cos_a * best_match.translate_y + pose_a->translate_y;
+
+      template_stitch_sample (templ, &templ->subtemplates[best_unaligned].features,
+                              pose_u->angle, pose_u->translate_x, pose_u->translate_y);
+      aligned[best_unaligned] = TRUE;
+    }
+
+  qsort (templ->mosaic.features, templ->mosaic.n_features,
+         sizeof (templ->mosaic.features[0]), feature_compare);
+
+  if (templ->mosaic.n_features >= FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES)
+    templ->has_mosaic = TRUE;
+}
+
+const Fte3600BriskFeatureSet *
+fpi_fte3600_template_get_mosaic (const Fte3600Template *templ)
+{
+  if (templ == NULL || !templ->has_mosaic)
+    return NULL;
+  return &templ->mosaic;
+}
+
 Fte3600Template *
 fpi_fte3600_template_new (void)
 {
@@ -552,6 +735,7 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
   templ->subtemplates[templ->n_subtemplates++] = candidate;
   if (templ->n_subtemplates < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
     return FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+  template_reconstruct_mosaic (templ);
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -916,6 +1100,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
       FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
+  template_reconstruct_mosaic (decoded);
   *templ = g_steal_pointer (&decoded);
   return FTE3600_TEMPLATE_OK;
 }
@@ -1042,6 +1227,32 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
 
             default:
               g_assert_not_reached ();
+            }
+    }
+
+  if (have_brisk && templ->has_mosaic)
+    {
+      Fte3600BriskMatchResult mosaic_match;
+
+      if (fpi_fte3600_brisk_match_mosaic (&canonical_query.features,
+                                          &templ->mosaic,
+                                          &mosaic_match) == FTE3600_BRISK_OK)
+        {
+          if (mosaic_match.diagnostic_policy_passed)
+            result->diagnostic_passes++;
+          if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
+              mosaic_match.authentication_accepted)
+            {
+              result->brisk_accepted = TRUE;
+              if (mode == FTE3600_ENGINE_MODE_BRISK_ONLY ||
+                  mode == FTE3600_ENGINE_MODE_DUAL_FUSION)
+                result->authentication_accepted = TRUE;
+            }
+          if (!have_best || match_is_better (&mosaic_match, &result->best))
+            {
+              result->best = mosaic_match;
+              result->best_subtemplate = FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC;
+              have_best = TRUE;
             }
         }
     }

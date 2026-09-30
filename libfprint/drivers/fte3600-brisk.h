@@ -160,6 +160,11 @@ Fte3600BriskStatus fpi_fte3600_brisk_extract (const guint8           *image,
                                               gsize                   length,
                                               Fte3600BriskFeatureSet *features);
 
+#define FTE3600_BRISK_MOSAIC_WIDTH 192
+#define FTE3600_BRISK_MOSAIC_HEIGHT 240
+#define FTE3600_BRISK_MOSAIC_ANCHOR_X 64.0f
+#define FTE3600_BRISK_MOSAIC_ANCHOR_Y 80.0f
+
 /* Validate the extractor schema and every feature's finite coordinate and
  * orientation range.  If requested, @physical_count receives the number of
  * connected components formed by feature locations less than 1.5 pixels
@@ -168,9 +173,16 @@ Fte3600BriskStatus fpi_fte3600_brisk_extract (const guint8           *image,
 gboolean fpi_fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
                                                  guint                        *physical_count);
 
+gboolean fpi_fte3600_brisk_validate_mosaic_feature_set (const Fte3600BriskFeatureSet *features,
+                                                        guint                        *physical_count);
+
 Fte3600BriskStatus fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
                                             const Fte3600BriskFeatureSet *reference,
                                             Fte3600BriskMatchResult      *result);
+
+Fte3600BriskStatus fpi_fte3600_brisk_match_mosaic (const Fte3600BriskFeatureSet *query,
+                                                   const Fte3600BriskFeatureSet *mosaic,
+                                                   Fte3600BriskMatchResult      *result);
 
 /* Diagnostic policy only: useful for calibration experiments, never an
  * authentication decision. */

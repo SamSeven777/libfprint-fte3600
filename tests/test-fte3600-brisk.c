@@ -761,6 +761,40 @@ test_malformed_sets_rejected (void)
   assert_authentication_policy_result (&result);
 }
 
+static void
+test_mosaic_validation_and_matching (void)
+{
+  Fte3600BriskFeatureSet query;
+  Fte3600BriskFeatureSet mosaic_ref;
+  Fte3600BriskMatchResult result;
+  guint physical_count = 0;
+
+  initialize_rigid_fixture (&query, &mosaic_ref, FALSE);
+
+  /* Verify single-frame validation rejects coordinates > 64 or 80 */
+  mosaic_ref.features[0].x = 100.0f;
+  mosaic_ref.features[0].y = 120.0f;
+  g_assert_false (fpi_fte3600_brisk_validate_feature_set (&mosaic_ref, &physical_count));
+
+  /* Verify mosaic validation accepts coordinates on the 192x240 canvas */
+  g_assert_true (fpi_fte3600_brisk_validate_mosaic_feature_set (&mosaic_ref, &physical_count));
+
+  /* Test mosaic matching with an offset query */
+  for (guint i = 0; i < query.n_features; i++)
+    {
+      mosaic_ref.features[i] = query.features[i];
+      mosaic_ref.features[i].x += FTE3600_BRISK_MOSAIC_ANCHOR_X;
+      mosaic_ref.features[i].y += FTE3600_BRISK_MOSAIC_ANCHOR_Y;
+    }
+  mosaic_ref.n_features = query.n_features;
+
+  g_assert_cmpint (fpi_fte3600_brisk_match_mosaic (&query, &mosaic_ref, &result),
+                   ==, FTE3600_BRISK_OK);
+  g_assert_cmpuint (result.inliers, ==, query.n_features);
+  g_assert_cmpfloat (fabs (result.translate_x - FTE3600_BRISK_MOSAIC_ANCHOR_X), <, 0.1);
+  g_assert_cmpfloat (fabs (result.translate_y - FTE3600_BRISK_MOSAIC_ANCHOR_Y), <, 0.1);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -790,6 +824,8 @@ main (int   argc,
   g_test_add_func ("/fte3600-brisk/incoherent-geometry",
                    test_incoherent_geometry_rejected);
   g_test_add_func ("/fte3600-brisk/malformed-sets", test_malformed_sets_rejected);
+  g_test_add_func ("/fte3600-brisk/mosaic-validation-and-matching",
+                   test_mosaic_validation_and_matching);
 
   return g_test_run ();
 }

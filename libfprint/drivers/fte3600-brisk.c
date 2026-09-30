@@ -986,9 +986,11 @@ hamming_distance (const guint8 *first,
   return distance;
 }
 
-gboolean
-fpi_fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
-                                        guint                        *physical_count)
+static gboolean
+validate_feature_set_bounds (const Fte3600BriskFeatureSet *features,
+                             gfloat                       max_width,
+                             gfloat                       max_height,
+                             guint                       *physical_count)
 {
   g_auto(BriskRoundingGuard) rounding_guard = { 0 };
   gboolean assigned[FTE3600_BRISK_MAX_FEATURES] = { FALSE };
@@ -1010,8 +1012,8 @@ fpi_fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
 
       if (!isfinite (feature->x) || !isfinite (feature->y) ||
           !isfinite (feature->orientation) ||
-          feature->x < 0.0 || feature->x >= FTE3600_BRISK_WIDTH ||
-          feature->y < 0.0 || feature->y >= FTE3600_BRISK_HEIGHT ||
+          feature->x < 0.0 || feature->x >= max_width ||
+          feature->y < 0.0 || feature->y >= max_height ||
           feature->orientation < -FTE3600_BRISK_ORIENTATION_LIMIT ||
           feature->orientation > FTE3600_BRISK_ORIENTATION_LIMIT)
         return FALSE;
@@ -1055,6 +1057,22 @@ fpi_fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
   if (physical_count != NULL)
     *physical_count = n_physical;
   return TRUE;
+}
+
+gboolean
+fpi_fte3600_brisk_validate_feature_set (const Fte3600BriskFeatureSet *features,
+                                        guint                        *physical_count)
+{
+  return validate_feature_set_bounds (features, FTE3600_BRISK_WIDTH,
+                                      FTE3600_BRISK_HEIGHT, physical_count);
+}
+
+gboolean
+fpi_fte3600_brisk_validate_mosaic_feature_set (const Fte3600BriskFeatureSet *features,
+                                               guint                        *physical_count)
+{
+  return validate_feature_set_bounds (features, FTE3600_BRISK_MOSAIC_WIDTH,
+                                      FTE3600_BRISK_MOSAIC_HEIGHT, physical_count);
 }
 
 static guint
@@ -1584,10 +1602,11 @@ fpi_fte3600_brisk_result_meets_authentication_policy (const Fte3600BriskMatchRes
 #endif
 }
 
-Fte3600BriskStatus
-fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
-                         const Fte3600BriskFeatureSet *reference,
-                         Fte3600BriskMatchResult      *result)
+static Fte3600BriskStatus
+brisk_match_internal (const Fte3600BriskFeatureSet *query,
+                      const Fte3600BriskFeatureSet *reference,
+                      gboolean                      reference_is_mosaic,
+                      Fte3600BriskMatchResult      *result)
 {
   g_auto(BriskRoundingGuard) rounding_guard = { 0 };
   Fte3600BriskCorrespondence correspondences[FTE3600_BRISK_MAX_FEATURES];
@@ -1608,7 +1627,9 @@ fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
     return FTE3600_BRISK_INVALID_ARGUMENT;
   if (result == NULL ||
       !fpi_fte3600_brisk_validate_feature_set (query, NULL) ||
-      !fpi_fte3600_brisk_validate_feature_set (reference, NULL))
+      !(reference_is_mosaic ?
+        fpi_fte3600_brisk_validate_mosaic_feature_set (reference, NULL) :
+        fpi_fte3600_brisk_validate_feature_set (reference, NULL)))
     return FTE3600_BRISK_INVALID_ARGUMENT;
   if (query->n_features < FTE3600_BRISK_MIN_MUTUAL_MATCHES ||
       reference->n_features < FTE3600_BRISK_MIN_MUTUAL_MATCHES)
@@ -1769,4 +1790,20 @@ fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
   result->authentication_accepted =
     fpi_fte3600_brisk_result_meets_authentication_policy (result);
   return FTE3600_BRISK_OK;
+}
+
+Fte3600BriskStatus
+fpi_fte3600_brisk_match (const Fte3600BriskFeatureSet *query,
+                         const Fte3600BriskFeatureSet *reference,
+                         Fte3600BriskMatchResult      *result)
+{
+  return brisk_match_internal (query, reference, FALSE, result);
+}
+
+Fte3600BriskStatus
+fpi_fte3600_brisk_match_mosaic (const Fte3600BriskFeatureSet *query,
+                                const Fte3600BriskFeatureSet *mosaic,
+                                Fte3600BriskMatchResult      *result)
+{
+  return brisk_match_internal (query, mosaic, TRUE, result);
 }
