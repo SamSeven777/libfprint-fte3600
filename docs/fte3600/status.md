@@ -53,8 +53,11 @@ interchangeable with main's production-driver lifecycle tests.
 
 ## Authentication evidence
 
-BRISK personal policy version 3 uses at least five mutual matches/inliers and
-spatial/residual gates. Historical maintainer reports describe zero observed
+On this Pocket 4 branch, BRISK personal policy version 5 uses at least four
+mutual matches/inliers with spatial/residual gates and accepts a passing mosaic
+or individual subtemplate. Extractor version 3 applies LCN once; diagnostic
+policy version 4 records the changed decisions. Historical maintainer reports
+describe zero observed
 acceptances in 342,720 offline non-matching comparisons. The repository does not
 currently provide a complete independently reproducible protocol, independent
 evaluation split and deployment-level report for that result. Do not present it
@@ -63,7 +66,9 @@ as measured population FAR=0 or as a latency/FRR guarantee.
 Multi-person, multi-session FAR/FRR for the actual eight-subtemplate decision,
 including retries and failed captures/enrollments, remains unmeasured. This is
 an evidence gap, not merely a missing laboratory certificate. Default
-authentication is disabled; opt-in use remains experimental with a working
+SPI authentication is disabled; building the experimental USB driver enables
+its existing enrollment/verify/identify capabilities independently. That USB
+driver remains in this branch's default driver set. Use remains
+experimental with a working
 password fallback. Do not enable experimental biometric authentication for
 system-wide sudo or root access.
-

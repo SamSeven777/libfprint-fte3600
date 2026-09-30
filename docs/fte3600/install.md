@@ -205,8 +205,20 @@ fprintd-verify -f left-index-finger "$USER"
 ```
 
 > [!IMPORTANT]
-> **Policy Version 3 Notice**:
-> If updating from older experimental versions, existing stored templates in `/var/lib/fprint/` will be rejected due to incompatible geometric consensus formats. Delete old templates using `fprintd-delete "$USER"` and perform a fresh enrollment.
+> **Pocket 4 branch: extractor 3 / authentication policy 5 / diagnostic policy 4**:
+> This revision uses exactly one extractor-owned LCN pass and versions the
+> four-inlier, mosaic-or-subtemplate decision. Previous extractor versions 1–2
+> and authentication policies 3–4 are rejected. Re-enroll after updating; use
+> `fprintd-delete "$USER"` to remove old registrations before `fprintd-enroll`.
+> Deleting registrations removes the current user's saved fingerprints, so keep
+> a working password and be ready to enroll them again. Standalone example
+> programs use their own print storage and must also create fresh templates.
+
+Building `focaltech0752` enables its existing experimental USB authentication
+capabilities. This branch includes that USB driver in the `default` driver set.
+The SPI driver's enrollment and verification still require
+`-Dfte3600_personal_auth=true`, including when both drivers are compiled together.
+The shared matcher implementation does not override this SPI capability setting.
 
 ## Removing this fork and restoring the previous installation
 
@@ -249,4 +261,3 @@ remove enrollment, `fprintd-delete "$USER"` deletes that user's enrolled prints;
 it is separate from removing the driver and requires subsequent re-enrollment.
 Restore any PAM changes from their own pre-change backups; this guide does not
 authorize removal of an existing password authentication flow.
-

@@ -95,6 +95,7 @@ struct _FpiUsbTransfer
 
   /* Flags */
   gboolean short_is_error;
+  gboolean sensitive;
 
   /* Callbacks */
   gpointer               user_data;
@@ -111,6 +112,9 @@ void               fpi_usb_transfer_unref (FpiUsbTransfer *self);
 
 void               fpi_usb_transfer_set_short_error (FpiUsbTransfer *transfer,
                                                      gboolean        short_is_error);
+
+void               fpi_usb_transfer_set_sensitive (FpiUsbTransfer *transfer,
+                                                   gboolean        sensitive);
 
 void               fpi_usb_transfer_fill_bulk (FpiUsbTransfer *transfer,
                                                guint8          endpoint,

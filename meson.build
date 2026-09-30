@@ -220,6 +220,9 @@ if drivers.length() == 0 or drivers[0] == ''
 endif
 
 fte3600_personal_auth_cflags = []
+# Shared matcher policy and SPI capability publication are independent: the
+# USB driver must not opt the SPI device into authentication in combined builds.
+fte3600_spi_auth_cflags = ['-DFTE3600_ENABLE_SPI_PERSONAL_AUTH=' + (get_option('fte3600_personal_auth') ? '1' : '0')]
 if get_option('fte3600_personal_auth')
     if 'fte3600' not in drivers
         error('fte3600_personal_auth requires the fte3600 driver')

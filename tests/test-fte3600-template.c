@@ -453,17 +453,23 @@ test_malformed_headers_and_lengths (void)
 
   assert_header_mutation (wire, 8, 2, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 10, 38, FTE3600_TEMPLATE_INVALID_WIRE);
-  /* Historical extractor schema version 1 must be rejected under version 2. */
+  /* Both previous extractor versions must be rejected under version 3. */
   assert_header_mutation (wire, 24, 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
-  /* Historical diagnostic policy version 2 must be rejected under version 3. */
+  assert_header_mutation (wire, 24, 2,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  /* Previous diagnostic decisions must not be silently reused. */
   assert_header_mutation (wire, 26, 2,
+                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 26, 3,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 28,
                           !FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
-  /* Historical policy version 3 must be rejected under policy version 4. */
+  /* Historical policies 3 and 4 must be rejected under policy version 5. */
   assert_header_mutation (wire, 28, 3,
+                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 28, 4,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 30, 7, FTE3600_TEMPLATE_INVALID_WIRE);
 

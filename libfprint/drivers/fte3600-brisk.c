@@ -33,6 +33,14 @@
 #define BRISK_AXIS_INLIER_LIMIT 1.2
 #define BRISK_ORIENTATION_LIMIT (20.0 * BRISK_PI / 180.0)
 
+static void
+clear_image_memory (gpointer memory, gsize size)
+{
+  volatile guint8 *bytes = memory;
+  while (size-- > 0)
+    *bytes++ = 0;
+}
+
 typedef struct
 {
   guint8 first;
@@ -972,6 +980,8 @@ fpi_fte3600_normalize_image_contrast (const guint8 *src,
             }
         }
     }
+  clear_image_memory (sat1, (height + 1) * stride * sizeof (*sat1));
+  clear_image_memory (sat2, (height + 1) * stride * sizeof (*sat2));
 }
 
 Fte3600BriskStatus
@@ -1000,6 +1010,7 @@ fpi_fte3600_brisk_extract (const guint8           *image,
   fpi_fte3600_normalize_image_contrast (image, normalized,
                                         FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   build_scale_space (normalized, octaves);
+  clear_image_memory (normalized, sizeof (normalized));
   keypoints = detect_keypoints (octaves);
   for (guint i = 0; i < keypoints->len &&
        features->n_features < FTE3600_BRISK_MAX_FEATURES; i++)

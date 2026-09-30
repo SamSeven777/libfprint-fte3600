@@ -5,7 +5,8 @@ This file adds rules for the experimental FTE3600 work.
 
 ## Before opening a change
 
-Run both policy configurations:
+Run SPI with authentication off/on, USB alone, and both drivers together with
+SPI authentication off/on:
 
 ```sh
 ./scripts/check-fte3600.sh

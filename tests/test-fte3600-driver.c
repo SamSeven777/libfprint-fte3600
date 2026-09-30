@@ -12,8 +12,8 @@
 #include "fpi-device.h"
 #include "drivers/fte3600.h"
 
-#ifndef FTE3600_ENABLE_PERSONAL_AUTH
-#define FTE3600_ENABLE_PERSONAL_AUTH 0
+#ifndef FTE3600_ENABLE_SPI_PERSONAL_AUTH
+#define FTE3600_ENABLE_SPI_PERSONAL_AUTH 0
 #endif
 
 GType fpi_device_fte3600_get_type (void);
@@ -147,7 +147,7 @@ test_published_capabilities (void)
   g_assert_nonnull (klass->cancel);
   g_assert_null (klass->identify);
 
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
   g_assert_nonnull (klass->enroll);
   g_assert_nonnull (klass->verify);
   g_assert_cmpuint (klass->nr_enroll_stages, ==, 8);

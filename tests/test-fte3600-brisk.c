@@ -260,11 +260,11 @@ test_pattern_and_pairs (void)
   gfloat y;
 
   g_assert_cmpuint (sizeof (Fte3600BriskFeature), ==, 44);
-  g_assert_cmpuint (FTE3600_BRISK_DESCRIPTOR_VERSION, ==, 2);
-  g_assert_cmpuint (FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION, ==, 2);
-  g_assert_cmpuint (FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION, ==, 3);
+  g_assert_cmpuint (FTE3600_BRISK_DESCRIPTOR_VERSION, ==, 3);
+  g_assert_cmpuint (FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION, ==, 3);
+  g_assert_cmpuint (FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION, ==, 4);
   g_assert_cmpuint (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION, ==,
-                    FTE3600_ENABLE_PERSONAL_AUTH ? 4 : 0);
+                    FTE3600_ENABLE_PERSONAL_AUTH ? 5 : 0);
   g_assert_cmpuint (FTE3600_BRISK_PAIR_SEED, ==, 0x46544231u);
   g_assert_cmpuint (FTE3600_BRISK_THRESHOLDS_CALIBRATED, ==, 0);
 
@@ -401,8 +401,8 @@ test_extract_deterministic (void)
     g_autofree gchar *hash = feature_set_checksum (&first);
 
     g_assert_cmpstr (hash, ==,
-                     "18800f034c893f41fa1e094400485849"
-                     "bf59e172dc29a5ac6025b7183fdc50bd");
+                     "a94b585062b5187b3b198347df0893f3f8"
+                     "872af10353a4432c6fcdd9d0c6f328");
   }
 }
 

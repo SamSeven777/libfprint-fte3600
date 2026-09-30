@@ -160,6 +160,7 @@ helper_sources = {
 
 drivers_sources = []
 drivers_cflags = []
+drivers_cflags += fte3600_spi_auth_cflags
 foreach driver: drivers
     drivers_sources += driver_sources[driver]
 endforeach

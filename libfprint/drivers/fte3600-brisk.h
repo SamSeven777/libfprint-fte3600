@@ -37,8 +37,9 @@ G_BEGIN_DECLS
  *
  * Version 1: initial baseline clean-room BRISK extractor.
  * Version 2: integrates zero-mean 13x13 Integral Image Local Contrast Normalization (LCN)
- * with noise-floor regularization into scale-space construction, significantly improving
- * ridge definition and inlier yield on dry/low-contrast captures.
+ * with noise-floor regularization into scale-space construction.
+ * Version 3: exactly one LCN pass, owned by the extractor; rejects earlier
+ * SPI templates that could contain features from two LCN passes.
  *
  * Version 1's clean-room pair table was generated offline using xorshift32,
  * this public seed, and the balancing algorithm recorded beside the frozen
@@ -49,7 +50,7 @@ G_BEGIN_DECLS
  * lengths, and IEEE binary32 encoding; this structure must never be memcpy'd
  * to persistent storage.
  */
-#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 2
+#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 3
 #define FTE3600_BRISK_DESCRIPTOR_VERSION FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION
 #define FTE3600_BRISK_PAIR_SEED ((guint32) 0x46544231u)
 #define FTE3600_BRISK_PAIR_TABLE_SHA256      \
@@ -64,27 +65,31 @@ G_BEGIN_DECLS
  * spatial variance and residual bounds, and requires every enrollment sample
  * after the first to pass the authentication gate against an already accepted sample.
  * Policy version 4 corresponds to Schema v2 contrast-normalized extraction.
+ * Policy version 5 records the four-inlier gates and mosaic-or-subtemplate
+ * acceptance rule. These remain uncalibrated experimental decisions.
  * Extractor compatibility and decision-policy revisions are intentionally versioned
- * separately.  A default build retains policy version zero and cannot
- * authenticate.
+ * separately. A SPI-only build without personal authentication retains policy
+ * zero. The USB driver uses the active matcher policy whenever compiled; the
+ * SPI driver's capability gate remains independent of that shared policy.
  * Diagnostic policy version 1 was the historical 7-inlier diagnostic policy;
- * version 2 corresponded to 5-inlier calibrated gates under Schema v1;
- * version 3 corresponds to Schema v2 calibrated gates. */
+ * version 2 corresponded to 5-inlier gates under Schema v1;
+ * version 3 corresponds to Schema v2 gates; version 4 includes mosaic matching
+ * and the four-inlier gates. */
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 #if FTE3600_ENABLE_PERSONAL_AUTH != 0 && FTE3600_ENABLE_PERSONAL_AUTH != 1
 #error "FTE3600_ENABLE_PERSONAL_AUTH must be zero or one"
 #endif
-#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 3
+#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 4
 #if FTE3600_ENABLE_PERSONAL_AUTH
-#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 4
+#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 5
 #else
 #define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 0
 #endif
 #define FTE3600_BRISK_THRESHOLDS_CALIBRATED 0
 G_STATIC_ASSERT (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ==
-                 (FTE3600_ENABLE_PERSONAL_AUTH ? 4 : 0));
+                 (FTE3600_ENABLE_PERSONAL_AUTH ? 5 : 0));
 #define FTE3600_BRISK_MAX_HAMMING 64
 #define FTE3600_BRISK_RATIO_PERCENT 80
 #define FTE3600_BRISK_MIN_HAMMING_MARGIN 8
@@ -203,7 +208,7 @@ gboolean fpi_fte3600_brisk_result_meets_authentication_policy (const Fte3600Bris
 /*
  * Zero-mean Integral Image Local Contrast Normalization (LCN) using a 13x13 window
  * (~1.5 ridge wavelengths at 508 DPI) with noise-floor regularization.
- * Part of Schema v2 extractor to normalize ridge contrast and suppress empty sensor noise.
+ * Part of the versioned extractor to normalize ridge contrast and suppress empty sensor noise.
  */
 void fpi_fte3600_normalize_image_contrast (const guint8 *src,
                                            guint8       *dst,

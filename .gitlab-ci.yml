@@ -114,16 +114,24 @@ test_fte3600:
   parallel:
     matrix:
       - FTE3600_AUTH: ['false', 'true']
+        FTE3600_DRIVERS: ['fte3600', 'fte3600,focaltech0752']
+      - FTE3600_AUTH: ['false']
+        FTE3600_DRIVERS: ['focaltech0752']
   script:
     - >-
-      meson setup _build --werror -Ddrivers=fte3600
+      meson setup _build --werror -Ddrivers=$FTE3600_DRIVERS
       -Dfte3600_personal_auth=$FTE3600_AUTH
       -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
       -Db_sanitize=address,undefined
-    - >-
-      meson test -C _build --print-errorlogs
-      fte3600-driver fte3600-lifecycle fte3600-brisk fte3600-template
-      fpi-spi-transfer fpi-ssm fpi-device
+    - |
+      fte_tests="fpi-spi-transfer fpi-ssm fpi-device fpi-device-cancel"
+      case "$FTE3600_DRIVERS" in
+        fte3600*) fte_tests="$fte_tests fte3600-driver fte3600-lifecycle fte3600-brisk fte3600-template" ;;
+      esac
+      case "$FTE3600_DRIVERS" in
+        *focaltech0752*) fte_tests="$fte_tests focaltech0752 focaltech0752-lifecycle" ;;
+      esac
+      meson test -C _build --print-errorlogs $fte_tests
   artifacts:
     when: always
     reports:

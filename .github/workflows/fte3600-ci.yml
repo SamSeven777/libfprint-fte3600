@@ -19,7 +19,7 @@ jobs:
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
           libgpiod-devel systemd systemd-devel cairo-devel
       - uses: actions/checkout@v6
-      - name: Build both authentication policies
+      - name: Test SPI and USB driver configurations
         run: ./scripts/check-fte3600.sh
 
   ubuntu:
@@ -37,5 +37,5 @@ jobs:
             libglib2.0-dev libgusb-dev libgudev-1.0-dev libgpiod-dev \
             libudev-dev systemd-dev libcairo2-dev
       - uses: actions/checkout@v6
-      - name: Build both authentication policies
+      - name: Test SPI and USB driver configurations
         run: ./scripts/check-fte3600.sh

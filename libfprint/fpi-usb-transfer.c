@@ -69,7 +69,9 @@ log_transfer (FpiUsbTransfer *transfer, gboolean submit, GError *error)
                    transfer->endpoint);
         }
 
-      if (submit != is_incoming)
+      if (transfer->sensitive)
+        g_debug ("Transfer %p buffer contents redacted (sensitive)", transfer);
+      else if (submit != is_incoming)
         {
           gsize dump_length = is_incoming ? transfer->actual_length : transfer->length;
 
@@ -111,7 +113,15 @@ fpi_usb_transfer_free (FpiUsbTransfer *self)
   g_assert_cmpint (self->ref_count, ==, 0);
 
   if (self->free_buffer && self->buffer)
-    self->free_buffer (self->buffer);
+    {
+      if (self->sensitive)
+        {
+          volatile guint8 *bytes = self->buffer;
+          for (gssize i = 0; i < self->length; i++)
+            bytes[i] = 0;
+        }
+      self->free_buffer (self->buffer);
+    }
   self->buffer = NULL;
 
   g_slice_free (FpiUsbTransfer, self);
@@ -560,4 +570,20 @@ fpi_usb_transfer_set_short_error (FpiUsbTransfer *transfer,
   g_return_if_fail (transfer);
 
   transfer->short_is_error = short_is_error;
+}
+
+/**
+ * fpi_usb_transfer_set_sensitive:
+ * @transfer: A #FpiUsbTransfer
+ * @sensitive: Whether the buffer contains sensitive data
+ *
+ * Suppress buffer contents in transfer debug logs and clear owned buffers
+ * before releasing them. Borrowed buffers remain the driver's responsibility.
+ */
+void
+fpi_usb_transfer_set_sensitive (FpiUsbTransfer *transfer,
+                                 gboolean        sensitive)
+{
+  g_return_if_fail (transfer);
+  transfer->sensitive = sensitive;
 }

@@ -370,7 +370,7 @@ if 'fte3600' in drivers
         sources: 'test-fte3600-driver.c',
         dependencies: libfprint_private_dep,
         link_with: libfprint_drivers,
-        c_args: common_cflags + fte3600_personal_auth_cflags,
+        c_args: common_cflags + fte3600_personal_auth_cflags + fte3600_spi_auth_cflags,
         install: false,
     )
     test('fte3600-driver',
@@ -400,7 +400,7 @@ if 'fte3600' in drivers
         dependencies: libfprint_private_dep,
         link_with: libfprint_drivers,
         link_args: fte3600_mock_link_args,
-        c_args: common_cflags + fte3600_personal_auth_cflags,
+        c_args: common_cflags + fte3600_personal_auth_cflags + fte3600_spi_auth_cflags,
         install: false,
     )
     test('fte3600-lifecycle',
@@ -444,6 +444,29 @@ if 'fte3600' in drivers
 endif
 
 if 'focaltech0752' in drivers
+    focaltech0752_lifecycle = executable('test-focaltech0752-lifecycle',
+        sources: [
+            'test-focaltech0752-lifecycle.c',
+            '../libfprint/fp-device.c',
+            '../libfprint/fp-image.c',
+            '../libfprint/fp-print.c',
+            fp_enums,
+        ],
+        dependencies: deps,
+        include_directories: include_directories('../libfprint'),
+        link_with: [libfprint_private, libfprint_drivers],
+        link_args: [
+            '-Wl,--wrap=g_usb_device_open', '-Wl,--wrap=g_usb_device_close',
+            '-Wl,--wrap=g_usb_device_claim_interface', '-Wl,--wrap=g_usb_device_release_interface',
+            '-Wl,--wrap=g_usb_device_bulk_transfer_async', '-Wl,--wrap=g_usb_device_bulk_transfer_finish',
+            '-Wl,--wrap=g_usb_device_bulk_transfer',
+        ],
+        c_args: common_cflags + ['-DFTE3600_ENABLE_PERSONAL_AUTH=1'],
+        install: false,
+    )
+    test('focaltech0752-lifecycle', focaltech0752_lifecycle,
+        suite: ['unit-tests'], env: envs, timeout: 30,
+    )
     focaltech0752_test = executable('test-focaltech0752',
         sources: [
             'test-focaltech0752.c',

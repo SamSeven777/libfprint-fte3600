@@ -320,7 +320,7 @@ typedef struct
   GBytes               *encoded_template;
 } Fte3600EnrollJob;
 
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
 typedef struct
 {
   guint8                       image[FT9361_IMAGE_SIZE];
@@ -1922,12 +1922,8 @@ fte3600_enroll_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  guint8 normalized_image[sizeof (job->image)];
-  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
-                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
-  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -2126,7 +2122,7 @@ fte3600_enroll_capture_async (FpiDeviceFte3600 *self)
   g_task_run_in_thread (task, fte3600_enroll_worker);
 }
 
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
 static GError *
 fte3600_verify_template_error (Fte3600TemplateStatus status)
 {
@@ -2238,12 +2234,8 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  guint8 normalized_image[sizeof (job->image)];
-  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
-                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
-  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -2456,7 +2448,7 @@ fte3600_capture_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       return;
 
     case FPI_DEVICE_ACTION_VERIFY:
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
       fte3600_verify_capture_async (self);
       return;
 #else
@@ -2802,7 +2794,7 @@ fte3600_cancel (FpDevice *dev)
   fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
 }
 
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
 static void
 fte3600_enroll (FpDevice *dev)
 {
@@ -2907,7 +2899,7 @@ fpi_device_fte3600_class_init (FpiDeviceFte3600Class *klass)
   dev_class->probe = fte3600_probe;
   dev_class->open = fte3600_open;
   dev_class->close = fte3600_close;
-#if FTE3600_ENABLE_PERSONAL_AUTH
+#if FTE3600_ENABLE_SPI_PERSONAL_AUTH
   /* Enrollment and one-template verification are published together only in
    * an explicit personal-auth build.  A policy-zero build remains useful for
    * controlled image capture, but must not advertise enrollment of templates
