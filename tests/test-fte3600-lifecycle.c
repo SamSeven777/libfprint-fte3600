@@ -3,7 +3,8 @@
  * SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
  *
- * Linker wrappers replace only the OS/device boundary. The production driver,
+ * Linker wrappers mock the device boundary and control decode scheduling.
+ * The production driver,
  * SPI worker threads, state machines, cancellables and public FpDevice API run
  * unchanged. No real sensor, GPIO, firmware or biometric fixture is needed.
  */
@@ -871,6 +872,8 @@ test_open_error (gconstpointer data)
   finish_device (device);
 }
 
+#include "fte3600-test-load.h"
+
 int
 main (int argc, char **argv)
 {
@@ -912,6 +915,8 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fte3600-lifecycle/cancel-cleanup-failure", GUINT_TO_POINTER (3),
                         test_capture_error);
 #if FTE3600_ENABLE_PERSONAL_AUTH
+  g_test_add_func ("/fte3600-lifecycle/verify-load-cancel", test_verify_load_cancel);
+  g_test_add_func ("/fte3600-lifecycle/verify-load-previous-policy", test_verify_load_previous_policy);
   g_test_add_func ("/fte3600-lifecycle/enroll-verify-images", test_enroll_verify_images);
   g_test_add_func ("/fte3600-lifecycle/enroll-cancel", test_enroll_cancel);
 #endif

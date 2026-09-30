@@ -392,6 +392,9 @@ if 'fte3600' in drivers
         'gpiod_edge_event_get_line_offset',
     ]
     fte3600_mock_link_args = []
+    if get_option('fte3600_personal_auth')
+        fte3600_mock_symbols += 'fpi_fte3600_template_decode'
+    endif
     foreach symbol : fte3600_mock_symbols
         fte3600_mock_link_args += '-Wl,--wrap=' + symbol
     endforeach
