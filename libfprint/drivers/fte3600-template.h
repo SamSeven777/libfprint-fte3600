@@ -51,6 +51,8 @@ typedef enum {
 
 typedef struct _Fte3600Template Fte3600Template;
 
+#define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC ((guint) -1)
+
 typedef struct
 {
   guint                   n_compared;
@@ -97,5 +99,7 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Templa
                                                              const Fte3600BriskFeatureSet *query,
                                                              Fte3600TemplateLoadPurpose    purpose,
                                                              Fte3600TemplateCompareResult *result);
+
+const Fte3600BriskFeatureSet *fpi_fte3600_template_get_mosaic (const Fte3600Template *templ);
 
 G_END_DECLS

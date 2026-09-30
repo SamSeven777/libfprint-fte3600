@@ -163,6 +163,10 @@ capture_read_cb (FpiUsbTransfer *transfer,
             {
               self->enroll_stage++;
               fp_dbg ("Enrolled stage %u of %u", self->enroll_stage, (guint) NR_ENROLL_STAGES);
+              const Fte3600BriskFeatureSet *mosaic =
+                fpi_fte3600_template_get_mosaic (self->enroll_template);
+              if (mosaic != NULL)
+                fp_dbg ("Stitched mosaic now contains %u fused features", mosaic->n_features);
 
               if (fpi_fte3600_template_is_ready (self->enroll_template))
                 {

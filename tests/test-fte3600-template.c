@@ -744,6 +744,144 @@ test_rounding_mode_isolation (void)
   g_assert_cmpint (fesetround (caller_mode), ==, 0);
 }
 
+static void
+test_template_mosaicking (void)
+{
+  g_autoptr(Fte3600Template) templ = make_ready_template (FALSE);
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(GBytes) wire = NULL;
+  const Fte3600BriskFeatureSet *mosaic;
+
+  g_assert_true (fpi_fte3600_template_is_ready (templ));
+  mosaic = fpi_fte3600_template_get_mosaic (templ);
+  g_assert_nonnull (mosaic);
+  g_assert_cmpuint (mosaic->n_features, >=, FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES);
+
+  /* Verify mosaic persistence across wire encode & decode */
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_nonnull (decoded);
+  mosaic = fpi_fte3600_template_get_mosaic (decoded);
+  g_assert_nonnull (mosaic);
+  g_assert_cmpuint (mosaic->n_features, >=, FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES);
+}
+
+static void
+test_boundary_straddling_probe (void)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  Fte3600BriskFeatureSet query;
+  Fte3600TemplateCompareResult result;
+  Fte3600BriskFeatureSet s0_feats;
+  Fte3600BriskFeatureSet s1_feats;
+
+  /* Build 8 consistent samples.
+   * Common overlap between Sample 0 and Sample 1..7 is points 4..8 (5 inliers >= 5).
+   * Sample 0 has points 0..8 + 3 padding points (100..102).
+   * Sample 1..7 have points 4..12 + 3 distinct padding points (200 + s * 10..). */
+  for (guint s = 0; s < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; s++)
+    {
+      Fte3600BriskFeatureSet sample_features;
+      memset (&sample_features, 0, sizeof (sample_features));
+      sample_features.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      sample_features.n_features = 12;
+
+      for (guint i = 0; i < 9; i++)
+        {
+          const guint pt = (s == 0) ? i : (4 + i);
+          Fte3600BriskFeature *feat = &sample_features.features[i];
+          feat->x = 10.0f + 3.5f * pt;
+          feat->y = 15.0f + 25.0f * (pt % 3);
+          feat->orientation = 0.0f;
+          fill_descriptor (feat->descriptor, pt, 0);
+        }
+      for (guint i = 0; i < 3; i++)
+        {
+          const guint pt = (s == 0) ? (100 + i) : (200 + s * 10 + i);
+          Fte3600BriskFeature *feat = &sample_features.features[9 + i];
+          feat->x = 56.0f + 2.0f * (i % 2);
+          feat->y = 15.0f + 25.0f * (i % 3);
+          feat->orientation = 0.0f;
+          fill_descriptor (feat->descriptor, pt, 0);
+        }
+
+      if (s == 0)
+        s0_feats = sample_features;
+      if (s == 1)
+        s1_feats = sample_features;
+
+      const Fte3600TemplateStatus expected =
+        (s + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES) ?
+        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+      const Fte3600TemplateStatus status =
+        fpi_fte3600_template_add_features (templ, &sample_features, NULL);
+      g_assert_cmpint (status, ==, expected);
+    }
+
+  g_assert_true (fpi_fte3600_template_is_ready (templ));
+
+  /* Create query probe that has:
+   * Points 0, 1, 2 (which only exist in Sample 0, NOT in Sample 1..7)
+   * Points 10, 11, 12 (which only exist in Sample 1..7, NOT in Sample 0)
+   * 6 non-matching padding points so total features = 12 (>= FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES). */
+  memset (&query, 0, sizeof (query));
+  query.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  query.n_features = 12;
+  const guint probe_pts[6] = { 0, 1, 2, 10, 11, 12 };
+  for (guint i = 0; i < 6; i++)
+    {
+      const guint pt = probe_pts[i];
+      Fte3600BriskFeature *feat = &query.features[i];
+      feat->x = 10.0f + 3.5f * pt;
+      feat->y = 15.0f + 25.0f * (pt % 3);
+      feat->orientation = 0.0f;
+      fill_descriptor (feat->descriptor, pt, 0);
+    }
+  for (guint i = 0; i < 6; i++)
+    {
+      Fte3600BriskFeature *feat = &query.features[6 + i];
+      feat->x = 2.0f + 3.0f * (i % 2);
+      feat->y = 15.0f + 25.0f * (i % 3);
+      feat->orientation = 0.0f;
+      fill_descriptor (feat->descriptor, 500 + i, 0);
+    }
+
+  /* 1. Directly test matching against Sample 0 alone:
+   * Only points 0, 1, 2 match (3 inliers < 5 minimum). Must NOT reach consensus! */
+  Fte3600BriskMatchResult s0_match;
+  Fte3600BriskStatus s0_status = fpi_fte3600_brisk_match (&query,
+                                                         &s0_feats,
+                                                         &s0_match);
+  g_assert_cmpint (s0_status, ==, FTE3600_BRISK_NO_CONSENSUS);
+
+  /* 2. Directly test matching against Sample 1 alone:
+   * Only points 10, 11, 12 match (3 inliers < 5 minimum). Must NOT reach consensus! */
+  Fte3600BriskMatchResult s1_match;
+  Fte3600BriskStatus s1_status = fpi_fte3600_brisk_match (&query,
+                                                         &s1_feats,
+                                                         &s1_match);
+  g_assert_cmpint (s1_status, ==, FTE3600_BRISK_NO_CONSENSUS);
+
+  /* 3. Test comparing against the template container:
+   * Because individual subtemplates each have only 3 inliers, none passes alone.
+   * BUT the stitched mosaic contains ALL points 0..14!
+   * The mosaic will match all 6 points (inliers = 6 >= 4), passing authentication! */
+#if FTE3600_ENABLE_PERSONAL_AUTH
+  g_assert_cmpint (fpi_fte3600_template_compare_features (
+                     templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.authentication_accepted);
+  g_assert_cmpuint (result.best.inliers, ==, 6);
+#else
+  g_assert_cmpint (fpi_fte3600_template_compare_features (
+                     templ, &query, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpuint (result.diagnostic_passes, >=, 1);
+  g_assert_cmpuint (result.best.inliers, ==, 6);
+#endif
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -768,5 +906,9 @@ main (int   argc,
                    test_incomplete_and_arguments);
   g_test_add_func ("/fte3600-template/rounding-mode-isolation",
                    test_rounding_mode_isolation);
+  g_test_add_func ("/fte3600-template/mosaicking",
+                   test_template_mosaicking);
+  g_test_add_func ("/fte3600-template/boundary-straddling-probe",
+                   test_boundary_straddling_probe);
   return g_test_run ();
 }

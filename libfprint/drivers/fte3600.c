@@ -2029,6 +2029,11 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
   self->enroll_stages_passed = completed_stages;
   fpi_device_enroll_progress (dev, self->enroll_stages_passed, NULL, NULL);
 
+  const Fte3600BriskFeatureSet *mosaic =
+    fpi_fte3600_template_get_mosaic (self->enroll_template);
+  if (mosaic != NULL)
+    fp_dbg ("Stitched mosaic now contains %u fused features", mosaic->n_features);
+
   if (job->status == FTE3600_TEMPLATE_NEED_MORE_SAMPLES)
     {
       fte3600_start_capture (self);
