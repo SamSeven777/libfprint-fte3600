@@ -25,6 +25,11 @@
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 
+#if FTE3600_ENABLE_PERSONAL_AUTH
+#include "drivers/fte3600-template.h"
+#include "fte3600-test-image.h"
+#endif
+
 GType fpi_device_fte3600_get_type (void);
 
 /* Declarations also check wrapper signatures against the platform headers. */
@@ -95,6 +100,9 @@ static struct
   guint               hardware_asserts;
   guint               hardware_deasserts;
   guint               images;
+  const guint8       *frames;
+  guint               n_frames;
+  guint               next_frame;
   guint               irq_source;
   guint8              registers[256];
   gboolean            claimed;
@@ -456,8 +464,13 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       sensor.images++;
       g_assert_cmpuint (transfer->len, ==, FT9361_CAPTURE_FRAME_SIZE);
       g_assert_nonnull (rx);
+      if (sensor.frames != NULL)
+        g_assert_cmpuint (sensor.next_frame, <, sensor.n_frames);
       for (guint i = 0; i < FT9361_IMAGE_SIZE; i++)
-        rx[FT9361_CAPTURE_DATA_OFFSET + i] = (i * 37 + 11) & 0xff;
+        rx[FT9361_CAPTURE_DATA_OFFSET + i] = sensor.frames != NULL ?
+          (guint8) ~sensor.frames[sensor.next_frame * FT9361_IMAGE_SIZE + i] :
+          (i * 37 + 11) & 0xff;
+      sensor.next_frame++;
       if (sensor.fail_image)
         result = -1;
       if (sensor.cancel_image)
@@ -719,6 +732,96 @@ test_capture_error (gconstpointer data)
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
 static void
+enroll_progress (FpDevice *device,
+                  gint      completed_stages,
+                  FpPrint  *print,
+                  gpointer  user_data,
+                  GError   *error)
+{
+  guint *stages = user_data;
+
+  g_assert_no_error (error);
+  g_assert_cmpint (completed_stages, ==, ++*stages);
+}
+
+static void
+test_enroll_verify_images (void)
+{
+  FpDevice *device = new_device ();
+  guint8 original[FT9361_IMAGE_SIZE];
+  guint8 frames[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES][FT9361_IMAGE_SIZE];
+  guint8 blank[FT9361_IMAGE_SIZE] = { 0 };
+  guint stages = 0;
+  gboolean match = FALSE;
+  g_autoptr(Fte3600Template) expected = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) expected_wire = NULL;
+  g_autoptr(GVariant) data = NULL;
+  g_autoptr(FpPrint) print = g_object_ref_sink (fp_print_new (device));
+  g_autoptr(FpPrint) enrolled = NULL;
+  g_autoptr(GError) error = NULL;
+  gsize actual_size, expected_size;
+  const guint8 *actual_data, *expected_data;
+
+  make_visual_pattern (original);
+  for (guint i = 0; i < G_N_ELEMENTS (frames); i++)
+    {
+      Fte3600BriskFeatureSet features;
+
+      translate_pattern (original, frames[i], i % 4, i / 4, FALSE);
+      g_assert_cmpint (fpi_fte3600_brisk_extract (frames[i], sizeof (frames[i]),
+                                                &features), ==, FTE3600_BRISK_OK);
+      g_assert_cmpint (fpi_fte3600_template_add_features (expected, &features, NULL), ==,
+                       i + 1 == G_N_ELEMENTS (frames) ? FTE3600_TEMPLATE_OK :
+                       FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+    }
+  g_assert_cmpint (fpi_fte3600_template_encode (expected, &expected_wire), ==,
+                   FTE3600_TEMPLATE_OK);
+
+  open_device (device);
+  sensor.frames = &frames[0][0];
+  sensor.n_frames = G_N_ELEMENTS (frames);
+  enrolled = fp_device_enroll_sync (device, print, NULL,
+                                    enroll_progress, &stages, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (enrolled);
+  g_assert_cmpuint (stages, ==, G_N_ELEMENTS (frames));
+  g_assert_cmpuint (sensor.next_frame, ==, G_N_ELEMENTS (frames));
+
+  /* The real asynchronous enrollment worker must produce the same canonical
+   * template as the public extractor applied once to each captured image. */
+  g_object_get (enrolled, "fpi-data", &data, NULL);
+  g_assert_nonnull (data);
+  g_assert_true (g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")));
+  actual_data = g_variant_get_fixed_array (data, &actual_size, sizeof (guint8));
+  expected_data = g_bytes_get_data (expected_wire, &expected_size);
+  g_assert_cmpmem (actual_data, actual_size, expected_data, expected_size);
+
+  sensor.next_frame = 0;
+  sensor.n_frames = 1;
+  g_assert_true (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+                                       &match, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (match);
+  g_assert_cmpuint (sensor.next_frame, ==, 1);
+
+  /* A low-contrast retry terminates this action and leaves the device reusable. */
+  sensor.frames = blank;
+  sensor.next_frame = 0;
+  g_assert_false (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+                                        &match, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+  g_assert_cmpuint (sensor.next_frame, ==, 1);
+  g_clear_error (&error);
+  sensor.frames = &frames[0][0];
+  sensor.next_frame = 0;
+  g_assert_true (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+                                       &match, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (match);
+  finish_device (device);
+}
+
+static void
 test_enroll_cancel (void)
 {
   FpDevice *device = new_device ();
@@ -809,6 +912,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fte3600-lifecycle/cancel-cleanup-failure", GUINT_TO_POINTER (3),
                         test_capture_error);
 #if FTE3600_ENABLE_PERSONAL_AUTH
+  g_test_add_func ("/fte3600-lifecycle/enroll-verify-images", test_enroll_verify_images);
   g_test_add_func ("/fte3600-lifecycle/enroll-cancel", test_enroll_cancel);
 #endif
   g_test_add_data_func ("/fte3600-lifecycle/open/spi-error", GUINT_TO_POINTER (0),

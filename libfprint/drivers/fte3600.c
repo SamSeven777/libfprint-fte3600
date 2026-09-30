@@ -1922,12 +1922,8 @@ fte3600_enroll_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  guint8 normalized_image[sizeof (job->image)];
-  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
-                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
-  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -2233,12 +2229,8 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  guint8 normalized_image[sizeof (job->image)];
-  fpi_fte3600_normalize_image_contrast (job->image, normalized_image,
-                                        FTE3600_BRISK_WIDTH, FTE3600_BRISK_HEIGHT);
   job->extract_status =
-    fpi_fte3600_brisk_extract (normalized_image, sizeof (normalized_image), &features);
-  fte3600_secure_clear (normalized_image, sizeof (normalized_image));
+    fpi_fte3600_brisk_extract (job->image, sizeof (job->image), &features);
   fte3600_secure_clear (job->image, sizeof (job->image));
   if (g_task_return_error_if_cancelled (task))
     goto out;

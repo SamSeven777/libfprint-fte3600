@@ -31,9 +31,10 @@ G_BEGIN_DECLS
  * feature field meaning.  Any change to those rules requires a new version.
  *
  * Version 1: initial baseline clean-room BRISK extractor.
- * Version 2: integrates zero-mean 13x13 Integral Image Local Contrast Normalization (LCN)
- * with noise-floor regularization into scale-space construction, significantly improving
- * ridge definition and inlier yield on dry/low-contrast captures.
+ * Version 2: introduced 13x13 Local Contrast Normalization (LCN). SPI workers
+ * also normalized their input, so deployed templates could use two passes.
+ * Version 3: the extractor owns the only LCN pass. Reject earlier templates
+ * rather than silently compare features from different preprocessing paths.
  *
  * Version 1's clean-room pair table was generated offline using xorshift32,
  * this public seed, and the balancing algorithm recorded beside the frozen
@@ -44,7 +45,7 @@ G_BEGIN_DECLS
  * lengths, and IEEE binary32 encoding; this structure must never be memcpy'd
  * to persistent storage.
  */
-#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 2
+#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 3
 #define FTE3600_BRISK_DESCRIPTOR_VERSION FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION
 #define FTE3600_BRISK_PAIR_SEED ((guint32) 0x46544231u)
 #define FTE3600_BRISK_PAIR_TABLE_SHA256      \
@@ -58,13 +59,14 @@ G_BEGIN_DECLS
  * Policy version 3 requires at least 5 inliers and 5 mutual matches with
  * spatial variance and residual bounds, and requires every enrollment sample
  * after the first to pass the authentication gate against an already accepted sample.
- * Policy version 4 corresponds to Schema v2 contrast-normalized extraction.
+ * Policy version 4 retains the same gates for contrast-normalized extraction.
+ * The single-pass Schema v3 correction changes extractor compatibility only.
  * Extractor compatibility and decision-policy revisions are intentionally versioned
  * separately.  A default build retains policy version zero and cannot
  * authenticate.
  * Diagnostic policy version 1 was the historical 7-inlier diagnostic policy;
- * version 2 corresponded to 5-inlier calibrated gates under Schema v1;
- * version 3 corresponds to Schema v2 calibrated gates. */
+ * version 2 corresponded to 5-inlier gates under Schema v1;
+ * version 3 retains those uncalibrated gates for contrast-normalized input. */
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
@@ -191,7 +193,7 @@ gboolean fpi_fte3600_brisk_result_meets_authentication_policy (const Fte3600Bris
 /*
  * Zero-mean Integral Image Local Contrast Normalization (LCN) using a 13x13 window
  * (~1.5 ridge wavelengths at 508 DPI) with noise-floor regularization.
- * Part of Schema v2 extractor to normalize ridge contrast and suppress empty sensor noise.
+ * Called by the extractor; callers must pass their original image to extract.
  */
 void fpi_fte3600_normalize_image_contrast (const guint8 *src,
                                            guint8       *dst,

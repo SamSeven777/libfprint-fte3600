@@ -205,8 +205,12 @@ fprintd-verify -f left-index-finger "$USER"
 ```
 
 > [!IMPORTANT]
-> **Policy Version 3 Notice**:
-> If updating from older experimental versions, existing stored templates in `/var/lib/fprint/` will be rejected due to incompatible geometric consensus formats. Delete old templates using `fprintd-delete "$USER"` and perform a fresh enrollment.
+> **Extractor Schema 3 / Authentication Policy 4**:
+> Schema 3 applies image normalization exactly once. Earlier schemas are rejected,
+> including schema 2 templates that may have been produced by two normalization
+> passes. Keep a working password, then deliberately remove the old enrollment
+> with `fprintd-delete "$USER"` and enroll again. This deletes that user's prints;
+> changing the stored version number is not a valid migration.
 
 ## Removing this fork and restoring the previous installation
 
@@ -249,4 +253,3 @@ remove enrollment, `fprintd-delete "$USER"` deletes that user's enrolled prints;
 it is separate from removing the driver and requires subsequent re-enrollment.
 Restore any PAM changes from their own pre-change backups; this guide does not
 authorize removal of an existing password authentication flow.
-

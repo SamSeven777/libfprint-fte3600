@@ -13,6 +13,7 @@
 #include <glib.h>
 
 #include "../libfprint/drivers/fte3600-brisk.h"
+#include "fte3600-test-image.h"
 
 #define TEST_PI 3.14159265358979323846
 
@@ -44,43 +45,6 @@ assert_authentication_policy_result (const Fte3600BriskMatchResult *result)
 #endif
 }
 
-static void
-make_visual_pattern (guint8 *image)
-{
-  static const struct
-  {
-    gdouble x;
-    gdouble y;
-    gdouble sigma;
-    gdouble amplitude;
-  } spots[] = {
-    { 17, 18, 1.5,  58 }, { 29, 17, 2.2, -54 },
-    { 43, 19, 3.1,  61 }, { 51, 29, 1.8, -48 },
-    { 18, 32, 2.7, -61 }, { 32, 31, 1.4,  52 },
-    { 43, 39, 2.4, -57 }, { 17, 47, 1.9,  55 },
-    { 31, 49, 3.2,  63 }, { 49, 52, 1.5, -53 },
-    { 20, 63, 2.3, -58 }, { 36, 63, 1.7,  57 },
-    { 48, 66, 2.8,  50 },
-  };
-
-  for (guint y = 0; y < FTE3600_BRISK_HEIGHT; y++)
-    for (guint x = 0; x < FTE3600_BRISK_WIDTH; x++)
-      {
-        gdouble value = 126.0 + 13.0 * sin (0.29 * x + 0.17 * y) +
-                        8.0 * cos (0.13 * x - 0.23 * y);
-
-        for (guint i = 0; i < G_N_ELEMENTS (spots); i++)
-          {
-            const gdouble dx = x - spots[i].x;
-            const gdouble dy = y - spots[i].y;
-
-            value += spots[i].amplitude *
-                     exp (-(dx * dx + dy * dy) /
-                          (2.0 * spots[i].sigma * spots[i].sigma));
-          }
-        image[y * FTE3600_BRISK_WIDTH + x] = CLAMP (floor (value + 0.5), 2, 253);
-      }
-}
 
 static void
 fill_descriptor (guint8  descriptor[FTE3600_BRISK_DESCRIPTOR_BYTES],
@@ -122,28 +86,6 @@ feature_set_checksum (const Fte3600BriskFeatureSet *features)
   return g_strdup (g_checksum_get_string (checksum));
 }
 
-static void
-translate_pattern (const guint8 *source,
-                   guint8       *destination,
-                   gint          translate_x,
-                   gint          translate_y,
-                   gboolean      add_noise)
-{
-  for (guint y = 0; y < FTE3600_BRISK_HEIGHT; y++)
-    for (guint x = 0; x < FTE3600_BRISK_WIDTH; x++)
-      {
-        const gint source_x = (gint) x - translate_x;
-        const gint source_y = (gint) y - translate_y;
-        gint value = 126;
-
-        if (source_x >= 0 && source_x < FTE3600_BRISK_WIDTH &&
-            source_y >= 0 && source_y < FTE3600_BRISK_HEIGHT)
-          value = source[source_y * FTE3600_BRISK_WIDTH + source_x];
-        if (add_noise)
-          value += ((17 * x + 31 * y) % 3) - 1;
-        destination[y * FTE3600_BRISK_WIDTH + x] = CLAMP (value, 0, 255);
-      }
-}
 
 static void
 warp_pattern (const guint8 *source,
@@ -260,8 +202,8 @@ test_pattern_and_pairs (void)
   gfloat y;
 
   g_assert_cmpuint (sizeof (Fte3600BriskFeature), ==, 44);
-  g_assert_cmpuint (FTE3600_BRISK_DESCRIPTOR_VERSION, ==, 2);
-  g_assert_cmpuint (FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION, ==, 2);
+  g_assert_cmpuint (FTE3600_BRISK_DESCRIPTOR_VERSION, ==, 3);
+  g_assert_cmpuint (FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION, ==, 3);
   g_assert_cmpuint (FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION, ==, 3);
   g_assert_cmpuint (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION, ==,
                     FTE3600_ENABLE_PERSONAL_AUTH ? 4 : 0);
@@ -401,8 +343,8 @@ test_extract_deterministic (void)
     g_autofree gchar *hash = feature_set_checksum (&first);
 
     g_assert_cmpstr (hash, ==,
-                     "18800f034c893f41fa1e094400485849"
-                     "bf59e172dc29a5ac6025b7183fdc50bd");
+                     "a94b585062b5187b3b198347df0893f3"
+                     "f8872af10353a4432c6fcdd9d0c6f328");
   }
 }
 

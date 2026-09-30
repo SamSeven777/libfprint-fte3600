@@ -453,8 +453,12 @@ test_malformed_headers_and_lengths (void)
 
   assert_header_mutation (wire, 8, 2, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 10, 38, FTE3600_TEMPLATE_INVALID_WIRE);
-  /* Historical extractor schema version 1 must be rejected under version 2. */
+  /* Both old raw and potentially double-normalized templates must be rejected. */
   assert_header_mutation (wire, 24, 1,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 24, 2,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 24, 4,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
   /* Historical diagnostic policy version 2 must be rejected under version 3. */
   assert_header_mutation (wire, 26, 2,
