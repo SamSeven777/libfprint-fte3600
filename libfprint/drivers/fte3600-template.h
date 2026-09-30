@@ -24,7 +24,8 @@ G_BEGIN_DECLS
 #define FTE3600_TEMPLATE_WIRE_VERSION FTE3600_TEMPLATE_WIRE_VERSION_V1
 #define FTE3600_TEMPLATE_WIRE_HEADER_SIZE 40
 #define FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE 48
-#define FTE3600_TEMPLATE_FUSION_POLICY_VERSION 1
+/* Version 2 includes the canonical BRISK mosaic in the OR decision. */
+#define FTE3600_TEMPLATE_FUSION_POLICY_VERSION 2
 #define FTE3600_TEMPLATE_FEATURE_RECORD_SIZE 44
 #define FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE 8
 #define FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE 140
@@ -73,8 +74,11 @@ gboolean fpi_fte3600_engine_mode_parse (const gchar       *value,
 
 typedef struct
 {
+  /* Gallery records visited, plus one when the BRISK mosaic is compared. */
   guint                   n_compared;
+  /* BRISK diagnostic passes among those comparisons; never exceeds n_compared. */
   guint                   diagnostic_passes;
+  /* Gallery index, SUBTEMPLATE_MOSAIC, or SUBTEMPLATE_NONE without a BRISK result. */
   guint                   best_subtemplate;
   Fte3600BriskMatchResult best;
   Fte3600IpaMatchResult   best_ipa;
@@ -135,7 +139,8 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Templa
                                                              Fte3600TemplateLoadPurpose    purpose,
                                                              Fte3600TemplateCompareResult *result);
 
-#define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC ((guint) -1)
+#define FTE3600_TEMPLATE_SUBTEMPLATE_NONE G_MAXUINT
+#define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC (G_MAXUINT - 1)
 
 /* Mono-engine helper: 2D-IPA only */
 Fte3600TemplateStatus fpi_fte3600_template_compare_ipa_features (const Fte3600Template        *templ,

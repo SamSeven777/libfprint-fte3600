@@ -53,26 +53,31 @@ G_BEGIN_DECLS
  * Policy version 3 requires at least 5 inliers and 5 mutual matches with
  * spatial variance and residual bounds, and requires every enrollment sample
  * after the first to pass the authentication gate against an already accepted sample.
+ * Policy version 7 additionally compares a mosaic reconstructed from the
+ * canonical gallery order; either an individual sample or that mosaic can
+ * accept. Earlier policies are incompatible and require re-enrollment.
+ * Versions 4 through 6 are reserved for different policies on other branches.
  * Extractor compatibility and decision-policy revisions are intentionally versioned
  * separately.  A default build retains policy version zero and cannot
  * authenticate.
  * Diagnostic policy version 1 was the historical 7-inlier diagnostic policy;
- * version 2 corresponds to the 5-inlier calibrated gates. */
+ * version 2 used the 5-inlier gates for individual samples; version 6 includes
+ * canonical mosaic comparison. These thresholds remain uncalibrated. */
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 #if FTE3600_ENABLE_PERSONAL_AUTH != 0 && FTE3600_ENABLE_PERSONAL_AUTH != 1
 #error "FTE3600_ENABLE_PERSONAL_AUTH must be zero or one"
 #endif
-#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 2
+#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 6
 #if FTE3600_ENABLE_PERSONAL_AUTH
-#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 3
+#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 7
 #else
 #define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 0
 #endif
 #define FTE3600_BRISK_THRESHOLDS_CALIBRATED 0
 G_STATIC_ASSERT (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ==
-                 (FTE3600_ENABLE_PERSONAL_AUTH ? 3 : 0));
+                 (FTE3600_ENABLE_PERSONAL_AUTH ? 7 : 0));
 #define FTE3600_BRISK_MAX_HAMMING 64
 #define FTE3600_BRISK_RATIO_PERCENT 80
 #define FTE3600_BRISK_MIN_HAMMING_MARGIN 8
@@ -190,7 +195,7 @@ gboolean fpi_fte3600_brisk_result_meets_diagnostic_policy (const Fte3600BriskMat
 
 /* Authentication gate.  A default build always returns FALSE.  An explicitly
  * opted-in personal build applies the same frozen strict gates as diagnostic
- * policy version 2 without claiming population calibration. */
+ * policy version 6 without claiming population calibration. */
 gboolean fpi_fte3600_brisk_result_meets_authentication_policy (const Fte3600BriskMatchResult *result);
 
 G_END_DECLS

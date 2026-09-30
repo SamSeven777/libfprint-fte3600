@@ -53,15 +53,21 @@ interchangeable with main's production-driver lifecycle tests.
 
 ## Authentication evidence
 
-BRISK personal policy version 3 uses at least five mutual matches/inliers and
-spatial/residual gates. Historical maintainer reports describe zero observed
+BRISK personal policy version 7 uses at least five mutual matches/inliers and
+spatial/residual gates, applied to each enrollment sample and to a canonically
+reconstructed mosaic. Any passing BRISK comparison accepts; permitted dual mode
+also accepts a passing IPA sample under fusion policy 2. This expanded decision
+requires new enrollments and is not covered by earlier policy reports.
+
+Historical maintainer reports describe zero observed
 acceptances in 342,720 offline non-matching comparisons. The repository does not
 currently provide a complete independently reproducible protocol, independent
 evaluation split and deployment-level report for that result. Do not present it
 as measured population FAR=0 or as a latency/FRR guarantee.
 
-Multi-person, multi-session FAR/FRR for the actual eight-subtemplate decision,
-including retries and failed captures/enrollments, remains unmeasured. This is
+Multi-person, multi-session FAR/FRR for the actual gallery-plus-mosaic decision,
+including IPA OR fusion, retries and failed captures/enrollments, remains
+unmeasured. This is
 an evidence gap, not merely a missing laboratory certificate. Default
 authentication is disabled; opt-in use remains experimental with a working
 password fallback. Do not enable experimental biometric authentication for

@@ -17,10 +17,13 @@ establish equivalence to a published learned model, general affine invariance
 or superior biometric accuracy. Follow the implementation and its documented
 parameter provenance.
 
-Runtime modes are BRISK, IPA and OR fusion. In dual mode either permitted engine
-can accept, so adding IPA is a change to the authentication boundary, not a
-cross-validation requirement that both engines agree. Single-pair metrics do
-not establish the behavior of the eight-subtemplate gallery and retries.
+Runtime modes are BRISK, IPA and OR fusion. BRISK compares the query with each
+of eight enrollment samples and with one stitched mosaic; any passing comparison
+can accept. The mosaic is reconstructed in canonical sample order so its decision
+is preserved when saving and loading a template. IPA compares the individual
+IPA-containing samples. In dual mode either permitted engine can accept; both
+engines are not required to agree. Single-pair metrics do not establish the
+behavior of the complete gallery, mosaic and retries.
 
 ## Explicit build gates
 
@@ -41,15 +44,26 @@ system-wide sudo/root authentication and preserve a password fallback.
 
 ## Templates
 
-BRISK-only Wire V1 remains version checked. The old experimental Wire V2 format
-is rejected; it did not carry a complete IPA compatibility contract.
+BRISK-only Wire V1 remains version checked. BRISK extractor schema stays at 1;
+its diagnostic policy is now 6 and personal authentication policy is 7 (or 0
+when disabled). These versions identify the canonical gallery-plus-mosaic
+decision and are distinct from the policies on main and Pocket branches.
+Previous BRISK policy 3 and diagnostic policy 2 templates are rejected, including
+templates from the initial mosaic implementation that reused those identifiers.
+Re-enroll after upgrading; preserve a working password before deleting the old
+enrollment. Do not edit old template headers to bypass compatibility checks.
+
+The old experimental Wire V2 format is rejected; it did not carry a complete
+IPA compatibility contract.
 IPA-containing records use Wire V3 with a 48-byte header and independent IPA
 extractor, diagnostic, authentication and fusion policy versions. The current
 contrast-normalized/sub-pixel extractor schema is version 3: duplicate refined
 detector locations are removed deterministically before applying the point
 budget. Schema 2 templates require re-enrollment. The diagnostic policy remains
 version 2. The IPA authentication policy is version 2 only with its explicit
-build opt-in, otherwise 0; fusion policy is version 1. The earlier experimental
+build opt-in, otherwise 0; fusion policy is version 2, adding the canonical BRISK
+mosaic to the OR decision. Fusion policy 1 templates require re-enrollment.
+The earlier experimental
 IPA schema is not interchangeable with these descriptors. Upgrade tests must check
 mismatches and mixed BRISK-only/IPA records. Re-enroll when the driver reports
 an incompatible experimental template; do not relabel old records to bypass
@@ -76,6 +90,12 @@ meson setup build-dual -Ddrivers=fte3600 \
   -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
 meson test -C build-dual --suite=unit-tests --print-errorlogs
 ```
+
+The template tests cover accepted and rejected mosaic-only probes before and
+after encoding/decoding, reversed enrollment order, policy rejection, and the
+comparison metadata. BRISK comparisons report up to nine compared targets;
+IPA-only reports eight gallery records. A mosaic winner has its own sentinel,
+distinct from both an individual sample index and an absent BRISK result.
 
 The IPA, template and lifecycle tests use synthetic inputs. They do not require
 hardware or real fingerprints. All registered unit tests, including

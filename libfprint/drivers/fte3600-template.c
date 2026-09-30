@@ -54,7 +54,6 @@ struct _Fte3600Template
   CanonicalSubtemplate   subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
   gboolean               has_mosaic;
   Fte3600BriskFeatureSet mosaic;
-  TemplatePose           poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
 };
 
 static void
@@ -539,22 +538,27 @@ static void
 template_reconstruct_mosaic (Fte3600Template *templ)
 {
   gboolean aligned[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { FALSE };
+  TemplatePose poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
 
   if (templ == NULL || templ->n_subtemplates == 0)
     return;
 
+  /* Encoding uses this same order. Anchor choice, alignment ties and fusion
+   * must not depend on capture order or change after loading the saved wire. */
+  qsort (templ->subtemplates, templ->n_subtemplates,
+         sizeof (templ->subtemplates[0]), subtemplate_compare);
   memset (&templ->mosaic, 0, sizeof (templ->mosaic));
   templ->mosaic.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
   templ->has_mosaic = FALSE;
 
   /* Sample 0 is anchor */
-  templ->poses[0].angle = 0.0;
-  templ->poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
-  templ->poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
+  poses[0].angle = 0.0;
+  poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
+  poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
   template_stitch_sample (templ, &templ->subtemplates[0].features,
-                          templ->poses[0].angle,
-                          templ->poses[0].translate_x,
-                          templ->poses[0].translate_y);
+                          poses[0].angle,
+                          poses[0].translate_x,
+                          poses[0].translate_y);
   aligned[0] = TRUE;
 
   /* Align remaining subtemplates by matching against already aligned subtemplates */
@@ -598,10 +602,10 @@ template_reconstruct_mosaic (Fte3600Template *templ)
         break;
 
       /* u is matched against a: pose_u = pose_a o pose_{u -> a} */
-      const TemplatePose *pose_a = &templ->poses[best_aligned];
+      const TemplatePose *pose_a = &poses[best_aligned];
       const gdouble cos_a = cos (pose_a->angle);
       const gdouble sin_a = sin (pose_a->angle);
-      TemplatePose *pose_u = &templ->poses[best_unaligned];
+      TemplatePose *pose_u = &poses[best_unaligned];
 
       pose_u->angle = template_wrap_angle (pose_a->angle + best_match.angle);
       pose_u->translate_x = cos_a * best_match.translate_x - sin_a * best_match.translate_y + pose_a->translate_x;
@@ -1122,7 +1126,7 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
   if (result != NULL)
     {
       memset (result, 0, sizeof (*result));
-      result->best_subtemplate = G_MAXUINT;
+      result->best_subtemplate = FTE3600_TEMPLATE_SUBTEMPLATE_NONE;
       result->engine_mode = mode;
     }
   if (!template_rounding_guard_enter (&rounding_guard))
@@ -1228,12 +1232,14 @@ fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
             default:
               g_assert_not_reached ();
             }
+        }
     }
 
   if (have_brisk && templ->has_mosaic)
     {
       Fte3600BriskMatchResult mosaic_match;
 
+      result->n_compared++;
       if (fpi_fte3600_brisk_match_mosaic (&canonical_query.features,
                                           &templ->mosaic,
                                           &mosaic_match) == FTE3600_BRISK_OK)

@@ -206,11 +206,21 @@ test_roundtrip_and_header (void)
   g_autoptr(GBytes) reverse_wire = NULL;
   const guint8 *data;
   gsize size;
+  static const guint8 golden_header[40] = {
+    0x46, 0x54, 0x33, 0x36, 0x42, 0x52, 0x4b, 0x00,
+    0x01, 0x00, 0x28, 0x00, 0xe8, 0x10, 0x00, 0x00,
+    0x61, 0x93, 0x40, 0x00, 0x50, 0x00, 0x2c, 0x00,
+    0x01, 0x00, 0x06, 0x00,
+    FTE3600_ENABLE_PERSONAL_AUTH ? 0x07 : 0x00, 0x00, 0x08, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
 
   g_assert_cmpint (fpi_fte3600_template_encode (original, &wire), ==,
                    FTE3600_TEMPLATE_OK);
   data = g_bytes_get_data (wire, &size);
   g_assert_cmpuint (size, ==, TEST_WIRE_SIZE);
+  g_assert_cmpmem (data, sizeof (golden_header),
+                   golden_header, sizeof (golden_header));
   g_assert_cmpmem (data, 8, "FT36BRK\0", 8);
   g_assert_cmpuint (read_u16 (&data[8]), ==, 1);
   g_assert_cmpuint (read_u16 (&data[10]), ==, 40);
@@ -385,8 +395,8 @@ test_authentication_policy (void)
                      templ, &query, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
                      &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_cmpuint (result.n_compared, ==,
-                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
-  g_assert_cmpuint (result.diagnostic_passes, >=, 1);
+                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES + 1);
+  g_assert_cmpuint (result.diagnostic_passes, ==, result.n_compared);
   g_assert_cmpuint (result.best_subtemplate, <,
                     FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   g_assert_false (result.authentication_accepted);
@@ -398,7 +408,7 @@ test_authentication_policy (void)
                      &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.authentication_accepted);
   g_assert_cmpuint (result.n_compared, ==,
-                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES + 1);
 #else
   g_assert_cmpint (fpi_fte3600_template_compare_features (
                      templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
@@ -456,15 +466,16 @@ test_malformed_headers_and_lengths (void)
   assert_header_mutation (wire, 16, 0x9360, FTE3600_TEMPLATE_INVALID_WIRE);
   assert_header_mutation (wire, 24, 2,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
-  /* Historical diagnostic policy version 1 must be rejected under version 2. */
-  assert_header_mutation (wire, 26, 1,
-                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  /* Old and other-branch policies must not acquire the new mosaic semantics. */
+  for (guint16 policy = 1; policy < 6; policy++)
+    assert_header_mutation (wire, 26, policy,
+                            FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 28,
                           !FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
-  /* Historical policy version 2 (7-inlier) must be rejected under policy version 3. */
-  assert_header_mutation (wire, 28, 2,
-                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  for (guint16 policy = 1; policy < 7; policy++)
+    assert_header_mutation (wire, 28, policy,
+                            FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 30, 7, FTE3600_TEMPLATE_INVALID_WIRE);
 
   {
@@ -848,6 +859,7 @@ test_dual_engine_fusion (void)
   wire_data = g_bytes_get_data (wire, &wire_size);
   g_assert_cmpuint (read_u16 (&wire_data[8]), ==, FTE3600_TEMPLATE_WIRE_VERSION_V3);
   g_assert_cmpuint (read_u32 (&wire_data[32]), ==, 0x01); /* Dual engine flag */
+  g_assert_cmpuint (read_u16 (&wire_data[46]), ==, 2);
 
 #if FTE3600_ENABLE_IPA_AUTH
   Fte3600IpaFeatureSet ipa_probe = ipa_ref;
@@ -1088,6 +1100,23 @@ test_ipa_version_isolation (void)
   assert_header_mutation (wire, 44, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 46, FTE3600_TEMPLATE_FUSION_POLICY_VERSION + 1,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 46, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+
+  /* A complete pre-mosaic compatibility tuple is rejected for both load
+   * purposes; rewriting a header is not an allowed migration. */
+  guint8 *data;
+  g_autoptr(GBytes) legacy = mutable_copy (wire, &data, NULL);
+  write_u16 (&data[26], 2);
+  write_u16 (&data[28], FTE3600_ENABLE_PERSONAL_AUTH ? 3 : 0);
+  write_u16 (&data[46], 1);
+  for (guint purpose = FTE3600_TEMPLATE_LOAD_DIAGNOSTIC;
+       purpose <= FTE3600_TEMPLATE_LOAD_AUTHENTICATION; purpose++)
+    {
+      g_autoptr(Fte3600Template) decoded = NULL;
+      g_assert_cmpint (fpi_fte3600_template_decode (legacy, purpose, &decoded),
+                       ==, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+      g_assert_null (decoded);
+    }
 }
 
 static void
@@ -1114,6 +1143,8 @@ test_mode_gates_and_query_fallback (void)
                    ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.best_ipa.diagnostic_policy_passed);
   g_assert_false (result.authentication_accepted);
+  g_assert_cmpuint (result.n_compared, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+  g_assert_cmpuint (result.best_subtemplate, ==, FTE3600_TEMPLATE_SUBTEMPLATE_NONE);
   g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
                      templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
                    ==, FTE3600_ENABLE_IPA_AUTH ? FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NOT_CALIBRATED);
@@ -1150,6 +1181,132 @@ test_template_mosaicking (void)
   mosaic = fpi_fte3600_template_get_mosaic (decoded);
   g_assert_nonnull (mosaic);
   g_assert_cmpuint (mosaic->n_features, >=, FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES);
+}
+
+static void
+make_jittered_mosaic_point (Fte3600BriskFeature *feature,
+                            guint                id,
+                            gfloat               jitter)
+{
+  feature->x = 10.0f + 3.5f * id + jitter * ((id % 3) - 1.0f);
+  feature->y = 15.0f + 25.0f * (id % 3) + jitter * ((id % 4) - 1.5f);
+  feature->orientation = 0.0f;
+  fill_descriptor (feature->descriptor, id, 0);
+}
+
+static void
+test_mosaic_semantic_roundtrip (void)
+{
+  static const guint jitter_order[] = { 0, 7, 1, 6, 2, 5, 3, 4 };
+  static const guint probe_ids[] = { 0, 1, 2, 10, 11, 12 };
+  static const gfloat probe_jitter[] = { -0.81f, 0.0f };
+  Fte3600BriskFeatureSet samples[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
+  g_autoptr(Fte3600Template) original = fpi_fte3600_template_new ();
+  g_autoptr(Fte3600Template) reversed = fpi_fte3600_template_new ();
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(Fte3600Template) copy = NULL;
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(GBytes) reversed_wire = NULL;
+
+  /* A generated boundary-straddling fixture with small inconsistent offsets.
+   * It exercises order-dependent alignment and fusion, not just wire equality. */
+  for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+    {
+      samples[s].extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      samples[s].n_features = TEST_FEATURES;
+      for (guint i = 0; i < 9; i++)
+        make_jittered_mosaic_point (&samples[s].features[i], s ? 4 + i : i,
+                                    0.015f * jitter_order[s]);
+      for (guint i = 0; i < 3; i++)
+        {
+          Fte3600BriskFeature *feature = &samples[s].features[9 + i];
+          feature->x = 56.0f + 2.0f * (i % 2);
+          feature->y = 15.0f + 25.0f * (i % 3);
+          fill_descriptor (feature->descriptor, s ? 200 + s * 10 + i : 100 + i, 0);
+        }
+    }
+
+  for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+    {
+      const Fte3600TemplateStatus expected = s + 1 == G_N_ELEMENTS (samples) ?
+                                             FTE3600_TEMPLATE_OK :
+                                             FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+      g_assert_cmpint (fpi_fte3600_template_add_features (original, &samples[s], NULL),
+                       ==, expected);
+      g_assert_cmpint (fpi_fte3600_template_add_features (
+                         reversed, &samples[G_N_ELEMENTS (samples) - s - 1], NULL),
+                       ==, expected);
+    }
+
+  g_assert_cmpint (fpi_fte3600_template_encode (original, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_encode (reversed, &reversed_wire),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (g_bytes_equal (wire, reversed_wire));
+  g_assert_cmpint (fpi_fte3600_template_decode (
+                     wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  copy = fpi_fte3600_template_copy (original);
+
+  const Fte3600Template *variants[] = { original, reversed, decoded, copy };
+  const Fte3600BriskFeatureSet *mosaic = fpi_fte3600_template_get_mosaic (original);
+  g_assert_nonnull (mosaic);
+  for (guint v = 1; v < G_N_ELEMENTS (variants); v++)
+    {
+      const Fte3600BriskFeatureSet *other = fpi_fte3600_template_get_mosaic (variants[v]);
+      g_assert_nonnull (other);
+      g_assert_cmpmem (mosaic, sizeof (*mosaic), other, sizeof (*other));
+    }
+
+  for (guint p = 0; p < G_N_ELEMENTS (probe_jitter); p++)
+    {
+      Fte3600BriskFeatureSet query = { 0 };
+      query.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      query.n_features = TEST_FEATURES;
+      for (guint i = 0; i < G_N_ELEMENTS (probe_ids); i++)
+        make_jittered_mosaic_point (&query.features[i], probe_ids[i], probe_jitter[p]);
+      for (guint i = 0; i < 6; i++)
+        {
+          query.features[6 + i].x = 2.0f + 3.0f * (i % 2);
+          query.features[6 + i].y = 15.0f + 25.0f * (i % 3);
+          fill_descriptor (query.features[6 + i].descriptor, 500 + i, 0);
+        }
+
+      for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+        {
+          Fte3600BriskMatchResult match;
+          (void) fpi_fte3600_brisk_match (&query, &samples[s], &match);
+          g_assert_false (match.diagnostic_policy_passed);
+        }
+
+      for (guint purpose = FTE3600_TEMPLATE_LOAD_DIAGNOSTIC;
+           purpose <= FTE3600_TEMPLATE_LOAD_AUTHENTICATION; purpose++)
+        {
+          Fte3600TemplateCompareResult expected;
+          const Fte3600TemplateStatus status = fpi_fte3600_template_compare_features (
+            original, &query, purpose, &expected);
+          g_assert_cmpint (status, ==,
+                           purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
+                           !FTE3600_ENABLE_PERSONAL_AUTH ? FTE3600_TEMPLATE_NOT_CALIBRATED :
+                           FTE3600_TEMPLATE_OK);
+          if (status == FTE3600_TEMPLATE_OK)
+            {
+              g_assert_cmpuint (expected.n_compared, ==, 9);
+              g_assert_cmpuint (expected.diagnostic_passes, ==, p == 1 ? 1 : 0);
+              g_assert_cmpint (expected.authentication_accepted, ==,
+                               p == 1 && purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION);
+              if (p == 1)
+                g_assert_cmpuint (expected.best_subtemplate, ==,
+                                  FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC);
+            }
+          for (guint v = 1; v < G_N_ELEMENTS (variants); v++)
+            {
+              Fte3600TemplateCompareResult actual;
+              g_assert_cmpint (fpi_fte3600_template_compare_features (
+                                 variants[v], &query, purpose, &actual), ==, status);
+              g_assert_cmpmem (&expected, sizeof (expected), &actual, sizeof (actual));
+            }
+        }
+    }
 }
 
 static void
@@ -1265,6 +1422,19 @@ test_boundary_straddling_probe (void)
   g_assert_cmpuint (result.diagnostic_passes, >=, 1);
   g_assert_cmpuint (result.best.inliers, ==, 6);
 #endif
+  g_assert_cmpuint (result.n_compared, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES + 1);
+  g_assert_cmpuint (result.diagnostic_passes, ==, 1);
+  g_assert_cmpuint (result.best_subtemplate, ==, FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC);
+#if FTE3600_ENABLE_IPA_AUTH
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     templ, &query, NULL, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+  g_assert_cmpuint (result.n_compared, ==, 9);
+  g_assert_cmpuint (result.best_subtemplate, ==, FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC);
+#endif
 }
 
 int
@@ -1299,6 +1469,7 @@ main (int   argc,
   g_test_add_func ("/fte3600-template/ipa-version-isolation", test_ipa_version_isolation);
   g_test_add_func ("/fte3600-template/mode-gates-and-query-fallback", test_mode_gates_and_query_fallback);
   g_test_add_func ("/fte3600-template/mosaicking", test_template_mosaicking);
+  g_test_add_func ("/fte3600-template/mosaic-semantic-roundtrip", test_mosaic_semantic_roundtrip);
   g_test_add_func ("/fte3600-template/boundary-straddling-probe", test_boundary_straddling_probe);
 #if FTE3600_ENABLE_IPA_AUTH
   g_test_add_func ("/fte3600-template/mono-engine-modes",
