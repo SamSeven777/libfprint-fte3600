@@ -111,15 +111,17 @@ static void
 fp_device_cancelled_cb (GCancellable *cancellable, FpDevice *self)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (self);
+  g_autoptr(GSource) source = g_idle_source_new ();
 
-  priv->current_idle_cancel_source = g_idle_source_new ();
-  g_source_set_callback (priv->current_idle_cancel_source,
+  g_source_set_callback (source,
                          fp_device_cancel_in_idle_cb,
                          self,
                          NULL);
-  g_source_attach (priv->current_idle_cancel_source,
-                   g_task_get_context (priv->current_task));
-  g_source_unref (priv->current_idle_cancel_source);
+  priv->current_idle_cancel_source = source;
+  /* Cancellation may come from another thread. The main context can dispatch
+   * the source and clear the private pointer before attach returns, so retain
+   * and release the initial reference through the local pointer only. */
+  g_source_attach (source, g_task_get_context (priv->current_task));
 }
 
 /* Forward the external task cancellable to the internal one. */

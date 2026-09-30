@@ -309,6 +309,35 @@ test_utils = static_library('fprint-test-utils',
     dependencies: libfprint_private_dep,
     install: false)
 
+# Compile the real public device implementation here so that linker wrappers
+# can control its cross-thread source boundaries. Do not also link libfprint.so:
+# that would introduce another definition of the public device GType.
+device_cancel_test = executable('test-fpi-device-cancel',
+    sources: [
+        'test-fpi-device-cancel.c',
+        'test-device-fake.c',
+        '../libfprint/fp-device.c',
+        '../libfprint/fp-image.c',
+        '../libfprint/fp-print.c',
+        fp_enums,
+    ],
+    dependencies: deps,
+    include_directories: include_directories('../libfprint'),
+    link_with: libfprint_private,
+    link_args: [
+        '-Wl,--wrap=g_idle_source_new',
+        '-Wl,--wrap=g_source_attach',
+        '-Wl,--wrap=g_cancellable_disconnect',
+    ],
+    c_args: common_cflags,
+    install: false,
+)
+test('fpi-device-cancel', device_cancel_test,
+    suite: ['unit-tests'],
+    env: envs,
+    timeout: 30,
+)
+
 unit_tests = [
     'fpi-device',
     'fpi-ssm',
