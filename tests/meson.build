@@ -393,6 +393,9 @@ if 'fte3600' in drivers
         'g_getenv', 'fpi_fte3600_brisk_extract', 'fpi_fte3600_ipa_extract',
     ]
     fte3600_mock_link_args = []
+    if get_option('fte3600_personal_auth')
+        fte3600_mock_symbols += 'fpi_fte3600_template_decode'
+    endif
     foreach symbol : fte3600_mock_symbols
         fte3600_mock_link_args += '-Wl,--wrap=' + symbol
     endforeach

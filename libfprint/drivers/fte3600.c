@@ -2164,16 +2164,15 @@ fte3600_verify_template_error (Fte3600TemplateStatus status)
 }
 
 static GError *
-fte3600_verify_load_template (FpiDeviceFte3600 *self)
+fte3600_verify_get_wire (FpiDeviceFte3600 *self,
+                         GBytes          **wire)
 {
   FpDevice *dev = FP_DEVICE (self);
   FpPrint *print = NULL;
 
   g_autoptr(GVariant) data = NULL;
-  g_autoptr(GBytes) wire = NULL;
   const guint8 *wire_data;
   gsize wire_size = 0;
-  Fte3600TemplateStatus status;
 
   fpi_device_get_verify_data (dev, &print);
   if (print == NULL || !fp_print_compatible (print, dev) ||
@@ -2198,21 +2197,66 @@ fte3600_verify_load_template (FpiDeviceFte3600 *self)
       FP_DEVICE_ERROR_DATA_INVALID,
       "FTE3600 verification template has an invalid length");
 
-  wire = g_bytes_new (wire_data, wire_size);
-  g_clear_pointer (&self->verify_template, fpi_fte3600_template_free);
+  *wire = g_bytes_new (wire_data, wire_size);
+  return NULL;
+}
+
+static void
+fte3600_verify_load_worker (GTask        *task,
+                            gpointer      source_object,
+                            gpointer      task_data,
+                            GCancellable *cancellable)
+{
+  GBytes *wire = task_data;
+  g_autoptr(Fte3600Template) templ = NULL;
+  Fte3600TemplateStatus status;
+
+  (void) source_object;
+  (void) cancellable;
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  /* Reconstruction can be expensive. Only task-owned data is touched here,
+   * so cancellation may finish the action while this worker unwinds. */
   status = fpi_fte3600_template_decode (
-    wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &self->verify_template);
+    wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &templ);
+  if (g_task_return_error_if_cancelled (task))
+    return;
   if (status != FTE3600_TEMPLATE_OK)
-    return fte3600_verify_template_error (status);
-  if (!fpi_fte3600_template_is_ready (self->verify_template))
     {
-      g_clear_pointer (&self->verify_template, fpi_fte3600_template_free);
-      return fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_DATA_INVALID,
-        "FTE3600 verification template was incomplete");
+      g_task_return_error (task, fte3600_verify_template_error (status));
+      return;
+    }
+  if (!fpi_fte3600_template_is_ready (templ))
+    {
+      g_task_return_error (task, fpi_device_error_new_msg (
+                            FP_DEVICE_ERROR_DATA_INVALID,
+                            "FTE3600 verification template was incomplete"));
+      return;
     }
 
-  return NULL;
+  g_task_return_pointer (task, g_steal_pointer (&templ),
+                         (GDestroyNotify) fpi_fte3600_template_free);
+}
+
+static void
+fte3600_verify_load_complete (GObject      *source_object,
+                              GAsyncResult *result,
+                              gpointer      user_data)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (source_object);
+  g_autoptr(GError) error = NULL;
+
+  (void) user_data;
+
+  self->verify_template = g_task_propagate_pointer (G_TASK (result), &error);
+  if (error != NULL)
+    {
+      fpi_device_verify_complete (FP_DEVICE (self), g_steal_pointer (&error));
+      return;
+    }
+  fte3600_start_capture (self);
 }
 
 static void
@@ -2338,7 +2382,7 @@ fte3600_verify_complete (GObject      *source_object,
       else if (job->comparison.engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
         mode_str = "2D-IPA-ONLY";
 
-      fp_dbg ("Personal verification [%s] compared %u subtemplates; strict passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
+      fp_dbg ("Personal verification [%s] compared %u references; BRISK diagnostic passes %u (BRISK: %s, 2D-IPA: %s -> %s)",
               mode_str,
               job->comparison.n_compared, job->comparison.diagnostic_passes,
               job->comparison.brisk_accepted ? "PASS" : "FAIL",
@@ -2835,17 +2879,24 @@ static void
 fte3600_verify (FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  g_autoptr(GTask) task = NULL;
+  g_autoptr(GBytes) wire = NULL;
   GError *error;
 
   g_clear_pointer (&self->verify_template, fpi_fte3600_template_free);
-  error = fte3600_verify_load_template (self);
+  error = fte3600_verify_get_wire (self, &wire);
   if (error != NULL)
     {
       fpi_device_verify_complete (dev, error);
       return;
     }
 
-  fte3600_start_capture (self);
+  task = g_task_new (self, fpi_device_get_cancellable (dev),
+                     fte3600_verify_load_complete, NULL);
+  g_task_set_task_data (task, g_steal_pointer (&wire),
+                        (GDestroyNotify) g_bytes_unref);
+  g_task_set_return_on_cancel (task, TRUE);
+  g_task_run_in_thread (task, fte3600_verify_load_worker);
 }
 #endif
 
