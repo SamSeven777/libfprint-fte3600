@@ -15,6 +15,11 @@ Reset is currently modeled on `\_SB_.GPO1` pin 39 and IRQ on
 `\_SB_.GPO2` pin 0. Active-low reset remains a hypothesis requiring validation.
 The diagnostic recovery command resets hardware, uploads firmware and temporarily
 changes runtime-power policy; it is not a read-only probe.
+The regular Medion driver does not claim the reset output or automatically
+upload firmware, including in capture-only builds. An unresponsive device fails
+to open; hardware recovery remains an explicitly selected standalone experiment.
+The recovery and soft-reset wrappers share an exclusive lock through diagnostic
+and service cleanup. Direct invocations of the diagnostic bypass that lock.
 
 - [Evidence and hardware routes](docs/fte3600/status.md)
 - [Diagnostic boundaries and known-good comparison](docs/fte3600/troubleshooting.md)

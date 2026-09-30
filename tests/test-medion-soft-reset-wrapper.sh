@@ -67,8 +67,13 @@ case ${0##*/} in
         if [[ -L $FTE_TEST_RUNTIME_UNIT && $(readlink "$FTE_TEST_RUNTIME_UNIT") == /dev/null && ${FTE_TEST_MASK_INEFFECTIVE:-0} != 1 ]]; then
           fte_mock_load=masked
         fi
-        printf 'LoadState=%s\nActiveState=%s\n' "$fte_mock_load" "$fte_mock_active"
+        if [[ $* == *--value* ]]; then
+          if [[ $* == *LoadState* ]]; then echo "$fte_mock_load"; else echo "$fte_mock_active"; fi
+        else
+          printf 'LoadState=%s\nActiveState=%s\n' "$fte_mock_load" "$fte_mock_active"
+        fi
         ;;
+      is-active) [[ $fte_mock_active == active ]] ;;
       mask)
         [[ $* == 'mask --runtime --now fprintd.service' ]]
         ln -s /dev/null "$FTE_TEST_RUNTIME_UNIT"
@@ -77,6 +82,12 @@ case ${0##*/} in
         ;;
       unmask)
         [[ $* == 'unmask --runtime fprintd.service' ]]
+        # A separately opened descriptor must remain excluded during service
+        # restoration, even though the diagnostic child has already exited.
+        if flock --nonblock "$FTE_TEST_CASE/lock" true; then
+          echo 'diagnostic lock was released before service cleanup' >&2
+          exit 92
+        fi
         [[ ${FTE_TEST_UNMASK_FAIL:-0} != 1 ]] || exit 1
         rm -- "$FTE_TEST_RUNTIME_UNIT"
         ;;
@@ -100,7 +111,8 @@ export FTE_TEST_TOOL="$fte_test_root/mock-diagnostic"
 cat > "$FTE_TEST_TOOL" <<'TOOL'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $# == 1 && $1 == --compare-soft-reset ]]
+[[ ( $# == 1 && $1 == --compare-soft-reset ) ||
+   ( $# == 2 && $1 == --test-vendor-recovery ) ]]
 echo "tool $*" >> "$FTE_TEST_CASE/events"
 echo 'MOCK diagnostic stdout: comparison result'
 echo 'MOCK diagnostic stderr: retained' >&2
@@ -128,12 +140,15 @@ fte_test_new() {
   unset FTE_TEST_UID FTE_TEST_DIRTY FTE_TEST_PKG_FAIL FTE_TEST_COMPILE_FAIL
   unset FTE_TEST_MASK_INEFFECTIVE FTE_TEST_MASK_FAIL FTE_TEST_UNMASK_FAIL
   unset FTE_TEST_START_FAIL FTE_TEST_REPLACE_UNIT FTE_TEST_WAIT FTE_TEST_TOOL_EXIT
+  fte_test_script=test-medion-soft-reset.sh
   # Keep the real control flow, root check, traps, and tool argument dispatch.
   # Only immutable absolute paths are mapped into this private test directory.
-  sed -e "s@/run/systemd/system/fprintd.service@$FTE_TEST_RUNTIME_UNIT@g" \
-      -e "s@/run/fte3600-medion-soft-reset.lock@$FTE_TEST_CASE/lock@g" \
-      "$fte_test_repo/scripts/test-medion-soft-reset.sh" \
-      > "$FTE_TEST_CASE/repo/scripts/test-medion-soft-reset.sh"
+  for fte_test_wrapper in test-medion-soft-reset.sh test-medion-recovery.sh; do
+    sed -e "s@/run/systemd/system/fprintd.service@$FTE_TEST_RUNTIME_UNIT@g" \
+        -e "s@/run/fte3600-medion-diagnostic.lock@$FTE_TEST_CASE/lock@g" \
+        "$fte_test_repo/scripts/$fte_test_wrapper" \
+        > "$FTE_TEST_CASE/repo/scripts/$fte_test_wrapper"
+  done
 }
 
 fte_test_fail() {
@@ -145,7 +160,7 @@ fte_test_fail() {
 fte_test_run() {
   local fte_test_expected=$1 fte_test_result
   shift
-  if "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/test-medion-soft-reset.sh" "$@" > "$FTE_TEST_CASE/output" 2>&1; then
+  if "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/$fte_test_script" "$@" > "$FTE_TEST_CASE/output" 2>&1; then
     fte_test_result=0
   else
     fte_test_result=$?
@@ -370,6 +385,39 @@ for fte_test_load in not-found error bad-setting; do
   fte_test_run 1 --run
   fte_test_no_mutation
   fte_test_ok "unloaded service ($fte_test_load) rejected before isolation"
+done
+
+# Run every pair against the same service and lock. The second wrapper must
+# neither launch a diagnostic nor unmask/restart the first wrapper's daemon.
+for fte_test_holder in test-medion-soft-reset.sh test-medion-recovery.sh; do
+  for fte_test_contender in test-medion-soft-reset.sh test-medion-recovery.sh; do
+    fte_test_new
+    export FTE_TEST_WAIT=1
+    fte_test_args=()
+    [[ $fte_test_holder != test-medion-soft-reset.sh ]] || fte_test_args=(--run)
+    "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/$fte_test_holder" "${fte_test_args[@]}" > "$FTE_TEST_CASE/holder-output" 2>&1 &
+    fte_test_child=$!
+    for ((fte_test_poll=0; fte_test_poll<250; fte_test_poll++)); do
+      [[ ! -e $FTE_TEST_CASE/tool-ready ]] || break
+      sleep 0.02
+    done
+    [[ -e $FTE_TEST_CASE/tool-ready ]] || fte_test_fail 'lock holder diagnostic did not start'
+    fte_test_script=$fte_test_contender
+    fte_test_args=()
+    [[ $fte_test_contender != test-medion-soft-reset.sh ]] || fte_test_args=(--run)
+    fte_test_run 1 "${fte_test_args[@]}"
+    [[ $(grep -c '^tool ' "$FTE_TEST_CASE/events") == 1 ]] || fte_test_fail 'concurrent diagnostic started'
+    ! grep -Eq '^systemctl (unmask|start)' "$FTE_TEST_CASE/events" || fte_test_fail 'contender changed holder service state'
+    kill -TERM "$fte_test_child"
+    if wait "$fte_test_child"; then fte_test_result=0; else fte_test_result=$?; fi
+    fte_test_child=
+    [[ $fte_test_result == 143 ]] || fte_test_fail 'interrupted holder lost signal status'
+    fte_test_restored_active
+    fte_test_tool_line=$(grep -n '^tool-cleanup$' "$FTE_TEST_CASE/events" | cut -d: -f1)
+    fte_test_start_line=$(grep -n '^systemctl start fprintd.service$' "$FTE_TEST_CASE/events" | cut -d: -f1)
+    [[ -n $fte_test_tool_line && $fte_test_tool_line -lt $fte_test_start_line ]] || fte_test_fail 'holder restarted service before child stopped'
+    fte_test_ok "$fte_test_holder excludes $fte_test_contender through cleanup"
+  done
 done
 
 printf 'PASS: %s shell-wrapper regression cases (mocked, no hardware access).\n' "$fte_test_count"

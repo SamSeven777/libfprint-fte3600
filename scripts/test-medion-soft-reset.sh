@@ -20,7 +20,7 @@ removed on exit; a previously active service is restarted. Output stays local.
 Exit 0/2 preserves the tool's comparison result, not fingerprint functionality;
 setup/cleanup failures return 1, interruption returns 128 + the signal number.
 This wrapper cannot prove that nothing accessed the sensor earlier this boot.
-Its lock excludes another copy of this wrapper, not other diagnostic programs.
+Its lock excludes both Medion wrappers; direct diagnostic programs bypass it.
 USAGE
 }
 
@@ -51,7 +51,7 @@ fi
 
 fte_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fte_runtime_unit=/run/systemd/system/fprintd.service
-fte_lockfile=/run/fte3600-medion-soft-reset.lock
+fte_lockfile=/run/fte3600-medion-diagnostic.lock
 fte_work=
 fte_child=
 fte_mask_attempted=0
@@ -202,7 +202,7 @@ if [[ -L $fte_lockfile || ( -e $fte_lockfile && ! -f $fte_lockfile ) ]]; then
 fi
 exec {fte_lock_fd}>>"$fte_lockfile"
 if ! flock --nonblock "$fte_lock_fd"; then
-  echo 'Another copy of this comparison wrapper is running.' >&2
+  echo 'Another Medion diagnostic wrapper is running.' >&2
   exit 1
 fi
 

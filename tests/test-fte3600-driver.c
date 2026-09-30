@@ -116,8 +116,8 @@ test_gpio_profiles (void)
   g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
 
   g_assert_nonnull (medion);
-  g_assert_true (medion->allow_hardware_reset);
-  g_assert_true (medion->allow_firmware_upload);
+  g_assert_false (medion->allow_hardware_reset);
+  g_assert_false (medion->allow_firmware_upload);
   g_assert_cmpuint (medion->reset_high_ms, ==, 10);
   g_assert_cmpuint (medion->reset_low_ms, ==, 20);
   g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
@@ -158,14 +158,14 @@ test_firmware_platform_gate (void)
   g_assert_true (fte3600_firmware_upload_allowed (a1, TRUE));
   g_assert_false (fte3600_firmware_upload_allowed (a1, FALSE));
   g_assert_false (fte3600_firmware_upload_allowed (medion, FALSE));
-  g_assert_true (fte3600_firmware_upload_allowed (medion, TRUE));
+  g_assert_false (fte3600_firmware_upload_allowed (medion, TRUE));
   g_assert_false (fte3600_firmware_upload_allowed (NULL, TRUE));
 
   /* If either reset or firmware is restricted, upload must be forbidden. */
-  restricted = *medion;
+  restricted = *a1;
   restricted.allow_hardware_reset = FALSE;
   g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
-  restricted = *medion;
+  restricted = *a1;
   restricted.allow_firmware_upload = FALSE;
   g_assert_false (fte3600_firmware_upload_allowed (&restricted, TRUE));
 }

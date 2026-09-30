@@ -532,7 +532,7 @@ static FpDevice *
 new_device (void)
 {
   g_autoptr(GError) error = NULL;
-  FpDevice *device = new_device_for_platform (&platforms[1], &error);
+  FpDevice *device = new_device_for_platform (&platforms[0], &error);
 
   g_assert_no_error (error);
   return device;
@@ -587,6 +587,8 @@ test_capture_reopen (gconstpointer data)
       guint resets;
 
       open_device (device);
+      if (data == &platforms[1])
+        g_assert_cmpuint (sensor.claimed, ==, 2); /* IRQ only, never reset. */
       image = fp_device_capture_sync (device, TRUE, NULL, &error);
       g_assert_no_error (error);
       g_assert_nonnull (image);
@@ -605,6 +607,32 @@ test_capture_reopen (gconstpointer data)
       g_assert_false (sensor.claimed);
     }
   g_assert_cmpuint (sensor.images, ==, 2);
+  finish_device (device);
+}
+
+static void
+test_medion_recovery_disabled (void)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = new_device_for_platform (&platforms[1], &error);
+
+  g_assert_no_error (error);
+  sensor.cold_start = TRUE;
+  g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
+                         "*Sensor reset after open failure also failed:*");
+  g_assert_false (fp_device_open_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_test_assert_expected_messages ();
+  /* The open wrapper rejects any firmware-file access. Only the IRQ GPIO may
+   * be requested; an unresponsive sensor must not escalate into recovery. */
+  g_assert_cmpuint (sensor.claims, ==, 1);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_deasserts, ==, 0);
+  g_assert_false (sensor.claimed);
+  g_assert_false (fp_device_is_open (device));
+  g_clear_error (&error);
+  sensor.cold_start = FALSE;
+  open_device (device);
   finish_device (device);
 }
 
@@ -773,6 +801,7 @@ main (int argc, char **argv)
                         test_capture_reopen);
   g_test_add_data_func ("/fte3600-lifecycle/gpio/medion-split-controllers", &platforms[1],
                         test_capture_reopen);
+  g_test_add_func ("/fte3600-lifecycle/medion/recovery-disabled", test_medion_recovery_disabled);
   g_test_add_func ("/fte3600-lifecycle/probe/unknown-dmi", test_unknown_dmi);
   g_test_add_data_func ("/fte3600-lifecycle/hardware-reset/recovery", GUINT_TO_POINTER (0),
                         test_hardware_reset);

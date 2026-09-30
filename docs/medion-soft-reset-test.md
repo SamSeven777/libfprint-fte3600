@@ -134,8 +134,10 @@ printf 'Test/logging exit status: %s\n' "$?"
 
 The wrapper builds a temporary standalone tool, verifies that fprintd is
 isolated, and calls only `--compare-soft-reset`. It installs nothing and does not
-upload the output anywhere. Its lock only coordinates other instances of this
-wrapper; do not start another fingerprint client alongside it.
+upload the output anywhere. It shares an exclusive lock with the recovery
+wrapper until the diagnostic has stopped and service restoration finishes.
+Direct diagnostic invocations and other fingerprint clients bypass that lock;
+do not run them alongside either wrapper.
 
 The diagnostic checks the selected device's actual SPI hierarchy, including
 PCI `0000:00:19.0` and its PXA SPI controller. It temporarily holds runtime power

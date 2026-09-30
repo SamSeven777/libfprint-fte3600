@@ -57,8 +57,10 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .reset_controller_acpi_path = "\\_SB_.GPO1",
     .reset_offset = 0x27,
     .reset_active_low = TRUE,
-    .allow_hardware_reset = TRUE,
-    .allow_firmware_upload = TRUE,
+    /* Sensor identity and reset polarity remain unverified on this board.
+     * Keep recovery confined to explicitly requested standalone experiments. */
+    .allow_hardware_reset = FALSE,
+    .allow_firmware_upload = FALSE,
     /* SPI reset timing from the Windows 2.0.3.102 FT9361 path. */
     .reset_high_ms = 10,
     .reset_low_ms = 20,
