@@ -65,28 +65,33 @@ G_BEGIN_DECLS
  * spatial variance and residual bounds, and requires every enrollment sample
  * after the first to pass the authentication gate against an already accepted sample.
  * Policy version 4 retains the same gates for contrast-normalized extraction.
+ * Policy version 6 accepts any of eight individual subtemplates or their
+ * canonically reconstructed mosaic. It retains the five-inlier pair gates.
+ * Version 5 belongs to the separate Pocket policy and is not interchangeable.
  * The single-pass Schema v3 correction changes extractor compatibility only.
  * Extractor compatibility and decision-policy revisions are intentionally versioned
  * separately.  A default build retains policy version zero and cannot
  * authenticate.
  * Diagnostic policy version 1 was the historical 7-inlier diagnostic policy;
  * version 2 corresponded to 5-inlier gates under Schema v1;
- * version 3 retains those uncalibrated gates for contrast-normalized input. */
+ * version 3 retains those uncalibrated gates for contrast-normalized input;
+ * version 5 adds canonical mosaic comparison to the eight-sample gallery.
+ * Diagnostic version 4 belongs to the separate Pocket policy. */
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
 #endif
 #if FTE3600_ENABLE_PERSONAL_AUTH != 0 && FTE3600_ENABLE_PERSONAL_AUTH != 1
 #error "FTE3600_ENABLE_PERSONAL_AUTH must be zero or one"
 #endif
-#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 3
+#define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 5
 #if FTE3600_ENABLE_PERSONAL_AUTH
-#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 4
+#define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 6
 #else
 #define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 0
 #endif
 #define FTE3600_BRISK_THRESHOLDS_CALIBRATED 0
 G_STATIC_ASSERT (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ==
-                 (FTE3600_ENABLE_PERSONAL_AUTH ? 4 : 0));
+                 (FTE3600_ENABLE_PERSONAL_AUTH ? 6 : 0));
 #define FTE3600_BRISK_MAX_HAMMING 64
 #define FTE3600_BRISK_RATIO_PERCENT 80
 #define FTE3600_BRISK_MIN_HAMMING_MARGIN 8

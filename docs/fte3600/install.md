@@ -205,10 +205,13 @@ fprintd-verify -f left-index-finger "$USER"
 ```
 
 > [!IMPORTANT]
-> **Extractor Schema 3 / Authentication Policy 4**:
-> Schema 3 applies image normalization exactly once. Earlier schemas are rejected,
-> including schema 2 templates that may have been produced by two normalization
-> passes. Keep a working password, then deliberately remove the old enrollment
+> **Extractor Schema 3 / Diagnostic Policy 5 / Authentication Policy 6**:
+> Verification accepts a passing match against any of the eight enrolled samples
+> or their canonically reconstructed mosaic. The five-inlier pair gates are
+> unchanged, but the additional reference changes the complete decision rule.
+> Earlier policies are rejected and require re-enrollment. Schema 3 still applies
+> image normalization exactly once; earlier extractor schemas are also rejected.
+> Keep a working password, then deliberately remove the old enrollment
 > with `fprintd-delete "$USER"` and enroll again. This deletes that user's prints;
 > changing the stored version number is not a valid migration.
 

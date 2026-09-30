@@ -52,7 +52,6 @@ struct _Fte3600Template
   CanonicalSubtemplate   subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
   gboolean               has_mosaic;
   Fte3600BriskFeatureSet mosaic;
-  TemplatePose           poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
 };
 
 static void
@@ -445,6 +444,7 @@ static void
 template_reconstruct_mosaic (Fte3600Template *templ)
 {
   gboolean aligned[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { FALSE };
+  TemplatePose poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
 
   if (templ == NULL || templ->n_subtemplates == 0)
     return;
@@ -453,14 +453,15 @@ template_reconstruct_mosaic (Fte3600Template *templ)
   templ->mosaic.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
   templ->has_mosaic = FALSE;
 
-  /* Sample 0 is anchor */
-  templ->poses[0].angle = 0.0;
-  templ->poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
-  templ->poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
+  /* Both enrollment completion and decoding supply the same canonical order.
+   * Fusion retains the first descriptor and averages coordinates, so changing
+   * this order would change the reconstructed authentication reference. */
+  poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
+  poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
   template_stitch_sample (templ, &templ->subtemplates[0].features,
-                          templ->poses[0].angle,
-                          templ->poses[0].translate_x,
-                          templ->poses[0].translate_y);
+                          poses[0].angle,
+                          poses[0].translate_x,
+                          poses[0].translate_y);
   aligned[0] = TRUE;
 
   /* Align remaining subtemplates by matching against already aligned subtemplates */
@@ -504,10 +505,10 @@ template_reconstruct_mosaic (Fte3600Template *templ)
         break;
 
       /* u is matched against a: pose_u = pose_a o pose_{u -> a} */
-      const TemplatePose *pose_a = &templ->poses[best_aligned];
+      const TemplatePose *pose_a = &poses[best_aligned];
       const gdouble cos_a = cos (pose_a->angle);
       const gdouble sin_a = sin (pose_a->angle);
-      TemplatePose *pose_u = &templ->poses[best_unaligned];
+      TemplatePose *pose_u = &poses[best_unaligned];
 
       pose_u->angle = template_wrap_angle (pose_a->angle + best_match.angle);
       pose_u->translate_x = cos_a * best_match.translate_x - sin_a * best_match.translate_y + pose_a->translate_x;
@@ -543,9 +544,6 @@ fpi_fte3600_template_add_features (Fte3600Template              *templ,
   FeatureSetValidation validation;
   gboolean have_nearest = FALSE;
   gboolean duplicate = FALSE;
-  guint best_ref_idx = 0;
-  Fte3600BriskMatchResult best_ref_match = { 0 };
-  gboolean have_best_ref = FALSE;
 #if FTE3600_ENABLE_PERSONAL_AUTH
   gboolean consistent = FALSE;
 #endif
@@ -573,12 +571,6 @@ fpi_fte3600_template_add_features (Fte3600Template              *templ,
 #if FTE3600_ENABLE_PERSONAL_AUTH
       consistent |= match.authentication_accepted;
 #endif
-      if (!have_best_ref || match_is_better (&match, &best_ref_match))
-        {
-          best_ref_match = match;
-          best_ref_idx = i;
-          have_best_ref = TRUE;
-        }
       if (!have_nearest || (nearest_match != NULL &&
                             match_is_better (&match, nearest_match)))
         {
@@ -596,53 +588,18 @@ fpi_fte3600_template_add_features (Fte3600Template              *templ,
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
   /* A sample which cannot authenticate against any already accepted sample
-   * must not become an independent accepted identity in the any-of-eight
-   * gallery.  The first sample establishes the enrollment anchor. */
+   * must not become an independent accepted identity in the gallery or its
+   * mosaic.  The first sample establishes the enrollment identity. */
   if (templ->n_subtemplates > 0 && !consistent)
     return FTE3600_TEMPLATE_RETRY_INCONSISTENT;
 #endif
 
-  /* Incremental stitching into mosaic */
-  const guint cur_idx = templ->n_subtemplates;
-
-  if (cur_idx == 0)
-    {
-      memset (&templ->mosaic, 0, sizeof (templ->mosaic));
-      templ->mosaic.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
-      templ->poses[0].angle = 0.0;
-      templ->poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
-      templ->poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
-      template_stitch_sample (templ, &candidate.features,
-                              templ->poses[0].angle,
-                              templ->poses[0].translate_x,
-                              templ->poses[0].translate_y);
-      templ->has_mosaic = TRUE;
-    }
-  else if (have_best_ref && best_ref_match.inliers >= FTE3600_BRISK_MIN_INLIERS)
-    {
-      const TemplatePose *ref_pose = &templ->poses[best_ref_idx];
-      const gdouble cos_ref = cos (ref_pose->angle);
-      const gdouble sin_ref = sin (ref_pose->angle);
-      TemplatePose *cur_pose = &templ->poses[cur_idx];
-
-      cur_pose->angle = template_wrap_angle (ref_pose->angle + best_ref_match.angle);
-      cur_pose->translate_x = cos_ref * best_ref_match.translate_x -
-                              sin_ref * best_ref_match.translate_y + ref_pose->translate_x;
-      cur_pose->translate_y = sin_ref * best_ref_match.translate_x +
-                              cos_ref * best_ref_match.translate_y + ref_pose->translate_y;
-      template_stitch_sample (templ, &candidate.features,
-                              cur_pose->angle,
-                              cur_pose->translate_x,
-                              cur_pose->translate_y);
-    }
-
   templ->subtemplates[templ->n_subtemplates++] = candidate;
   if (templ->n_subtemplates == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
     {
-      qsort (templ->mosaic.features, templ->mosaic.n_features,
-             sizeof (templ->mosaic.features[0]), feature_compare);
-      if (templ->mosaic.n_features >= FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES)
-        templ->has_mosaic = TRUE;
+      qsort (templ->subtemplates, templ->n_subtemplates,
+             sizeof (templ->subtemplates[0]), subtemplate_compare);
+      template_reconstruct_mosaic (templ);
       return FTE3600_TEMPLATE_OK;
     }
   return FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
@@ -884,7 +841,7 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
   if (result != NULL)
     {
       memset (result, 0, sizeof (*result));
-      result->best_subtemplate = G_MAXUINT;
+      result->best_subtemplate = FTE3600_TEMPLATE_SUBTEMPLATE_NONE;
     }
   if (!template_rounding_guard_enter (&rounding_guard))
     return FTE3600_TEMPLATE_INVALID_WIRE;
@@ -923,6 +880,7 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
     {
       Fte3600BriskMatchResult mosaic_match;
 
+      result->n_compared++;
       if (fpi_fte3600_brisk_match_mosaic (&canonical_query.features,
                                           &templ->mosaic,
                                           &mosaic_match) == FTE3600_BRISK_OK)
@@ -935,8 +893,7 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
           if (!have_best || match_is_better (&mosaic_match, &result->best))
             {
               result->best = mosaic_match;
-              if (result->best_subtemplate == G_MAXUINT)
-                result->best_subtemplate = 0;
+              result->best_subtemplate = FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC;
               have_best = TRUE;
             }
         }
@@ -944,7 +901,8 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
 
   /* Diagnostic loads never authenticate.  Authentication loads reach this
    * point only for a non-zero, explicitly selected policy version, and use an
-   * any-of-eight gallery decision matching the frozen evaluator semantics. */
+   * any-of-eight gallery or reconstructed-mosaic decision. The individual
+   * comparison gates are unchanged; population accuracy is not calibrated. */
   if (purpose == FTE3600_TEMPLATE_LOAD_DIAGNOSTIC)
     result->authentication_accepted = FALSE;
   return FTE3600_TEMPLATE_OK;

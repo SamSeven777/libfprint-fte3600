@@ -226,6 +226,15 @@ test_roundtrip_and_header (void)
   g_assert_cmpuint (read_u16 (&data[28]), ==,
                     FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION);
   g_assert_cmpuint (read_u16 (&data[30]), ==, 8);
+  {
+    /* Freeze the wire policy identity independently of the header macros. */
+    const guint8 version_fields[8] = {
+      3, 0, 5, 0, FTE3600_ENABLE_PERSONAL_AUTH ? 6 : 0, 0, 8, 0
+    };
+
+    g_assert_cmpmem (&data[24], sizeof (version_fields),
+                     version_fields, sizeof (version_fields));
+  }
   g_assert_cmpuint (read_u32 (&data[32]), ==, 0);
   g_assert_cmpuint (read_u32 (&data[36]), ==, 0);
   g_assert_cmpuint (read_u32 (&data[40]), ==, TEST_RECORD_SIZE);
@@ -386,7 +395,7 @@ test_authentication_policy (void)
                      templ, &query, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC,
                      &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_cmpuint (result.n_compared, ==,
-                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES + 1);
   g_assert_cmpuint (result.diagnostic_passes, >=, 1);
   g_assert_cmpuint (result.best_subtemplate, <,
                     FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
@@ -399,7 +408,7 @@ test_authentication_policy (void)
                      &result), ==, FTE3600_TEMPLATE_OK);
   g_assert_true (result.authentication_accepted);
   g_assert_cmpuint (result.n_compared, ==,
-                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+                    FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES + 1);
 #else
   g_assert_cmpint (fpi_fte3600_template_compare_features (
                      templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
@@ -431,12 +440,17 @@ assert_header_mutation (GBytes               *original,
 {
   guint8 *data;
   gsize size;
+  g_autoptr(Fte3600Template) decoded = NULL;
 
   g_autoptr(GBytes) changed = mutable_copy (original, &data, &size);
 
   g_assert_cmpuint (offset + 2, <=, size);
   write_u16 (&data[offset], value);
   g_assert_cmpint (decode_status (changed), ==, expected);
+  g_assert_cmpint (fpi_fte3600_template_decode (
+                     changed, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, expected);
+  g_assert_null (decoded);
 }
 
 static void
@@ -460,15 +474,16 @@ test_malformed_headers_and_lengths (void)
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
   assert_header_mutation (wire, 24, 4,
                           FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
-  /* Historical diagnostic policy version 2 must be rejected under version 3. */
-  assert_header_mutation (wire, 26, 2,
-                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  /* Older gallery policies and Pocket's distinct policy cannot be reused. */
+  for (guint version = 1; version < 5; version++)
+    assert_header_mutation (wire, 26, version,
+                            FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 28,
                           !FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION,
                           FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
-  /* Historical policy version 3 must be rejected under policy version 4. */
-  assert_header_mutation (wire, 28, 3,
-                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  for (guint version = 1; version < 6; version++)
+    assert_header_mutation (wire, 28, version,
+                            FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
   assert_header_mutation (wire, 30, 7, FTE3600_TEMPLATE_INVALID_WIRE);
 
   {
@@ -869,8 +884,8 @@ test_boundary_straddling_probe (void)
 
   /* 3. Test comparing against the template container:
    * Because individual subtemplates each have only 3 inliers, none passes alone.
-   * BUT the stitched mosaic contains ALL points 0..14!
-   * The mosaic will match all 6 points (inliers = 6 >= 4), passing authentication! */
+   * The stitched mosaic contains points 0..12 and matches all 6 probe points,
+   * satisfying the five-inlier gate. */
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_assert_cmpint (fpi_fte3600_template_compare_features (
                      templ, &query, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
@@ -884,6 +899,111 @@ test_boundary_straddling_probe (void)
   g_assert_cmpuint (result.diagnostic_passes, >=, 1);
   g_assert_cmpuint (result.best.inliers, ==, 6);
 #endif
+  g_assert_cmpuint (result.n_compared, ==, 9);
+  g_assert_cmpuint (result.best_subtemplate, ==,
+                    FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC);
+}
+
+static void
+make_noisy_boundary_point (Fte3600BriskFeature *feature,
+                           guint                point,
+                           gfloat               noise)
+{
+  feature->x = 10.0f + 3.5f * point + noise * ((point % 3) - 1.0f);
+  feature->y = 15.0f + 25.0f * (point % 3) + noise * ((point % 4) - 1.5f);
+  fill_descriptor (feature->descriptor, point, 0);
+}
+
+static void
+test_mosaic_roundtrip_decision (void)
+{
+  const guint jitter_order[] = { 0, 7, 1, 6, 2, 5, 3, 4 };
+  const guint probe_points[] = { 0, 1, 2, 10, 11, 12 };
+  const gfloat probe_noise[] = { 0.0f, -0.27f * 3.0f };
+  Fte3600BriskFeatureSet samples[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
+  g_autoptr(Fte3600Template) forward = fpi_fte3600_template_new ();
+  g_autoptr(Fte3600Template) reverse = fpi_fte3600_template_new ();
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(GBytes) reverse_wire = NULL;
+
+  /* Generated partial-overlap samples with small, non-monotonic coordinate
+   * jitter. Capture-order fusion used to accept the marginal probe below,
+   * while the same template rejected it after saving and loading. */
+  for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+    {
+      Fte3600BriskFeatureSet *sample = &samples[s];
+
+      sample->extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      sample->n_features = 12;
+      for (guint i = 0; i < 9; i++)
+        make_noisy_boundary_point (&sample->features[i], s == 0 ? i : 4 + i,
+                                    0.015f * jitter_order[s]);
+      for (guint i = 0; i < 3; i++)
+        {
+          Fte3600BriskFeature *feature = &sample->features[9 + i];
+
+          feature->x = 56.0f + 2.0f * (i % 2);
+          feature->y = 15.0f + 25.0f * (i % 3);
+          fill_descriptor (feature->descriptor, s == 0 ? 100 + i : 200 + s * 10 + i, 0);
+        }
+    }
+  for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+    {
+      const Fte3600TemplateStatus expected = s + 1 == G_N_ELEMENTS (samples) ?
+        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+
+      g_assert_cmpint (fpi_fte3600_template_add_features (forward, &samples[s], NULL),
+                       ==, expected);
+      g_assert_cmpint (fpi_fte3600_template_add_features (
+                         reverse, &samples[G_N_ELEMENTS (samples) - 1 - s], NULL),
+                       ==, expected);
+    }
+  g_assert_cmpint (fpi_fte3600_template_encode (forward, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_encode (reverse, &reverse_wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (g_bytes_equal (wire, reverse_wire));
+  g_assert_cmpint (fpi_fte3600_template_decode (
+                     wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded), ==, FTE3600_TEMPLATE_OK);
+
+  for (guint p = 0; p < G_N_ELEMENTS (probe_noise); p++)
+    {
+      Fte3600BriskFeatureSet query = { 0 };
+      Fte3600Template *templates[] = { forward, reverse, decoded };
+
+      query.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+      query.n_features = 12;
+      for (guint i = 0; i < G_N_ELEMENTS (probe_points); i++)
+        make_noisy_boundary_point (&query.features[i], probe_points[i], probe_noise[p]);
+      for (guint i = 0; i < 6; i++)
+        {
+          query.features[6 + i].x = 2.0f + 3.0f * (i % 2);
+          query.features[6 + i].y = 15.0f + 25.0f * (i % 3);
+          fill_descriptor (query.features[6 + i].descriptor, 500 + i, 0);
+        }
+      for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
+        {
+          Fte3600BriskMatchResult single;
+
+          g_assert_cmpint (fpi_fte3600_brisk_match (&query, &samples[s], &single),
+                           ==, FTE3600_BRISK_NO_CONSENSUS);
+        }
+      for (guint t = 0; t < G_N_ELEMENTS (templates); t++)
+        for (guint purpose = FTE3600_TEMPLATE_LOAD_DIAGNOSTIC;
+             purpose <= FTE3600_TEMPLATE_LOAD_AUTHENTICATION; purpose++)
+          {
+            Fte3600TemplateCompareResult result;
+
+#if !FTE3600_ENABLE_PERSONAL_AUTH
+            if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION)
+              continue;
+#endif
+            g_assert_cmpint (fpi_fte3600_template_compare_features (
+                               templates[t], &query, purpose, &result), ==, FTE3600_TEMPLATE_OK);
+            g_assert_cmpuint (result.diagnostic_passes, ==, p == 0 ? 1 : 0);
+            g_assert_cmpint (result.authentication_accepted, ==,
+                             p == 0 && purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION);
+          }
+    }
 }
 
 int
@@ -914,5 +1034,7 @@ main (int   argc,
                    test_template_mosaicking);
   g_test_add_func ("/fte3600-template/boundary-straddling-probe",
                    test_boundary_straddling_probe);
+  g_test_add_func ("/fte3600-template/mosaic-roundtrip-decision",
+                   test_mosaic_roundtrip_decision);
   return g_test_run ();
 }

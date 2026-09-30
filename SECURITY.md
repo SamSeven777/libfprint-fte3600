@@ -7,7 +7,7 @@ With `-Ddrivers=fte3600` and the default
 authentication. Personal authentication requires explicit opt-in.
 
 Historical offline comparisons do not establish population accuracy. The full
-eight-subtemplate decision, retries, capture/enrollment failures and multi-person,
+eight-subtemplate-or-mosaic decision, retries, capture/enrollment failures and multi-person,
 multi-session FAR/FRR have not been independently measured. This is not merely
 a missing laboratory certificate. A small synthetic rejection test is not a
 measured FAR. Keep a working password fallback; do not enable experimental
@@ -16,6 +16,13 @@ biometrics for system-wide sudo, root, or high-assurance authentication.
 Persisted extractor/decision-policy versions must change when their semantics
 change. An incompatible template must be rejected and re-enrolled, not silently
 accepted under a different policy.
+
+The current main policy uses extractor schema 3, diagnostic policy 5 and opt-in
+authentication policy 6. It accepts any passing individual sample or the mosaic
+reconstructed from the eight samples in canonical order. Pair thresholds are
+unchanged, but this expanded decision rule has no population FAR/FRR calibration.
+Earlier policy versions must be re-enrolled; changing their stored version fields
+is not a migration.
 
 ## Hardware and external firmware
 
@@ -52,4 +59,3 @@ Report vulnerabilities privately through the repository's Security reporting
 channel when available. Public reports should contain only reviewed, sanitized
 hardware identifiers and errors, never fingerprint images, templates,
 descriptor dumps, process dumps, proprietary binaries or decompiler listings.
-

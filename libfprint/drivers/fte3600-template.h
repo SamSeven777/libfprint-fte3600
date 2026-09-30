@@ -51,13 +51,14 @@ typedef enum {
 
 typedef struct _Fte3600Template Fte3600Template;
 
-#define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC ((guint) -1)
+#define FTE3600_TEMPLATE_SUBTEMPLATE_NONE G_MAXUINT
+#define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC (G_MAXUINT - 1)
 
 typedef struct
 {
-  guint                   n_compared;
+  guint                   n_compared; /* Includes the mosaic, when present. */
   guint                   diagnostic_passes;
-  guint                   best_subtemplate;
+  guint                   best_subtemplate; /* Index, MOSAIC, or NONE. */
   Fte3600BriskMatchResult best;
   gboolean                authentication_accepted;
 } Fte3600TemplateCompareResult;
@@ -100,6 +101,8 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Templa
                                                              Fte3600TemplateLoadPurpose    purpose,
                                                              Fte3600TemplateCompareResult *result);
 
+/* The mosaic is reconstructed in canonical order when enrollment completes.
+ * Returns a borrowed reference, or NULL before completion/without a mosaic. */
 const Fte3600BriskFeatureSet *fpi_fte3600_template_get_mosaic (const Fte3600Template *templ);
 
 G_END_DECLS
