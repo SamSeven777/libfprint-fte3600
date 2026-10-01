@@ -442,10 +442,10 @@ fte_test_ok 'TERM waits for diagnostic cleanup, then restores service'
 
 fte_test_new
 export FTE_TEST_WAIT=1
-# timeout forwards INT even when this test itself is launched asynchronously;
-# plain asynchronous Bash jobs inherit SIGINT as ignored. Its deadline is only
-# a fallback: the test sends INT immediately after the mocked tool is ready.
-timeout --preserve-status 10s "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/test-medion-soft-reset.sh" --run > "$FTE_TEST_CASE/output" 2>&1 &
+# Bash starts asynchronous jobs with SIGINT ignored. Reset that disposition
+# before timeout starts so it can reliably forward our explicit INT across
+# shell and coreutils versions. Its deadline remains only a deadlock fallback.
+env --default-signal=INT timeout --preserve-status 10s "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/test-medion-soft-reset.sh" --run > "$FTE_TEST_CASE/output" 2>&1 &
 fte_test_child=$!
 for ((fte_test_poll=0; fte_test_poll<250; fte_test_poll++)); do
   [[ ! -e $FTE_TEST_CASE/tool-ready ]] || break
