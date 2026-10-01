@@ -32,6 +32,7 @@ typedef enum {
   MOCK_IOCTL_NONE,
   MOCK_IOCTL_FULL_DUPLEX,
   MOCK_IOCTL_SEQUENTIAL,
+  MOCK_IOCTL_SPLIT_WRITE,
 } MockIoctlMode;
 
 typedef struct
@@ -43,6 +44,8 @@ typedef struct
   gsize         length_rd;
   const guint8 *reply;
   guint         call_count;
+  gsize         transferred;
+  guint         short_at_call;
   gboolean      has_result_override;
   int           result_override;
 } MockIoctlData;
@@ -89,7 +92,24 @@ ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (xfers[1].len, ==, mock_ioctl.length_rd);
       g_assert_cmpuint (xfers[1].cs_change, ==, 0);
       memcpy (mock_ioctl.buffer_rd, mock_ioctl.reply, mock_ioctl.length_rd);
+      if (mock_ioctl.has_result_override)
+        return mock_ioctl.result_override;
       return xfers[0].len + xfers[1].len;
+
+    case MOCK_IOCTL_SPLIT_WRITE:
+      g_assert_cmpuint (request, ==, SPI_IOC_MESSAGE (1));
+      g_assert_true ((guint8 *) (guintptr) xfers[0].tx_buf ==
+                     mock_ioctl.buffer_wr + mock_ioctl.transferred);
+      g_assert_cmpuint (xfers[0].rx_buf, ==, 0);
+      g_assert_cmpuint (xfers[0].len, >, 0);
+      g_assert_cmpuint (xfers[0].len, <=,
+                        mock_ioctl.length_wr - mock_ioctl.transferred);
+      if (mock_ioctl.call_count == mock_ioctl.short_at_call)
+        return xfers[0].len - 1;
+      mock_ioctl.transferred += xfers[0].len;
+      g_assert_cmpuint (xfers[0].cs_change, ==,
+                        mock_ioctl.transferred < mock_ioctl.length_wr);
+      return xfers[0].len;
 
     case MOCK_IOCTL_NONE:
     default:
@@ -149,10 +169,10 @@ typedef struct
 } AsyncTransferData;
 
 static void
-full_duplex_async_cb (FpiSpiTransfer *transfer,
-                      FpDevice       *device,
-                      gpointer        user_data,
-                      GError         *error)
+transfer_async_cb (FpiSpiTransfer *transfer,
+                   FpDevice       *device,
+                   gpointer        user_data,
+                   GError         *error)
 {
   AsyncTransferData *data = user_data;
 
@@ -187,7 +207,7 @@ test_full_duplex_async (void)
   fpi_spi_transfer_set_full_duplex (transfer, TRUE);
   fpi_spi_transfer_submit (g_steal_pointer (&transfer),
                            NULL,
-                           full_duplex_async_cb,
+                           transfer_async_cb,
                            &data);
 
   g_main_loop_run (loop);
@@ -296,6 +316,215 @@ test_sequential_unchanged (void)
 }
 
 static void
+test_sequential_short_transfer (void)
+{
+  guint8 request[] = { 0x10, 0xef };
+  const guint8 reply[] = { 0xa5, 0x5a, 0x00 };
+  guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_SEQUENTIAL,
+                    request, sizeof (request),
+                    response, sizeof (response),
+                    reply);
+  mock_ioctl.has_result_override = TRUE;
+  mock_ioctl.result_override = sizeof (request) + sizeof (response) - 1;
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+}
+
+static void
+test_sequential_split_requests_chip_select_continuity (void)
+{
+  const gsize length = G_MAXUINT16 + 1;
+  g_autofree guint8 *request = g_malloc0 (length);
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_SPLIT_WRITE,
+                    request, length,
+                    NULL, 0,
+                    NULL);
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, length, NULL);
+
+  g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+                         "*Split SPI transfer*");
+  g_assert_true (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_test_assert_expected_messages ();
+  g_assert_no_error (error);
+  g_assert_cmpuint (mock_ioctl.call_count, >, 1);
+  g_assert_cmpuint (mock_ioctl.transferred, ==, length);
+}
+
+static void
+test_sequential_split_short_transfer (void)
+{
+  const gsize length = G_MAXUINT16 + 1;
+  g_autofree guint8 *request = g_malloc0 (length);
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_SPLIT_WRITE,
+                    request, length,
+                    NULL, 0,
+                    NULL);
+  mock_ioctl.short_at_call = 2;
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, length, NULL);
+
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 2);
+}
+
+static void
+test_single_message_sync (void)
+{
+  guint8 request[] = { 0x04, 0xfb, 0x9a, 0x8b, 0x00, 0x00 };
+  const guint8 reply[] = { 0x93, 0x62, 0x00, 0x00 };
+  guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_SEQUENTIAL,
+                    request, sizeof (request),
+                    response, sizeof (response),
+                    reply);
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+  fpi_spi_transfer_set_single_message (transfer, TRUE);
+
+  g_assert_true (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+  g_assert_cmpmem (response, sizeof (response), reply, sizeof (reply));
+}
+
+static void
+test_single_message_async (void)
+{
+  guint8 request[] = { 0x04, 0xfb, 0x9a, 0x8b, 0x00, 0x00 };
+  const guint8 reply[] = { 0x93, 0x62, 0x00, 0x00 };
+  guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+  AsyncTransferData data = { .loop = loop };
+
+  mock_ioctl_reset (MOCK_IOCTL_SEQUENTIAL,
+                    request, sizeof (request),
+                    response, sizeof (response),
+                    reply);
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+  fpi_spi_transfer_set_single_message (transfer, TRUE);
+  fpi_spi_transfer_submit (g_steal_pointer (&transfer),
+                           NULL,
+                           transfer_async_cb,
+                           &data);
+
+  g_main_loop_run (loop);
+  g_assert_true (data.called);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+  g_assert_cmpmem (response, sizeof (response), reply, sizeof (reply));
+}
+
+static void
+test_single_message_short_transfer (void)
+{
+  guint8 request[] = { 0x04, 0xfb, 0x9a, 0x8b, 0x00, 0x00 };
+  const guint8 reply[] = { 0x93, 0x62, 0x00, 0x00 };
+  guint8 response[G_N_ELEMENTS (reply)] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_SEQUENTIAL,
+                    request, sizeof (request),
+                    response, sizeof (response),
+                    reply);
+  mock_ioctl.has_result_override = TRUE;
+  mock_ioctl.result_override = sizeof (request) + sizeof (response) - 1;
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+  fpi_spi_transfer_set_single_message (transfer, TRUE);
+
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+}
+
+static void
+test_single_message_too_large (void)
+{
+  const gsize oversize = G_MAXUINT16 + 1;
+  g_autofree guint8 *request = g_malloc0 (oversize);
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_NONE, NULL, 0, NULL, 0, NULL);
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, oversize, NULL);
+  fpi_spi_transfer_set_single_message (transfer, TRUE);
+
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 0);
+}
+
+static void
+test_single_message_rejects_full_duplex (void)
+{
+  guint8 request[] = { 0x04, 0xfb, 0x9a, 0x8b };
+  guint8 response[sizeof (request)] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (MOCK_IOCTL_NONE, NULL, 0, NULL, 0, NULL);
+
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  fpi_spi_transfer_set_single_message (transfer, TRUE);
+
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 0);
+}
+
+static void
 test_sensitive_log_redaction (void)
 {
   if (g_test_subprocess ())
@@ -344,6 +573,14 @@ main (int argc, char *argv[])
   g_test_add_func ("/spi-transfer/full-duplex/unequal-lengths", test_full_duplex_unequal_lengths);
   g_test_add_func ("/spi-transfer/full-duplex/too-large", test_full_duplex_too_large);
   g_test_add_func ("/spi-transfer/sequential/unchanged", test_sequential_unchanged);
+  g_test_add_func ("/spi-transfer/sequential/short-transfer", test_sequential_short_transfer);
+  g_test_add_func ("/spi-transfer/sequential/split-requests-chip-select-continuity", test_sequential_split_requests_chip_select_continuity);
+  g_test_add_func ("/spi-transfer/sequential/split-short-transfer", test_sequential_split_short_transfer);
+  g_test_add_func ("/spi-transfer/single-message/sync", test_single_message_sync);
+  g_test_add_func ("/spi-transfer/single-message/async", test_single_message_async);
+  g_test_add_func ("/spi-transfer/single-message/short-transfer", test_single_message_short_transfer);
+  g_test_add_func ("/spi-transfer/single-message/too-large", test_single_message_too_large);
+  g_test_add_func ("/spi-transfer/single-message/rejects-full-duplex", test_single_message_rejects_full_duplex);
   g_test_add_func ("/spi-transfer/log/sensitive-redaction", test_sensitive_log_redaction);
 
   return g_test_run ();

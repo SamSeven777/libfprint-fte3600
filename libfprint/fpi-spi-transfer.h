@@ -43,6 +43,7 @@ typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
  * @length_rd: The length of the read buffer
  * @buffer_wr: The write buffer.
  * @buffer_rd: The read buffer.
+ * @single_message: Whether a sequential transfer must use one SPI message.
  * @sensitive: Whether buffer contents must be redacted from transfer logs.
  *
  * Helper for handling SPI transfers. Transfers can either be pure write/read
@@ -77,6 +78,7 @@ struct _FpiSpiTransfer
 
   /* Transfer options */
   gboolean full_duplex;
+  gboolean single_message;
   gboolean sensitive;
 };
 
@@ -106,6 +108,9 @@ void               fpi_spi_transfer_read_full (FpiSpiTransfer *transfer,
 
 void               fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
                                                      gboolean        full_duplex);
+
+void               fpi_spi_transfer_set_single_message (FpiSpiTransfer *transfer,
+                                                        gboolean        single_message);
 
 void               fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
                                                    gboolean        sensitive);

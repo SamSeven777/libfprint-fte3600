@@ -40,7 +40,9 @@ static gsize block_size = 0;
  * Write and read buffers are transferred sequentially by default. Drivers can
  * request a simultaneous full-duplex transfer when both buffers have the same
  * length. Full-duplex transfers are never split as that would deassert chip
- * select between chunks.
+ * select between chunks. Drivers whose wire protocol requires chip select to
+ * remain asserted between sequential write and read phases can require the
+ * entire operation to fit in one SPI message.
  *
  * Drivers should always use this API rather than calling read/write/ioctl on
  * the spidev device.
@@ -304,6 +306,29 @@ fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
 }
 
 /**
+ * fpi_spi_transfer_set_single_message:
+ * @transfer: The #FpiSpiTransfer
+ * @single_message: Whether to require one SPI message for the whole transfer
+ *
+ * Require a sequential transfer to be submitted using exactly one
+ * SPI_IOC_MESSAGE ioctl. This keeps chip select asserted between its write and
+ * read phases. The combined transfer must fit into the spidev block size; it
+ * fails rather than being split if it does not. This is intentionally more
+ * conservative than the Linux spidev implementation, which accounts its TX
+ * and RX bounce buffers separately.
+ *
+ * This option is mutually exclusive with full-duplex mode.
+ */
+void
+fpi_spi_transfer_set_single_message (FpiSpiTransfer *transfer,
+                                     gboolean        single_message)
+{
+  g_return_if_fail (transfer);
+
+  transfer->single_message = single_message;
+}
+
+/**
  * fpi_spi_transfer_set_sensitive:
  * @transfer: A #FpiSpiTransfer
  * @sensitive: Whether the transfer contains sensitive data
@@ -341,7 +366,10 @@ transfer_finish_cb (GObject *source_object, GAsyncResult *res, gpointer user_dat
 }
 
 static int
-transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
+transfer_chunk (FpiSpiTransfer *transfer,
+                gsize           full_length,
+                gsize          *transferred,
+                gsize          *submitted)
 {
   struct spi_ioc_transfer xfer[2] = { 0 };
   gsize skip = *transferred;
@@ -390,7 +418,7 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
    * on the same bus. In practice, it is hopefully unlikely to be an issue,
    * but print a message once to help with debugging.
    */
-  if (full_length < *transferred + len)
+  if (full_length > *transferred + len)
     {
       static gboolean warned = FALSE;
 
@@ -406,7 +434,8 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
   /* This ioctl cannot be interrupted. */
   status = ioctl (transfer->spidev_fd, SPI_IOC_MESSAGE (transfers), xfer);
 
-  if (status >= 0)
+  *submitted = len;
+  if (status >= 0 && (gsize) status == len)
     *transferred += len;
 
   return status;
@@ -434,6 +463,7 @@ transfer_thread_func (GTask        *task,
   FpiSpiTransfer *transfer = (FpiSpiTransfer *) task_data;
   gsize full_length;
   gsize transferred = 0;
+  gsize submitted = 0;
   int status = 0;
 
   if (transfer->buffer_wr == NULL && transfer->buffer_rd == NULL)
@@ -447,6 +477,15 @@ transfer_thread_func (GTask        *task,
 
   if (transfer->full_duplex)
     {
+      if (transfer->single_message)
+        {
+          g_task_return_new_error (task,
+                                   G_IO_ERROR,
+                                   G_IO_ERROR_INVALID_ARGUMENT,
+                                   "Single-message sequential mode cannot be combined with full-duplex mode");
+          return;
+        }
+
       if (transfer->buffer_wr == NULL || transfer->buffer_rd == NULL ||
           transfer->length_wr <= 0 || transfer->length_rd <= 0 ||
           transfer->length_wr != transfer->length_rd)
@@ -502,8 +541,61 @@ transfer_thread_func (GTask        *task,
   if (transfer->buffer_rd)
     full_length += transfer->length_rd;
 
+  if (transfer->single_message)
+    {
+      if (full_length == 0)
+        {
+          g_task_return_new_error (task,
+                                   G_IO_ERROR,
+                                   G_IO_ERROR_INVALID_ARGUMENT,
+                                   "Single-message SPI transfers require a non-empty buffer");
+          return;
+        }
+
+      if (full_length > block_size)
+        {
+          g_task_return_new_error (task,
+                                   G_IO_ERROR,
+                                   G_IO_ERROR_MESSAGE_TOO_LARGE,
+                                   "Single-message SPI transfer length %" G_GSIZE_FORMAT " exceeds "
+                                   "spidev block size %" G_GSIZE_FORMAT "; "
+                                   "increase the spidev bufsiz module parameter",
+                                   full_length,
+                                   block_size);
+          return;
+        }
+
+      status = transfer_chunk (transfer, full_length, &transferred, &submitted);
+      if (status < 0)
+        {
+          g_task_return_new_error (task,
+                                   G_IO_ERROR,
+                                   g_io_error_from_errno (errno),
+                                   "Error invoking ioctl for SPI transfer (%d)",
+                                   errno);
+        }
+      else if ((gsize) status != submitted)
+        {
+          g_task_return_new_error (task,
+                                   G_IO_ERROR,
+                                   G_IO_ERROR_PARTIAL_INPUT,
+                                   "Short single-message SPI transfer (%d of %" G_GSIZE_FORMAT " bytes)",
+                                   status,
+                                   full_length);
+        }
+      else
+        {
+          g_task_return_boolean (task, TRUE);
+        }
+      return;
+    }
+
   while (transferred < full_length && status >= 0)
-    status = transfer_chunk (transfer, full_length, &transferred);
+    {
+      status = transfer_chunk (transfer, full_length, &transferred, &submitted);
+      if (status >= 0 && (gsize) status != submitted)
+        break;
+    }
 
   if (status < 0)
     {
@@ -512,6 +604,15 @@ transfer_thread_func (GTask        *task,
                                g_io_error_from_errno (errno),
                                "Error invoking ioctl for SPI transfer (%d)",
                                errno);
+    }
+  else if ((gsize) status != submitted)
+    {
+      g_task_return_new_error (task,
+                               G_IO_ERROR,
+                               G_IO_ERROR_PARTIAL_INPUT,
+                               "Short sequential SPI transfer (%d of %" G_GSIZE_FORMAT " bytes)",
+                               status,
+                               submitted);
     }
   else
     {
