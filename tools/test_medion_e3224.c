@@ -319,6 +319,85 @@ spi_xfer (const void *tx, void *rx, size_t len, uint32_t speed_hz)
     }
 }
 
+/* Reproduce the old focal_spi bridge's spi_write_then_read() shape: two
+ * transfers in one message, with chip select kept asserted between them.
+ * This is not equivalent to two separate write/read syscalls or to one
+ * full-duplex transfer. */
+static void
+spi_write_then_read_once (const void *tx,
+                          size_t      tx_len,
+                          void       *rx,
+                          size_t      rx_len,
+                          uint32_t    speed_hz)
+{
+  if (interrupted)
+    exit (128 + interrupted);
+  struct spi_ioc_transfer transfers[2] = {
+    {
+      .tx_buf = (uintptr_t) tx,
+      .len = tx_len,
+      .speed_hz = speed_hz ? speed_hz : cur_speed_hz,
+      .bits_per_word = 8,
+    },
+    {
+      .rx_buf = (uintptr_t) rx,
+      .len = rx_len,
+      .speed_hz = speed_hz ? speed_hz : cur_speed_hz,
+      .bits_per_word = 8,
+    },
+  };
+  int rc = ioctl (spi_fd, SPI_IOC_MESSAGE (2), transfers);
+
+  if (interrupted)
+    {
+      fprintf (stderr, "Interrupted during SPI transfer (signal %d).\n", interrupted);
+      exit (128 + interrupted);
+    }
+  if (rc != (int) (tx_len + rx_len))
+    {
+      fprintf (stderr, "SPI write-then-read failed: tx=%zu, rx=%zu, rc=%d (%s)\n",
+               tx_len, rx_len, rc, rc < 0 ? strerror (errno) : "short transfer");
+      exit (1);
+    }
+}
+
+static guint16
+vendor_crc16 (const guint8 *data, gsize length)
+{
+  guint16 crc = 0xffff;
+
+  for (gsize i = 0; i < length; i++)
+    {
+      guint16 input = (guint16) data[i] << 8;
+
+      for (guint bit = 0; bit < 8; bit++)
+        {
+          gboolean high_differs = ((crc ^ input) & 0x8000) != 0;
+
+          crc <<= 1;
+          input <<= 1;
+          if (high_differs)
+            crc ^= 0x1021;
+        }
+    }
+  return crc;
+}
+
+static gboolean
+vendor_recognizes_identity (guint16 identity)
+{
+  static const guint16 recognized[] = {
+    0x9362,
+    0x9391, 0x9392, 0x9395, 0x9396, 0x9397, 0x9398,
+    0x9363, 0x9372, 0x9349, 0x9365,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (recognized); i++)
+    if (identity == recognized[i])
+      return TRUE;
+  return FALSE;
+}
+
 static void
 set_spi_mode (uint8_t mode)
 {
@@ -516,6 +595,66 @@ check_comparison_power (void)
     fail (error->message);
 }
 
+/* One deliberately incomplete legacy-protocol observation. The archived
+ * vendor stack configured C6 first and its other-93xx path also changed FD/FE
+ * (described by that binary as I/O-voltage configuration). None of those
+ * writes, its reset ioctl, retries, 1a84 write or recovery commands belong in
+ * this bounded experiment. A negative result therefore cannot reject the
+ * protocol, identify the chip, or establish whether the sensor is powered. */
+static int
+observe_legacy_identity_without_init (void)
+{
+  static const guint8 command[] = { 0x04, 0xfb, 0x9a, 0x8b, 0x00, 0x00 };
+  guint8 response[4] = { 0 };
+
+  printf ("Legacy-protocol candidate read: exactly one TX6 + RX4 SPI message.\n");
+  printf ("No GPIO, reset, C6/FD/FE/1a84 write, retry, ROM command or firmware upload.\n");
+  printf ("This is active SPI traffic; the receive phase still clocks dummy MOSI bits.\n");
+  check_comparison_power ();
+  spi_write_then_read_once (command, sizeof (command), response, sizeof (response),
+                            cur_speed_hz);
+  check_comparison_power ();
+
+  guint16 identity = ((guint16) response[0] << 8) | response[1];
+  guint16 trailer = ((guint16) response[2] << 8) | response[3];
+  guint16 calculated_crc = vendor_crc16 (response, 2);
+  gboolean all_zero = identity == 0 && trailer == 0;
+  gboolean all_ff = identity == 0xffff && trailer == 0xffff;
+  gboolean recognized = vendor_recognizes_identity (identity);
+
+  printf ("Legacy raw response: %02x %02x %02x %02x; candidate identity=%04x, "
+          "trailer=%04x, calculated CRC=%04x.\n",
+          response[0], response[1], response[2], response[3], identity, trailer,
+          calculated_crc);
+  if (all_zero || all_ff)
+    {
+      printf ("No identity evidence (%s). Host transfer completion is not a sensor acknowledgement.\n",
+              all_zero ? "all zero" : "all ff");
+      printf ("Omitted vendor initialization means this result cannot exclude a 93xx protocol or prove no power.\n");
+      return 2;
+    }
+
+  if (trailer == 0)
+    printf ("Trailer is zero: the old other-93xx helper accepted this, but it is not independent integrity evidence.\n");
+  else if (trailer == calculated_crc)
+    printf ("Trailer matches the old other-93xx CRC calculation over the identity bytes.\n");
+  else
+    printf ("Trailer does not match the old other-93xx CRC; no retry or recovery was attempted.\n");
+
+  if (identity == 0x26c4)
+    printf ("The old FW9362 path treated 26c4 as a shifted-ID condition; this test does not run its recovery.\n");
+  if (recognized && trailer != 0 && trailer == calculated_crc)
+    {
+      printf ("Supported-ID candidate with the archived other-93xx CRC convention; this does not prove the physical model or enrollment support.\n");
+      return 0;
+    }
+  if (recognized)
+    printf ("Supported-ID candidate, but not independently validated by the other-93xx CRC convention.\n");
+  else
+    printf ("Raw response received, but the candidate is not in the archived library's recognized ID set.\n");
+  return 2;
+}
+
 /* One shared PM/SPI session; the only additional commands between the two
  * identical observations are the existing FT9361-path dual soft reset.
  * Do not add GPIO, ROM queries, identity writes, retries or recovery here. */
@@ -600,6 +739,7 @@ main (int argc, char **argv)
   gboolean chip_id_only = FALSE;
   gboolean status_no_reset = FALSE;
   gboolean compare_soft_reset = FALSE;
+  gboolean legacy_id_no_init = FALSE;
   int result = 0;
   const char *firmware_file = NULL;
   const char *requested_spi = NULL;
@@ -619,6 +759,10 @@ main (int argc, char **argv)
       else if (!strcmp (argv[i], "--compare-soft-reset"))
         {
           compare_soft_reset = TRUE;
+        }
+      else if (!strcmp (argv[i], "--legacy-id-no-init"))
+        {
+          legacy_id_no_init = TRUE;
         }
       else if (!strcmp (argv[i], "--reset"))
         {
@@ -647,6 +791,7 @@ main (int argc, char **argv)
           printf ("Options:\n");
           printf ("  --status-no-reset            Status/geometry reads; no GPIO, reset or upload (default)\n");
           printf ("  --compare-soft-reset         MUTATING: same reads before/after dual 70; no GPIO/ROM/upload\n");
+          printf ("  --legacy-id-no-init          ACTIVE: one old-protocol TX6+RX4 identity candidate read\n");
           printf ("  --probe                      MUTATING: dual soft reset, then status/ROM queries\n");
           printf ("  --chip-id                    Explicit scratch-RAM chip-family probe; no GPIO/reset\n");
           printf ("  --test-vendor-recovery <fw>  Test the experimental Medion recovery sequence:\n");
@@ -668,12 +813,16 @@ main (int argc, char **argv)
         }
     }
 
-  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset && !compare_soft_reset)
+  if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset &&
+      !compare_soft_reset && !legacy_id_no_init)
     status_no_reset = TRUE;
-  if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset + compare_soft_reset != 1)
-    fail ("Choose exactly one of --status-no-reset, --compare-soft-reset, --probe, --reset, --chip-id, or --test-vendor-recovery");
+  if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset +
+      compare_soft_reset + legacy_id_no_init != 1)
+    fail ("Choose exactly one diagnostic operation");
   if (compare_soft_reset && cur_speed_hz != 1000000)
     fail ("--compare-soft-reset fixes the SPI speed at 1000000 Hz");
+  if (legacy_id_no_init && cur_speed_hz != 1000000)
+    fail ("--legacy-id-no-init fixes the SPI speed at 1000000 Hz");
 
   setvbuf (stdout, NULL, _IOLBF, 0);
   signal (SIGINT, sig_handler);
@@ -681,7 +830,7 @@ main (int argc, char **argv)
   atexit (cleanup);
 
   printf ("=== Medion Akoya E3224 Hardware Diagnostic & Recovery Tool ===\n");
-  printf ("Diagnostic revision: 2026-09-27.1 (controlled no-GPIO soft-reset comparison)\n");
+  printf ("Diagnostic revision: 2026-10-01.1 (bounded legacy-protocol mode added)\n");
   check_dmi ();
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
@@ -723,7 +872,7 @@ main (int argc, char **argv)
   g_autofree gchar *opened_sysfs = realpath (char_link, NULL);
   if (!S_ISCHR (spi_stat.st_mode) || g_strcmp0 (opened_sysfs, spi_sysfs) != 0)
     fail ("Opened SPI node does not match FTE3600 sysfs device");
-  if (status_no_reset || compare_soft_reset)
+  if (status_no_reset || compare_soft_reset || legacy_id_no_init)
     {
       /* Read all originals before changing anything. No WR_MAX_SPEED_HZ is
        * issued: speed_hz is selected per transfer and does not change that
@@ -735,9 +884,9 @@ main (int argc, char **argv)
     }
   set_spi_mode (SPI_MODE_0);
   uint8_t bits = 8, lsb = 0;
-  saved_spi.bits_changed = status_no_reset || compare_soft_reset;
+  saved_spi.bits_changed = status_no_reset || compare_soft_reset || legacy_id_no_init;
   require (ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) == 0, "set SPI 8-bit");
-  saved_spi.lsb_changed = status_no_reset || compare_soft_reset;
+  saved_spi.lsb_changed = status_no_reset || compare_soft_reset || legacy_id_no_init;
   require (ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb) == 0, "set SPI MSB-first");
   uint8_t mode_read = 0, bits_read = 0, lsb_read = 0;
   require (ioctl (spi_fd, SPI_IOC_RD_MODE, &mode_read) == 0, "read SPI mode");
@@ -792,6 +941,12 @@ main (int argc, char **argv)
   if (compare_soft_reset)
     {
       result = compare_status_with_soft_reset ();
+      goto done;
+    }
+
+  if (legacy_id_no_init)
+    {
+      result = observe_legacy_identity_without_init ();
       goto done;
     }
 

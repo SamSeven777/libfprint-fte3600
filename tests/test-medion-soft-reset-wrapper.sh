@@ -111,8 +111,12 @@ export FTE_TEST_TOOL="$fte_test_root/mock-diagnostic"
 cat > "$FTE_TEST_TOOL" <<'TOOL'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ ( $# == 1 && $1 == --compare-soft-reset ) ||
-   ( $# == 2 && $1 == --test-vendor-recovery ) ]]
+if [[ -n ${FTE_TEST_EXPECT_TOOL_MODE:-} ]]; then
+  [[ $# == 1 && $1 == "$FTE_TEST_EXPECT_TOOL_MODE" ]]
+else
+  [[ ( $# == 1 && $1 == --compare-soft-reset ) ||
+     ( $# == 2 && $1 == --test-vendor-recovery ) ]]
+fi
 echo "tool $*" >> "$FTE_TEST_CASE/events"
 echo 'MOCK diagnostic stdout: comparison result'
 echo 'MOCK diagnostic stderr: retained' >&2
@@ -140,6 +144,7 @@ fte_test_new() {
   unset FTE_TEST_UID FTE_TEST_DIRTY FTE_TEST_PKG_FAIL FTE_TEST_COMPILE_FAIL
   unset FTE_TEST_MASK_INEFFECTIVE FTE_TEST_MASK_FAIL FTE_TEST_UNMASK_FAIL
   unset FTE_TEST_START_FAIL FTE_TEST_REPLACE_UNIT FTE_TEST_WAIT FTE_TEST_TOOL_EXIT
+  unset FTE_TEST_EXPECT_TOOL_MODE
   fte_test_script=test-medion-soft-reset.sh
   # Keep the real control flow, root check, traps, and tool argument dispatch.
   # Only immutable absolute paths are mapped into this private test directory.
@@ -149,6 +154,8 @@ fte_test_new() {
         "$fte_test_repo/scripts/$fte_test_wrapper" \
         > "$FTE_TEST_CASE/repo/scripts/$fte_test_wrapper"
   done
+  cp "$fte_test_repo/scripts/test-medion-legacy-id.sh" \
+    "$FTE_TEST_CASE/repo/scripts/test-medion-legacy-id.sh"
 }
 
 fte_test_fail() {
@@ -161,6 +168,20 @@ fte_test_run() {
   local fte_test_expected=$1 fte_test_result
   shift
   if "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/$fte_test_script" "$@" > "$FTE_TEST_CASE/output" 2>&1; then
+    fte_test_result=0
+  else
+    fte_test_result=$?
+  fi
+  [[ $fte_test_result == "$fte_test_expected" ]] || fte_test_fail "exit $fte_test_result, expected $fte_test_expected"
+  if [[ -f $FTE_TEST_CASE/compiled-path ]]; then
+    read -r fte_test_compiled < "$FTE_TEST_CASE/compiled-path"
+    [[ ! -e ${fte_test_compiled%/*} ]] || fte_test_fail 'temporary compilation directory leaked'
+  fi
+}
+fte_test_run_legacy() {
+  local fte_test_expected=$1 fte_test_result
+  shift
+  if "$fte_test_bash" "$FTE_TEST_CASE/repo/scripts/test-medion-legacy-id.sh" "$@" > "$FTE_TEST_CASE/output" 2>&1; then
     fte_test_result=0
   else
     fte_test_result=$?
@@ -208,6 +229,25 @@ fte_test_no_mutation
 fte_test_ok 'run requires root'
 
 fte_test_new
+export FTE_TEST_UID=1000
+fte_test_run 1 --legacy-id-run
+fte_test_no_mutation
+fte_test_ok 'legacy identity run requires root'
+
+fte_test_new
+fte_test_run_legacy 0
+fte_test_no_mutation
+grep -q '^cc$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy entry point default did not compile'
+fte_test_ok 'legacy entry point defaults to compilation-only preflight'
+
+fte_test_new
+fte_test_run_legacy 0 --help
+fte_test_no_mutation
+! grep -q '^cc$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy help compiled unexpectedly'
+grep -q 'one old-protocol TX6 + RX4' "$FTE_TEST_CASE/output" || fte_test_fail 'legacy help omitted boundary'
+fte_test_ok 'legacy entry point help is local and non-mutating'
+
+fte_test_new
 export FTE_TEST_COMPILE_FAIL=1
 fte_test_run 1 --run
 fte_test_no_mutation
@@ -224,6 +264,28 @@ fte_test_new
 fte_test_run 0 --run
 fte_test_restored_active
 fte_test_ok 'active service restored after successful comparison'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-id-no-init
+fte_test_run 0 --legacy-id-run
+fte_test_restored_active
+grep -q '^tool --legacy-id-no-init$' "$FTE_TEST_CASE/events" || fte_test_fail 'wrong legacy diagnostic mode'
+grep -q 'one bounded legacy-protocol identity candidate read' "$FTE_TEST_CASE/output" || fte_test_fail 'legacy boundary not reported'
+fte_test_ok 'legacy identity route invokes only its bounded mode and restores service'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-id-no-init
+fte_test_run_legacy 0 --run
+fte_test_restored_active
+grep -q '^tool --legacy-id-no-init$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy entry point dispatched wrong mode'
+fte_test_ok 'legacy entry point run reaches only bounded mode and restores service'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-id-no-init FTE_TEST_TOOL_EXIT=2
+fte_test_run 2 --legacy-id-run
+fte_test_restored_active
+grep -q 'Diagnostic exit: 2' "$FTE_TEST_CASE/output" || fte_test_fail 'legacy inconclusive status lost'
+fte_test_ok 'legacy inconclusive result is preserved and service restored'
 
 fte_test_new
 echo 'loaded inactive' > "$FTE_TEST_CASE/state"

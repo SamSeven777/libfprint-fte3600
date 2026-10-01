@@ -29,6 +29,13 @@ The same reported machine worked with the older Mint stack. Treat that as the
 known-good control. Do not rerun the unchanged recovery sequence that has already
 failed; first identify a concrete difference to test.
 
+The first isolated difference is now documented in the
+[bounded legacy-protocol test](../medion-legacy-id-test.md). Collect its limited
+host-state snapshot first. The optional active phase sends one reconstructed
+`TX6 + RX4` identity transaction and deliberately omits the old stack's reset,
+SPI-register configuration, voltage-labeled writes, retries and recovery. Its
+negative result is therefore inconclusive, not permission to add those writes.
+
 The current diagnostic's default / `--status-no-reset` mode uses only the two
 existing application-state/geometry SPI reads. It does not discover/claim GPIO,
 reset, enter ROM, write scratch RAM or upload firmware. It is still an **active

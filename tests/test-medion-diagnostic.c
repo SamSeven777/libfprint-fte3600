@@ -41,6 +41,8 @@ static guint32 expected_speed;
 static gboolean chip_probe_responses;
 static gboolean status_observation;
 static gboolean soft_reset_comparison;
+static gboolean legacy_id_observation;
+static guint8 legacy_id_response[4];
 static guint16 mock_mcu_status;
 static guint16 mock_after_status;
 static guint8 mock_boot_edition;
@@ -202,6 +204,8 @@ reset_mocks (void)
   chip_probe_responses = FALSE;
   status_observation = FALSE;
   soft_reset_comparison = FALSE;
+  legacy_id_observation = FALSE;
+  memset (legacy_id_response, 0, sizeof (legacy_id_response));
   mock_after_status = 0;
   mock_mcu_status = mock_boot_edition = mock_chip_id = 0;
   g_clear_pointer (&tx_frames, g_ptr_array_unref);
@@ -227,6 +231,68 @@ mock_ioctl (int fd, unsigned long request, ...)
   va_start (args, request);
   void *value = va_arg (args, void *);
   va_end (args);
+  if (request == SPI_IOC_MESSAGE (2))
+    {
+      struct spi_ioc_transfer *transfers = value;
+      const struct spi_ioc_transfer *tx = &transfers[0];
+      const struct spi_ioc_transfer *rx = &transfers[1];
+      const guint8 expected[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+
+      g_assert_true (legacy_id_observation);
+      g_assert_cmpint (fd, ==, full_cli ? 43 : spi_fd);
+      if (full_cli)
+        {
+          g_assert_cmpuint (mock_spi_mode, ==, SPI_MODE_0);
+          g_assert_cmpuint (mock_spi_bits, ==, 8);
+          g_assert_cmpuint (mock_spi_lsb, ==, 0);
+          g_assert_true (mock_power_active);
+          g_assert_null (req_gpo1);
+          g_assert_cmpuint (gpio_count, ==, 0);
+        }
+      g_assert_cmpuint (tx->tx_buf, !=, 0);
+      g_assert_cmpuint (tx->rx_buf, ==, 0);
+      g_assert_cmpuint (tx->len, ==, sizeof (expected));
+      g_assert_cmpuint (rx->tx_buf, ==, 0);
+      g_assert_cmpuint (rx->rx_buf, !=, 0);
+      g_assert_cmpuint (rx->len, ==, sizeof (legacy_id_response));
+      for (guint i = 0; i < 2; i++)
+        {
+          g_assert_cmpuint (transfers[i].speed_hz, ==, 1000000);
+          g_assert_cmpuint (transfers[i].bits_per_word, ==, 8);
+          g_assert_cmpuint (transfers[i].cs_change, ==, 0);
+          g_assert_cmpuint (transfers[i].delay_usecs, ==, 0);
+          g_assert_cmpuint (transfers[i].tx_nbits, ==, 0);
+          g_assert_cmpuint (transfers[i].rx_nbits, ==, 0);
+        }
+      g_assert_cmpmem ((const void *) (uintptr_t) tx->tx_buf, tx->len,
+                       expected, sizeof (expected));
+      transfer_count++;
+      last_tx_size = tx->len;
+      memcpy (last_tx, (const void *) (uintptr_t) tx->tx_buf, tx->len);
+      last_speed = tx->speed_hz;
+      g_ptr_array_add (tx_frames, g_bytes_new ((const void *) (uintptr_t) tx->tx_buf,
+                                               tx->len));
+      g_string_append (events, "spi2:04/6+4;");
+      if (mock_signal_at == transfer_count)
+        {
+          sig_handler (mock_signal_number);
+          if (mock_signal_eintr)
+            {
+              errno = EINTR;
+              return -1;
+            }
+        }
+      if (transfer_result == MOCK_ERROR)
+        {
+          errno = EIO;
+          return -1;
+        }
+      if (transfer_result == MOCK_SHORT)
+        return tx->len + rx->len - 1;
+      memcpy ((void *) (uintptr_t) rx->rx_buf, legacy_id_response,
+              sizeof (legacy_id_response));
+      return tx->len + rx->len;
+    }
   if (request != SPI_IOC_MESSAGE (1))
     {
       g_assert_true (full_cli);
@@ -517,7 +583,12 @@ mock_close (int fd)
             {
               gsize size;
               const guint8 *frame = g_bytes_get_data (g_ptr_array_index (tx_frames, i), &size);
-              if (soft_reset_comparison && (i == 2 || i == 3))
+              if (legacy_id_observation)
+                {
+                  const guint8 expected[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+                  g_assert_cmpmem (frame, size, expected, sizeof (expected));
+                }
+              else if (soft_reset_comparison && (i == 2 || i == 3))
                 {
                   const guint8 expected[] = { 0x70 };
                   g_assert_cmpmem (frame, size, expected, sizeof (expected));
@@ -709,6 +780,75 @@ test_transfer_failure (gconstpointer data)
   g_test_trap_assert_stderr ("*SPI transfer failed: len=6,*");
   g_test_trap_assert_stdout_unmatched ("*Status 0x20*");
   g_test_trap_assert_stdout_unmatched ("*UNEXPECTED CONTINUATION*");
+}
+
+static void
+test_legacy_transfer (void)
+{
+  reset_mocks ();
+  legacy_id_observation = TRUE;
+  spi_fd = 7;
+  legacy_id_response[0] = 0x93;
+  legacy_id_response[1] = 0x62;
+  legacy_id_response[2] = 0x1c;
+  legacy_id_response[3] = 0x53;
+  const guint8 command[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+  guint8 response[4] = { 0 };
+
+  spi_write_then_read_once (command, sizeof (command), response, sizeof (response),
+                            1000000);
+  g_assert_cmpuint (transfer_count, ==, 1);
+  g_assert_cmpuint (last_speed, ==, 1000000);
+  g_assert_cmpmem (last_tx, last_tx_size, command, sizeof (command));
+  g_assert_cmpmem (response, sizeof (response), legacy_id_response,
+                   sizeof (legacy_id_response));
+  g_assert_cmpstr (events->str, ==, "spi2:04/6+4;");
+  spi_fd = -1;
+}
+
+static void
+test_legacy_transfer_failure (gconstpointer data)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      legacy_id_observation = TRUE;
+      spi_fd = 7;
+      transfer_result = GPOINTER_TO_INT (data);
+      const guint8 command[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+      guint8 response[4] = { 0 };
+      spi_write_then_read_once (command, sizeof (command), response,
+                                sizeof (response), 1000000);
+      puts ("UNEXPECTED CONTINUATION");
+      exit (0);
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*SPI write-then-read failed: tx=6, rx=4,*");
+  g_test_trap_assert_stdout_unmatched ("*UNEXPECTED CONTINUATION*");
+}
+
+static void
+test_vendor_crc (void)
+{
+  static const struct
+  {
+    guint8  data[2];
+    guint16 expected;
+  } cases[] = {
+    { { 0x93, 0x62 }, 0x1c53 },
+    { { 0x93, 0x91 }, 0xc32f },
+    { { 0x93, 0x61 }, 0x2c30 },
+    { { 0x00, 0x00 }, 0x1d0f },
+    { { 0xff, 0xff }, 0x0000 },
+    { { 0x12, 0x34 }, 0x0ec9 },
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
+    g_assert_cmphex (vendor_crc16 (cases[i].data, sizeof (cases[i].data)), ==,
+                     cases[i].expected);
+  const guint8 standard[] = "123456789";
+  g_assert_cmphex (vendor_crc16 (standard, sizeof (standard) - 1), ==, 0x29b1);
 }
 
 static void
@@ -961,6 +1101,154 @@ test_status_cli (gconstpointer data)
 }
 
 static void
+test_legacy_id_cli (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      full_cli = legacy_id_observation = mock_assert_restored = TRUE;
+      mock_cli_expected_transfers = 1;
+      switch (scenario)
+        {
+        case 0: /* recognized identity and matching non-zero CRC */
+          legacy_id_response[0] = 0x93;
+          legacy_id_response[1] = 0x62;
+          legacy_id_response[2] = 0x1c;
+          legacy_id_response[3] = 0x53;
+          break;
+
+        case 1: /* recognized identity, zero trailer is not validation */
+          legacy_id_response[0] = 0x93;
+          legacy_id_response[1] = 0x62;
+          break;
+
+        case 2: /* all zero */
+          break;
+
+        case 3: /* all ff */
+          memset (legacy_id_response, 0xff, sizeof (legacy_id_response));
+          break;
+
+        case 4: /* unknown identity with internally consistent CRC */
+          legacy_id_response[0] = 0x12;
+          legacy_id_response[1] = 0x34;
+          legacy_id_response[2] = 0x0e;
+          legacy_id_response[3] = 0xc9;
+          break;
+
+        case 5: /* recognized identity with a bad CRC */
+          legacy_id_response[0] = 0x93;
+          legacy_id_response[1] = 0x62;
+          legacy_id_response[2] = 0x12;
+          legacy_id_response[3] = 0x34;
+          break;
+
+        case 6: /* 9361 is not in this archived library's accepted ID set */
+          legacy_id_response[0] = 0x93;
+          legacy_id_response[1] = 0x61;
+          legacy_id_response[2] = 0x2c;
+          legacy_id_response[3] = 0x30;
+          break;
+
+        case 7: /* identity ff with the helper's zero-trailer bypass */
+          legacy_id_response[0] = 0xff;
+          legacy_id_response[1] = 0xff;
+          break;
+
+        case 8:
+          transfer_result = MOCK_ERROR;
+          break;
+
+        case 9:
+          transfer_result = MOCK_SHORT;
+          break;
+
+        case 10:
+          mock_power_check_fail_at = 1;
+          mock_cli_expected_transfers = 0;
+          break;
+
+        case 11:
+          mock_power_check_fail_at = 2;
+          break;
+
+        case 12:
+        case 13:
+          mock_signal_at = 1;
+          mock_signal_eintr = scenario == 12;
+          mock_signal_number = scenario == 12 ? SIGTERM : SIGINT;
+          mock_expected_exit = 128 + mock_signal_number;
+          break;
+
+        case 14:
+          mock_config_read_fail_at = 1;
+          mock_cli_expected_transfers = 0;
+          break;
+
+        case 15:
+          mock_config_fail_at = 1;
+          mock_cli_expected_transfers = 0;
+          break;
+
+        case 16:
+          mock_restore_failure = TRUE;
+          break;
+
+        default:
+          g_assert_not_reached ();
+        }
+      gchar *argv[] = { (gchar *) "diagnostic", (gchar *) "--legacy-id-no-init", NULL };
+      exit (medion_diagnostic_main (2, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  if (scenario == 0)
+    g_test_trap_assert_passed ();
+  else
+    g_test_trap_assert_failed ();
+  g_test_trap_assert_stdout (scenario == 16 ? "*MOCK REMAINING SPI RESTORES VERIFIED*" :
+                             "*MOCK SPI RESTORE VERIFIED*");
+  g_test_trap_assert_stdout ("*MOCK PM RESTORE VERIFIED*");
+  g_test_trap_assert_stdout_unmatched ("*Successfully claimed*");
+  g_test_trap_assert_stdout_unmatched ("*Soft reset*");
+  g_test_trap_assert_stdout_unmatched ("*ROM edition*");
+  if (scenario <= 7)
+    {
+      g_test_trap_assert_stdout ("*Legacy raw response:*");
+      g_test_trap_assert_stdout (scenario == 0 ? "*Diagnostic exit=0;*" :
+                                 "*Diagnostic exit=2;*");
+      g_test_trap_assert_stderr ("");
+    }
+  else if (scenario == 8 || scenario == 9)
+    {
+      g_test_trap_assert_stdout_unmatched ("*Legacy raw response:*");
+      g_test_trap_assert_stderr ("*SPI write-then-read failed: tx=6, rx=4,*");
+    }
+  else if (scenario == 10 || scenario == 11)
+    {
+      g_test_trap_assert_stderr ("*comparison controller no longer active*");
+      if (scenario == 10)
+        g_test_trap_assert_stdout_unmatched ("*Legacy raw response:*");
+    }
+  else if (scenario == 12 || scenario == 13)
+    {
+      g_test_trap_assert_stderr ("*Interrupted during SPI transfer*");
+      g_test_trap_assert_stdout_unmatched ("*Legacy raw response:*");
+    }
+  else if (scenario == 14 || scenario == 15)
+    {
+      g_test_trap_assert_stderr ("*ERROR:*");
+      g_test_trap_assert_stdout_unmatched ("*Legacy-protocol candidate read:*");
+    }
+  else
+    {
+      g_test_trap_assert_stdout ("*Diagnostic exit=1;*FAILED*");
+      g_test_trap_assert_stderr ("*ERROR: restoring SPI mode*");
+    }
+}
+
+static void
 test_comparison_cli (gconstpointer data)
 {
   guint scenario = GPOINTER_TO_UINT (data);
@@ -1106,6 +1394,22 @@ test_comparison_speed (void)
 }
 
 static void
+test_legacy_id_speed (void)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic", (gchar *) "--legacy-id-no-init",
+                        (gchar *) "--speed", (gchar *) "250000", NULL };
+      exit (medion_diagnostic_main (4, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*--legacy-id-no-init fixes the SPI speed at 1000000 Hz*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
 test_speed_invalid (gconstpointer data)
 {
   if (g_test_subprocess ())
@@ -1154,6 +1458,12 @@ main (int argc, char **argv)
                         GINT_TO_POINTER (MOCK_ERROR), test_transfer_failure);
   g_test_add_data_func ("/medion-diagnostic/transfer/short",
                         GINT_TO_POINTER (MOCK_SHORT), test_transfer_failure);
+  g_test_add_func ("/medion-diagnostic/legacy-id/transfer", test_legacy_transfer);
+  g_test_add_data_func ("/medion-diagnostic/legacy-id/transfer-error",
+                        GINT_TO_POINTER (MOCK_ERROR), test_legacy_transfer_failure);
+  g_test_add_data_func ("/medion-diagnostic/legacy-id/transfer-short",
+                        GINT_TO_POINTER (MOCK_SHORT), test_legacy_transfer_failure);
+  g_test_add_func ("/medion-diagnostic/legacy-id/crc", test_vendor_crc);
   g_test_add_func ("/medion-diagnostic/reset/immediate-sync", test_reset_then_sync);
   g_test_add_func ("/medion-diagnostic/recovery-sequence", test_recovery_sequence);
   g_test_add_func ("/medion-diagnostic/reset/write-error", test_gpio_failure);
@@ -1219,6 +1529,19 @@ main (int argc, char **argv)
                                                 status_scenarios[i]);
       g_test_add_data_func (path, GUINT_TO_POINTER (i), test_status_cli);
     }
+  const gchar *legacy_scenarios[] = {
+    "recognized-crc", "recognized-zero-trailer", "all-zero", "all-ff",
+    "unknown-crc", "recognized-bad-crc", "9361-not-recognized", "ffff-zero-trailer",
+    "transfer-error", "transfer-short", "pre-power-failure", "post-power-failure",
+    "sigterm-eintr", "sigint-completed-ioctl", "config-read-failure",
+    "config-write-failure", "restore-failure",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (legacy_scenarios); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/legacy-id/cli/%s",
+                                                legacy_scenarios[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_legacy_id_cli);
+    }
   const gchar *comparison_results[] = { "neither-idle", "becomes-idle", "loses-idle",
                                         "both-idle", "all-ff", "unknown-data" };
   for (guint i = 0; i < G_N_ELEMENTS (comparison_results); i++)
@@ -1244,7 +1567,8 @@ main (int argc, char **argv)
         g_test_add_data_func (path, GUINT_TO_POINTER (comparison_failures[i].start + j), test_comparison_cli);
       }
   const gchar *comparison_conflicts[] = { "--status-no-reset", "--probe", "--reset",
-                                          "--chip-id", "--test-vendor-recovery" };
+                                          "--chip-id", "--test-vendor-recovery",
+                                          "--legacy-id-no-init" };
   for (guint i = 0; i < G_N_ELEMENTS (comparison_conflicts); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/medion-diagnostic/comparison/exclusive/%s",
@@ -1252,6 +1576,7 @@ main (int argc, char **argv)
       g_test_add_data_func (path, comparison_conflicts[i], test_comparison_exclusive);
     }
   g_test_add_func ("/medion-diagnostic/comparison/fixed-speed", test_comparison_speed);
+  g_test_add_func ("/medion-diagnostic/legacy-id/fixed-speed", test_legacy_id_speed);
   int result = g_test_run ();
   if (events)
     g_string_free (events, TRUE);

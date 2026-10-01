@@ -23,6 +23,7 @@ and service cleanup. Direct invocations of the diagnostic bypass that lock.
 
 - [Evidence and hardware routes](docs/fte3600/status.md)
 - [Diagnostic boundaries and known-good comparison](docs/fte3600/troubleshooting.md)
+- [Bounded old-stack identity comparison](docs/medion-legacy-id-test.md)
 - [Build, installation and rollback](docs/fte3600/install.md)
 - [Security and biometric privacy](SECURITY.md)
 - [Implementation provenance](docs/fte3600/clean-room.md)

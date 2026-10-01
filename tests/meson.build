@@ -439,6 +439,12 @@ if 'fte3600' in drivers
         timeout: 60,
     )
 
+    test('medion-host-state-collector', find_program('bash'),
+        args: files('test-medion-host-state-collector.sh'),
+        suite: ['unit-tests'],
+        timeout: 60,
+    )
+
     fte3600_brisk_test = executable('test-fte3600-brisk',
         sources: [
             'test-fte3600-brisk.c',

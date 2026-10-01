@@ -35,6 +35,8 @@ that known-good comparison as the starting point. Compare initialization,
 firmware, transport, GPIO and power-management behavior with that stack before
 requesting another experiment. Do not ask the reporter to repeat an unchanged
 recovery sequence that already failed. See the [hardware discussion](https://github.com/SamSeven777/libfprint-fte3600/issues/1).
+The next bounded comparison and its interpretation limits are in the
+[legacy-protocol test plan](../medion-legacy-id-test.md).
 
 ## Implemented functions and test limits
 

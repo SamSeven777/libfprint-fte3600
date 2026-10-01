@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
-# Compile a bounded diagnostic; run its soft-reset comparison only on request.
+# Compile a bounded diagnostic; run an explicitly selected experiment on request.
 set -euo pipefail
 umask 077
 
 fte_usage() {
   cat <<'USAGE'
-Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run]
+Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run|--legacy-id-run]
 
   --check-only  Check dependencies, print limited metadata, and compile locally
                 in a temporary directory (the default). No device access or
@@ -14,10 +14,14 @@ Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run]
   --run         Requires root. Temporarily isolate fprintd, then run
                 --compare-soft-reset: active SPI reads and a software reset.
                 No GPIO request, firmware upload, installation, or reboot.
+  --legacy-id-run
+                Requires root. Temporarily isolate fprintd, then send exactly
+                one old-protocol TX6 + RX4 identity candidate read. No GPIO,
+                reset, C6/FD/FE/1a84 write, retry, firmware, or recovery.
 
 An existing fprintd mask is preserved. A mask created here is runtime-only and
 removed on exit; a previously active service is restarted. Output stays local.
-Exit 0/2 preserves the tool's comparison result, not fingerprint functionality;
+Exit 0/2 preserves the selected diagnostic result, not fingerprint functionality;
 setup/cleanup failures return 1, interruption returns 128 + the signal number.
 This wrapper cannot prove that nothing accessed the sensor earlier this boot.
 Its lock excludes both Medion wrappers; direct diagnostic programs bypass it.
@@ -34,7 +38,7 @@ if (( $# )); then
 fi
 case $fte_mode in
   --help|-h) fte_usage; exit 0 ;;
-  --check-only|--run) ;;
+  --check-only|--run|--legacy-id-run) ;;
   *) fte_usage >&2; exit 1 ;;
 esac
 
@@ -44,8 +48,8 @@ for fte_command in cc pkg-config git systemctl mktemp rm readlink uname id flock
     exit 1
   fi
 done
-if [[ $fte_mode == --run && $(id -u) != 0 ]]; then
-  echo 'Use sudo bash scripts/test-medion-soft-reset.sh --run for the comparison.' >&2
+if [[ $fte_mode != --check-only && $(id -u) != 0 ]]; then
+  printf 'Use sudo bash scripts/test-medion-soft-reset.sh %s for the diagnostic.\n' "$fte_mode" >&2
   exit 1
 fi
 
@@ -245,8 +249,14 @@ if [[ $fte_load != masked || ( $fte_active != inactive && $fte_active != failed 
   printf 'Cannot isolate fprintd (LoadState=%s ActiveState=%s).\n' "$fte_load" "$fte_active" >&2
   exit 1
 fi
-echo 'Running the explicit soft-reset comparison; earlier sensor state is not proven by this wrapper.'
-"$fte_work/test-medion-e3224" --compare-soft-reset &
+if [[ $fte_mode == --legacy-id-run ]]; then
+  echo 'Running one bounded legacy-protocol identity candidate read; no initialization or recovery follows.'
+  fte_tool_mode=--legacy-id-no-init
+else
+  echo 'Running the explicit soft-reset comparison; earlier sensor state is not proven by this wrapper.'
+  fte_tool_mode=--compare-soft-reset
+fi
+"$fte_work/test-medion-e3224" "$fte_tool_mode" &
 fte_child=$!
 if wait "$fte_child"; then
   fte_result=0
