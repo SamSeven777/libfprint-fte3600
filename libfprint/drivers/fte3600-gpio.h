@@ -22,6 +22,7 @@ typedef struct
   const gchar *product_name;
   const gchar *product_version;
   const gchar *board_name;
+  gboolean     ft9361_protocol_supported;
   const gchar *reset_controller_acpi_path;
   guint        reset_offset;
   gboolean     reset_active_low;
@@ -39,6 +40,7 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .product_name = "A1",
     .product_version = NULL,
     .board_name = NULL,
+    .ft9361_protocol_supported = TRUE,
     .reset_controller_acpi_path = "\\_SB_.PCI0.GPI0",
     .reset_offset = 0x55,
     .reset_active_low = TRUE,
@@ -54,16 +56,15 @@ static const Fte3600GpioProfile fte3600_gpio_profiles[] = {
     .product_name = "E3224",
     .product_version = "FT",
     .board_name = "YS13G",
+    /* This is a reported resource layout, not an FT9361 protocol profile.
+     * The Mint success report refers to the separate legacy Linux stack. */
+    .ft9361_protocol_supported = FALSE,
     .reset_controller_acpi_path = "\\_SB_.GPO1",
     .reset_offset = 0x27,
-    .reset_active_low = TRUE,
-    /* Sensor identity and reset polarity remain unverified on this board.
-     * Keep recovery confined to explicitly requested standalone experiments. */
+    /* No reset polarity or timing is established by this resource report.
+     * The entire profile is rejected by the FT9361 backend before I/O. */
     .allow_hardware_reset = FALSE,
     .allow_firmware_upload = FALSE,
-    /* SPI reset timing from the Windows 2.0.3.102 FT9361 path. */
-    .reset_high_ms = 10,
-    .reset_low_ms = 20,
     .irq_controller_acpi_path = "\\_SB_.GPO2",
     .irq_offset = 0x00,
   },
@@ -82,6 +83,7 @@ fte3600_reset_line_value (const Fte3600GpioProfile *profile,
                           gboolean                  asserted)
 {
   g_assert (profile != NULL);
+  g_assert (profile->ft9361_protocol_supported);
 
   /* Polarity is a reviewed board property, never a process-environment knob. */
   if (profile->reset_active_low)

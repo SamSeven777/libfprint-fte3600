@@ -365,7 +365,18 @@ fte3600_select_gpio_profile (FpiDeviceFte3600 *self,
   self->gpio_profile = fte3600_lookup_gpio_profile (
     sys_vendor, product_name, product_version, board_name);
   if (self->gpio_profile)
-    return TRUE;
+    {
+      if (self->gpio_profile->ft9361_protocol_supported)
+        return TRUE;
+
+      /* Medion has never completed this protocol on hardware. Do not let
+       * shared FTE3600 enumeration send A1 commands or claim GPIOs there. */
+      self->gpio_profile = NULL;
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "Medion E3224 requires an independently validated legacy backend; "
+                           "the A1 FT9361 protocol is not enabled on this machine");
+      return FALSE;
+    }
 
   g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                "FTE3600 GPIO routing is not verified for DMI system '%s' '%s' "

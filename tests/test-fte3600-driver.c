@@ -104,6 +104,7 @@ test_gpio_profiles (void)
     "MEDION", "E3224", "FT", "YS13G");
 
   g_assert_nonnull (a1);
+  g_assert_true (a1->ft9361_protocol_supported);
   g_assert_true (a1->allow_hardware_reset);
   g_assert_true (a1->allow_firmware_upload);
   g_assert_cmpuint (a1->reset_high_ms, ==, 0);
@@ -116,10 +117,11 @@ test_gpio_profiles (void)
   g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
 
   g_assert_nonnull (medion);
+  g_assert_false (medion->ft9361_protocol_supported);
   g_assert_false (medion->allow_hardware_reset);
   g_assert_false (medion->allow_firmware_upload);
-  g_assert_cmpuint (medion->reset_high_ms, ==, 10);
-  g_assert_cmpuint (medion->reset_low_ms, ==, 20);
+  g_assert_cmpuint (medion->reset_high_ms, ==, 0);
+  g_assert_cmpuint (medion->reset_low_ms, ==, 0);
   g_assert_cmpstr (medion->reset_controller_acpi_path, ==, "\\_SB_.GPO1");
   g_assert_cmpstr (medion->irq_controller_acpi_path, ==, "\\_SB_.GPO2");
   g_assert_cmpuint (medion->reset_offset, ==, 0x27);
@@ -127,11 +129,11 @@ test_gpio_profiles (void)
 
   /* Obsolete process-environment overrides cannot alter a board's polarity. */
   g_setenv ("FTE3600_RESET_ACTIVE_LOW", "0", TRUE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
   g_setenv ("FTE3600_RESET_ACTIVE_LOW", "1", TRUE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
-  g_assert_cmpint (fte3600_reset_line_value (medion, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, TRUE), ==, GPIOD_LINE_VALUE_INACTIVE);
+  g_assert_cmpint (fte3600_reset_line_value (a1, FALSE), ==, GPIOD_LINE_VALUE_ACTIVE);
   g_unsetenv ("FTE3600_RESET_ACTIVE_LOW");
 
   /* Missing or mismatched identity must never enable the Medion routing. */
