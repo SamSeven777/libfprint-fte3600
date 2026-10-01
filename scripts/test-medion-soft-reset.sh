@@ -6,7 +6,7 @@ umask 077
 
 fte_usage() {
   cat <<'USAGE'
-Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run|--legacy-id-run]
+Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run|--legacy-id-run|--legacy-ctfdavis-id-run|--legacy-historical-id-run]
 
   --check-only  Check dependencies, print limited metadata, and compile locally
                 in a temporary directory (the default). No device access or
@@ -18,6 +18,16 @@ Usage: bash scripts/test-medion-soft-reset.sh [--check-only|--run|--legacy-id-ru
                 Requires root. Temporarily isolate fprintd, then send exactly
                 one old-protocol TX6 + RX4 identity candidate read. No GPIO,
                 reset, C6/FD/FE/1a84 write, retry, firmware, or recovery.
+  --legacy-historical-id-run
+                Requires root. Test the later unverified attachment candidate:
+                raw Pin 39
+                low->10ms->high twice, Mode 0 at 4 MHz, up to four C6
+                handshakes, then one FW9362 identity read.
+                Stops before 1a84, FD/FE, FDT, capture, or firmware upload.
+  --legacy-ctfdavis-id-run
+                Requires root. Test the ctfdavis candidate without GPIO access:
+                Mode 0, speed capped at 1 MHz, up to four C6 handshakes, then
+                one identity read. Stops before 1a84, FD/FE, FDT or capture.
 
 An existing fprintd mask is preserved. A mask created here is runtime-only and
 removed on exit; a previously active service is restarted. Output stays local.
@@ -38,7 +48,7 @@ if (( $# )); then
 fi
 case $fte_mode in
   --help|-h) fte_usage; exit 0 ;;
-  --check-only|--run|--legacy-id-run) ;;
+  --check-only|--run|--legacy-id-run|--legacy-historical-id-run|--legacy-ctfdavis-id-run) ;;
   *) fte_usage >&2; exit 1 ;;
 esac
 
@@ -188,6 +198,7 @@ fte_work=$(mktemp -d /tmp/fte3600-medion-soft-reset.XXXXXX) || exit 1
 fte_flags=$(pkg-config --cflags --libs glib-2.0 libgpiod gudev-1.0) || exit 1
 read -r -a fte_cc_flags <<< "$fte_flags"
 if ! cc -O2 -Wall -Wextra -Werror "$fte_repo/tools/test_medion_e3224.c" \
+    "$fte_repo/libfprint/drivers/fte3600-legacy-proto.c" \
     "${fte_cc_flags[@]}" -o "$fte_work/test-medion-e3224"; then
   echo 'Diagnostic compilation failed; no service was changed.' >&2
   exit 1
@@ -249,7 +260,13 @@ if [[ $fte_load != masked || ( $fte_active != inactive && $fte_active != failed 
   printf 'Cannot isolate fprintd (LoadState=%s ActiveState=%s).\n' "$fte_load" "$fte_active" >&2
   exit 1
 fi
-if [[ $fte_mode == --legacy-id-run ]]; then
+if [[ $fte_mode == --legacy-historical-id-run ]]; then
+  echo 'Running the later unverified attachment candidate; full initialization and capture do not follow.'
+  fte_tool_mode=--legacy-historical-id
+elif [[ $fte_mode == --legacy-ctfdavis-id-run ]]; then
+  echo 'Running the ctfdavis candidate prefix without GPIO; full initialization and capture do not follow.'
+  fte_tool_mode=--legacy-ctfdavis-id
+elif [[ $fte_mode == --legacy-id-run ]]; then
   echo 'Running one bounded legacy-protocol identity candidate read; no initialization or recovery follows.'
   fte_tool_mode=--legacy-id-no-init
 else

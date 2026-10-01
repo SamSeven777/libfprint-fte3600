@@ -1,5 +1,10 @@
 # Build and installation
 
+Medion bring-up currently uses the [standalone legacy test](../medion-legacy-id-test.md).
+Installing this branch does not enable Medion enrollment: the unworked A1-derived
+Medion path is rejected before I/O. The firmware installation steps below apply
+to the FT9361/A1 implementation, not to the new Medion candidate.
+
 Clone the repository and run all commands from the repository root:
 
 ```sh

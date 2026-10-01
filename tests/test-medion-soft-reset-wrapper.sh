@@ -45,6 +45,7 @@ case ${0##*/} in
     ;;
   cc)
     echo cc >> "$FTE_TEST_CASE/events"
+    [[ " $* " == *'/libfprint/drivers/fte3600-legacy-proto.c '* ]] || exit 93
     [[ ${FTE_TEST_COMPILE_FAIL:-0} != 1 ]] || exit 1
     fte_mock_out=
     while (( $# )); do
@@ -235,6 +236,12 @@ fte_test_no_mutation
 fte_test_ok 'legacy identity run requires root'
 
 fte_test_new
+export FTE_TEST_UID=1000
+fte_test_run 1 --legacy-historical-id-run
+fte_test_no_mutation
+fte_test_ok 'historical legacy run requires root'
+
+fte_test_new
 fte_test_run_legacy 0
 fte_test_no_mutation
 grep -q '^cc$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy entry point default did not compile'
@@ -244,7 +251,7 @@ fte_test_new
 fte_test_run_legacy 0 --help
 fte_test_no_mutation
 ! grep -q '^cc$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy help compiled unexpectedly'
-grep -q 'one old-protocol TX6 + RX4' "$FTE_TEST_CASE/output" || fte_test_fail 'legacy help omitted boundary'
+grep -q 'later unverified attachment candidate' "$FTE_TEST_CASE/output" || fte_test_fail 'legacy help omitted attachment boundary'
 fte_test_ok 'legacy entry point help is local and non-mutating'
 
 fte_test_new
@@ -277,8 +284,30 @@ fte_test_new
 export FTE_TEST_EXPECT_TOOL_MODE=--legacy-id-no-init
 fte_test_run_legacy 0 --run
 fte_test_restored_active
-grep -q '^tool --legacy-id-no-init$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy entry point dispatched wrong mode'
-fte_test_ok 'legacy entry point run reaches only bounded mode and restores service'
+grep -q '^tool --legacy-id-no-init$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy entry point changed the established run mode'
+fte_test_ok 'legacy entry point preserves its bounded run behavior'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-historical-id
+fte_test_run_legacy 0 --historical-run
+fte_test_restored_active
+grep -q '^tool --legacy-historical-id$' "$FTE_TEST_CASE/events" || fte_test_fail 'legacy historical entry point dispatched wrong mode'
+fte_test_ok 'legacy historical entry point is explicit and restores service'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-historical-id
+fte_test_run 0 --legacy-historical-id-run
+fte_test_restored_active
+grep -q '^tool --legacy-historical-id$' "$FTE_TEST_CASE/events" || fte_test_fail 'wrong historical diagnostic mode'
+grep -q 'later unverified attachment candidate' "$FTE_TEST_CASE/output" || fte_test_fail 'attachment boundary not reported'
+fte_test_ok 'attachment route invokes only its prefix and restores service'
+
+fte_test_new
+export FTE_TEST_EXPECT_TOOL_MODE=--legacy-ctfdavis-id
+fte_test_run_legacy 0 --ctfdavis-run
+fte_test_restored_active
+grep -q '^tool --legacy-ctfdavis-id$' "$FTE_TEST_CASE/events" || fte_test_fail 'ctfdavis entry point dispatched wrong mode'
+fte_test_ok 'ctfdavis entry point runs the no-GPIO candidate and restores service'
 
 fte_test_new
 export FTE_TEST_EXPECT_TOOL_MODE=--legacy-id-no-init FTE_TEST_TOOL_EXIT=2

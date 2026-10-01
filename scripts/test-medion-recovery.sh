@@ -48,6 +48,7 @@ printf 'Source commit: %s\n' "${fte_revision:-unknown}"
 fte_flags=$(pkg-config --cflags --libs glib-2.0 libgpiod gudev-1.0)
 read -r -a fte_cc_flags <<< "$fte_flags"
 cc -O2 -Wall -Wextra -Werror "$fte_repo/tools/test_medion_e3224.c" \
+  "$fte_repo/libfprint/drivers/fte3600-legacy-proto.c" \
   "${fte_cc_flags[@]}" -o "$fte_work/test-medion-e3224"
 
 # Both wrappers hold this same root-owned lock through child and service

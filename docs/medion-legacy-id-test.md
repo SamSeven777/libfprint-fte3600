@@ -1,103 +1,163 @@
-# Medion E3224: bounded legacy-protocol identity test
+# Medion E3224: source-backed legacy identity comparisons
 
-This test isolates one material difference between the stack that reportedly
-worked on this same machine under Mint and the current FTE3600 diagnostic. It is
-not an enrollment test and does not identify the cause by itself.
+These tests compare two bounded bridge candidates with protocol recovered from
+an archived userspace library. The primary comparison follows the public
+ctfdavis alternative named in tuxman2's successful Mint report. The secondary
+comparison follows a different 4 MHz/GPIO patch posted later for validation.
+Neither proves the exact files installed on Mint, and neither is a complete
+initialization, capture, enrollment, or authentication test.
 
-## Why this test exists
+## Provenance boundary
 
-Static analysis of the archived 2025 Ubuntu userspace library and the public
-`focal_spi` bridge recovered this transaction for logical address `0x1a8b`:
+The issue chronology distinguishes two different bridge sources:
+
+- tuxman2's successful Mint report says that ctfdavis's alternative bridge
+  resolved `init sensor error`:
+  <https://github.com/vobademi/FTEXX00-Ubuntu/issues/1#issuecomment-3288100306>
+- vobademi later posted a one-line patch and explicitly asked for it to be
+  validated:
+  <https://github.com/vobademi/FTEXX00-Ubuntu/issues/1#issuecomment-3402710422>
+
+The closest public ctfdavis source now available is pinned for review, but it
+is not proof of the historical Mint file:
+
+- source: <https://github.com/vobademi/FTEXX00-Ubuntu/blob/a0a35d3e47873a1712e02e3210f0e6e4fe75eeee/alt/focal_spi.c>
+- commit: `a0a35d3e47873a1712e02e3210f0e6e4fe75eeee`
+- SHA-256: `fdcf6e583291ab719007896b38742a0ff2cfbdc26e5f9de10d22959932902b2c`
+
+The secondary 4 MHz test is based on the attachment from the later validation
+request:
+
+- source: <https://github.com/user-attachments/files/22909015/focal_spi.c>
+- SHA-256: `ed1c273d4988f8d490b7a81fd76e47927ab24785f0f400691f34cf3ba137b2f8`
+- size: 13,915 bytes
+
+This attachment is not the ctfdavis optional-named-GPIO/1 MHz alternative
+cited by the successful report. Its presence in the issue is evidence for a
+proposed experiment, not evidence that it ever worked on the Medion.
+
+The protocol bytes below were recovered from an archived userspace library
+with SHA-256
+`4ee33eb988a62413698d1761b9c9baf09faca6a645f82ac19db6f33d04c8cb1b`.
+It was inspected statically and was never installed or executed. No available
+evidence proves that this exact library and either reviewed bridge source were
+the files installed together on the old Mint system.
+
+## Primary ctfdavis comparison
+
+The pinned alternative bridge:
+
+1. selects Mode 0, 8 bits, and MSB first;
+2. keeps a non-zero device maximum at or below 1 MHz, or caps it to 1 MHz;
+3. looks only for optional named `reset`, `power`, then `enable` GPIOs;
+4. skips its probe reset when none of those named mappings exists.
+
+The reported Medion ACPI fragment contains an unnamed GPIO resource, not one
+of those named mappings. The diagnostic therefore models this source path
+without requesting or changing any GPIO. It waits the userspace library's 2 ms
+post-reset-ioctl interval, then sends the C6 and identity transactions below.
+
+This is a source-backed comparison with the code family named in the success
+report. It is not a claim that the pinned revision is byte-identical to the old
+Mint installation.
+
+## Secondary 4 MHz attachment comparison
+
+The later 4 MHz attachment:
+
+1. set the SPI device to Mode 0, 8 bits, MSB first, and a 4 MHz maximum;
+2. obtained unnamed ACPI GPIO resource index 0 with `GPIOD_OUT_LOW`;
+3. drove descriptor value `0`, waited 10 ms, then drove `1`;
+4. required a level-high IRQ and initially disabled it.
+
+The attachment does not register an ACPI GPIO polarity mapping. Its unnamed
+`devm_gpiod_get_index(..., NULL, 0, ...)` lookup uses the `_CRS` resource, and
+ACPI `GpioIo()` itself has no polarity field. Consequently its sequence is raw
+low, wait 10 ms, raw high. It must not be inverted using the unproven FT9361
+reset interpretation.
+
+The diagnostic models both the bridge probe cycle and the library's reset
+ioctl cycle, then waits 2 ms.
+
+## Common bounded protocol
+
+The recovered userspace library contains this FW9362 branch:
 
 ```text
-one SPI message, chip select held between its two transfers
-TX: 04 fb 9a 8b 00 00
-RX: four bytes
+up to four times:
+  TX 09 f6 c6 01
+  wait 4 ms
+  one SPI message, CS held:
+    TX 08 f7 c6 00
+    RX 1 byte, expect 01
+
+one SPI message, CS held:
+  TX 04 fb 9a 8b 00 00
+  RX 4 bytes, first two bytes are the big-endian identity
 ```
 
-The analyzed `libfprint-2.so.2.0.0` has SHA-256
-`4ee33eb988a62413698d1761b9c9baf09faca6a645f82ac19db6f33d04c8cb1b`.
-It was inspected statically and was never installed or executed. The public
-bridge corroborates the transfer framing, but may postdate the reported Mint
-success; neither artifact alone proves the exact historical installation.
+Both comparisons run the C6 loop and one FW9362 identity read. They deliberately
+stop before `1a84`, shifted-ID recovery, the other-93xx `FD/FE` electrical
+configuration, FDT/calibration, IRQ capture, image data, or either firmware
+path.
 
-The old bridge used `spi_write_then_read()`. The earlier Medion diagnostic used
-a different command family and one six-byte full-duplex transfer. Therefore the
-all-zero result from that earlier diagnostic did not test this legacy framing.
+## Safety and interpretation
 
-The full archived library did more before and after this read. It requested a
-reset, wrote and read back `C6`, and one fallback path wrote `FD/FE` in a routine
-described by the binary as I/O-voltage configuration. It also retried and could
-enter recovery paths. Those operations are intentionally **not** copied here.
+Both comparisons change the SPI device's maximum speed temporarily and write
+C6. The ctfdavis comparison does not request a GPIO. The later-attachment
+comparison additionally changes Pin 39 and leaves it raw high before release.
+The wrapper restricts both runs to the exact `MEDION / E3224 / FT / YS13G`
+profile, keeps the resolved SPI controller runtime-active, isolates `fprintd`,
+and restores the SPI settings, power policy, and service state on handled exits.
 
-## Exact experiment boundary
+- Exit `0`: C6 read back `01` and the FW9362 branch returned identity `9362`.
+- Exit `2`: traffic completed but C6 or identity was inconclusive. Raw bytes
+  remain useful evidence; this is not proof that the sensor is absent or dead.
+- Exit `1`: setup, transfer, controller-state, or cleanup failed.
+- Exit `128 + signal`: the run was interrupted and cleanup was attempted.
 
-`--legacy-id-no-init`:
+The archived FW9362 branch does not validate a CRC on this response. “Accepted
+identity” therefore means that it matches the old branch's exact value, not
+that authenticity or physical chip marking has been independently verified.
 
-- accepts only MEDION / E3224 / FT / YS13G;
-- resolves the character device through `spi-FTE3600:00` and verifies the
-  opened node against the same sysfs object;
-- holds only the resolved SPI/controller runtime-PM ancestors active;
-- uses Mode 0, 8 bits, MSB first and 1 MHz;
-- sends exactly one `SPI_IOC_MESSAGE(2)`: TX6 followed by RX4;
-- does not request a GPIO, reset the sensor, write `C6`, `FD`, `FE` or `1a84`,
-  query ROM, write scratch RAM, retry, upload firmware or run recovery;
-- restores the prior SPI settings and runtime-PM controls on every handled exit.
+## Preflight and run
 
-This is active bus traffic, not a passive read. The RX-only transfer still
-generates clocks and dummy MOSI bits. The command is documented as a read only
-by the archived implementation; that is not proof that it is side-effect-free
-on every unknown device.
-
-## Collect host evidence first
-
-Run the collector without `sudo` and share its complete output:
+Collect the bounded host snapshot first:
 
 ```sh
 bash scripts/collect-medion-spi-host-state.sh
 ```
 
-It reads a bounded set of existing sysfs/debugfs metadata. It does not mount
-debugfs, open SPI/GPIO device nodes, change power management or services, or
-execute an ACPI method. Missing debugfs data is reported as a gap. A later
-snapshot may show autosuspend state, and `MUX UNCLAIMED` does not by itself mean
-that firmware left a pin unconfigured.
-
-## Build-only preflight
+Compile without hardware or service access:
 
 ```sh
 bash scripts/test-medion-legacy-id.sh --check-only
 ```
 
-This compiles the current diagnostic in a private temporary directory. It does
-not access the sensor or change `fprintd`.
-
-## Active test
-
-Only run this after the host snapshot has been reviewed:
+Run the primary ctfdavis comparison first and preserve the complete output:
 
 ```sh
 set -o pipefail
-sudo bash scripts/test-medion-legacy-id.sh --run 2>&1 | tee ../medion-legacy-id.log
+sudo bash scripts/test-medion-legacy-id.sh --ctfdavis-run 2>&1 | tee ../medion-legacy-ctfdavis-id.log
 printf 'Test/logging exit status: %s\n' "$?"
 ```
 
-The wrapper temporarily masks and stops `fprintd`, runs only the bounded mode,
-then restores the prior service state. A pre-existing mask is preserved. The
-output stays local unless the user shares the log.
+Only if a separately reviewed comparison is still useful, run the later
+unverified 4 MHz/GPIO attachment candidate. `--historical-run` is retained as
+a compatibility name; it does not mean this attachment was the working Mint
+bridge:
 
-## Reading the result
+```sh
+set -o pipefail
+sudo bash scripts/test-medion-legacy-id.sh --historical-run 2>&1 | tee ../medion-legacy-historical-id.log
+printf 'Test/logging exit status: %s\n' "$?"
+```
 
-- Exit `0`: the first two bytes are in the archived library's accepted ID set,
-  and the non-zero trailer matches that library's other-93xx CRC convention.
-  This is a protocol candidate, not proof of the physical chip model or working
-  enrollment.
-- Exit `2`: the transaction completed but returned all zero, all `ff`, an
-  unknown identity, a zero trailer or a CRC mismatch. All four raw bytes remain
-  useful evidence.
-- Exit `1`: setup, SPI transfer, controller-state or cleanup failed.
-- Exit `128 + signal`: the run was interrupted; cleanup is still attempted.
+The earlier single identity read without GPIO or C6 is retained only as a
+limited framing comparison:
 
-An all-zero or otherwise inconclusive result cannot rule out this protocol,
-prove that the sensor is unpowered, or distinguish FT9361 from FT9362. The test
-deliberately omits the archived stack's reset and configuration writes.
+```sh
+sudo bash scripts/test-medion-legacy-id.sh --run
+```
+
+It does not reproduce either bridge candidate's initialization prefix.

@@ -1,5 +1,11 @@
 # Troubleshooting
 
+For Medion, start with the [independent rebuild evidence](medion-rebuild.md)
+and [ctfdavis candidate test](../medion-legacy-id-test.md). The FT9361 recovery
+material below records previous failed experiments; it is not the new Medion
+implementation or an automatic next step. The ordinary driver deliberately
+rejects Medion before I/O, so reinstalling firmware does not enable it.
+
 ## Device missing or initialization fails
 
 Check that your device matches a [supported hardware profile](status.md), then verify the character nodes and module configuration:
@@ -29,12 +35,11 @@ The same reported machine worked with the older Mint stack. Treat that as the
 known-good control. Do not rerun the unchanged recovery sequence that has already
 failed; first identify a concrete difference to test.
 
-The first isolated difference is now documented in the
-[bounded legacy-protocol test](../medion-legacy-id-test.md). Collect its limited
-host-state snapshot first. The optional active phase sends one reconstructed
-`TX6 + RX4` identity transaction and deliberately omits the old stack's reset,
-SPI-register configuration, voltage-labeled writes, retries and recovery. Its
-negative result is therefore inconclusive, not permission to add those writes.
+The selected next comparison is `--ctfdavis-run` in the
+[bounded legacy-protocol test](../medion-legacy-id-test.md): Mode 0, at most
+1 MHz, no GPIO request, a bounded C6 handshake, then a sequential identity
+read. It does not run voltage setup, full calibration or capture. The older
+single-read `--run` option remains a different, incomplete comparison.
 
 The current diagnostic's default / `--status-no-reset` mode uses only the two
 existing application-state/geometry SPI reads. It does not discover/claim GPIO,
@@ -68,8 +73,8 @@ The September 23 correction follows the **FT9361** call chain in vendor DLL
 wait 2 ms, two more reset pulses separated by 10 ms, wait 160 ms, then two `70`
 commands and MCU polling. Runtime configuration follows successful idle and ID
 checks. The five `09 f6` writes belong to the FT9338 download path; treating
-`30=bb` as the FT9361 firmware jump was incorrect. This corrected Medion flow
-still requires an E3224 hardware result.
+`30=bb` as the FT9361 firmware jump was incorrect. This FT9361 experiment
+subsequently failed on E3224 and is not evidence for the new Medion protocol.
 
 Audit anchors for the DLL (SHA256
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`):

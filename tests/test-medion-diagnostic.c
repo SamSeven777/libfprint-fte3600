@@ -42,7 +42,11 @@ static gboolean chip_probe_responses;
 static gboolean status_observation;
 static gboolean soft_reset_comparison;
 static gboolean legacy_id_observation;
+static gboolean legacy_historical_observation;
+static gboolean legacy_ctfdavis_observation;
 static guint8 legacy_id_response[4];
+static guint legacy_c6_read_count;
+static guint legacy_c6_success_at;
 static guint16 mock_mcu_status;
 static guint16 mock_after_status;
 static guint8 mock_boot_edition;
@@ -65,13 +69,28 @@ static guint mock_power_check_fail_at;
 static gboolean mock_restore_failure;
 static gboolean mock_assert_restored;
 static guint32 mock_spi_mode;
+static guint32 mock_spi_max_speed;
+static guint32 mock_original_spi_max_speed;
 static guint8 mock_spi_bits;
 static guint8 mock_spi_lsb;
 static guint mock_cli_expected_transfers;
+static unsigned long mock_config_requests[32];
+static guint mock_config_request_count;
 #define ORIGINAL_MODE (SPI_MODE_3 | SPI_CS_HIGH | SPI_LSB_FIRST | SPI_RX_DUAL)
 #define ORIGINAL_BITS 16
 #define ORIGINAL_LSB 1
+#define ORIGINAL_MAX_SPEED 777777
 #define MOCK_SPI_SYSFS "/sys/devices/test-controller/spi-FTE3600:00"
+
+typedef enum
+{
+  MOCK_DISCOVERY_NONE,
+  MOCK_DISCOVERY_SPIDEV,
+  MOCK_DISCOVERY_GPIO,
+} MockDiscovery;
+
+static MockDiscovery mock_discovery;
+static enum gpiod_line_value mock_gpio_initial_value;
 
 static int mock_ioctl (int           fd,
                        unsigned long request,
@@ -115,6 +134,29 @@ static gboolean mock_power_verify_medion_active (MedionPower *power,
 static void mock_power_report (MedionPower *power,
                                const gchar *tag);
 static struct gpiod_chip *mock_gpio_open (const char *path);
+static struct gpiod_line_info *mock_gpio_get_line_info (struct gpiod_chip *chip,
+                                                        unsigned int       offset);
+static const char *mock_gpio_info_name (struct gpiod_line_info *info);
+static const char *mock_gpio_info_consumer (struct gpiod_line_info *info);
+static bool mock_gpio_info_is_used (struct gpiod_line_info *info);
+static void mock_gpio_info_free (struct gpiod_line_info *info);
+static struct gpiod_line_settings *mock_gpio_settings_new (void);
+static void mock_gpio_settings_free (struct gpiod_line_settings *settings);
+static int mock_gpio_set_direction (struct gpiod_line_settings *settings,
+                                    enum gpiod_line_direction   direction);
+static int mock_gpio_set_output_value (struct gpiod_line_settings *settings,
+                                       enum gpiod_line_value      value);
+static struct gpiod_line_config *mock_gpio_config_new (void);
+static void mock_gpio_config_free (struct gpiod_line_config *config);
+static int mock_gpio_add_settings (struct gpiod_line_config   *config,
+                                   const unsigned int         *offsets,
+                                   size_t                      num_offsets,
+                                   struct gpiod_line_settings *settings);
+static struct gpiod_line_request *mock_gpio_request_lines (struct gpiod_chip           *chip,
+                                                           struct gpiod_request_config *request_config,
+                                                           struct gpiod_line_config    *line_config);
+static void mock_gpio_chip_close (struct gpiod_chip *chip);
+static const gchar *mock_udev_driver (GUdevDevice *device);
 static int medion_diagnostic_main (int    argc,
                                    char **argv);
 static void mock_exit (int status) G_GNUC_NORETURN;
@@ -126,6 +168,20 @@ static void mock_exit (int status) G_GNUC_NORETURN;
 #define gpiod_line_request_get_value mock_gpio_get
 #define gpiod_line_request_release mock_gpio_release
 #define gpiod_chip_open mock_gpio_open
+#define gpiod_chip_get_line_info mock_gpio_get_line_info
+#define gpiod_line_info_get_name mock_gpio_info_name
+#define gpiod_line_info_get_consumer mock_gpio_info_consumer
+#define gpiod_line_info_is_used mock_gpio_info_is_used
+#define gpiod_line_info_free mock_gpio_info_free
+#define gpiod_line_settings_new mock_gpio_settings_new
+#define gpiod_line_settings_free mock_gpio_settings_free
+#define gpiod_line_settings_set_direction mock_gpio_set_direction
+#define gpiod_line_settings_set_output_value mock_gpio_set_output_value
+#define gpiod_line_config_new mock_gpio_config_new
+#define gpiod_line_config_free mock_gpio_config_free
+#define gpiod_line_config_add_line_settings mock_gpio_add_settings
+#define gpiod_chip_request_lines mock_gpio_request_lines
+#define gpiod_chip_close mock_gpio_chip_close
 #define g_usleep mock_sleep
 #define open mock_open
 #define fstat mock_fstat
@@ -137,6 +193,7 @@ static void mock_exit (int status) G_GNUC_NORETURN;
 #define g_udev_device_get_parent mock_udev_parent
 #define g_udev_device_get_sysfs_path mock_udev_sysfs
 #define g_udev_device_get_device_file mock_udev_file
+#define g_udev_device_get_driver mock_udev_driver
 #define realpath mock_realpath
 #define medion_power_prepare mock_power_prepare
 #define medion_power_restore mock_power_restore
@@ -150,6 +207,20 @@ static void mock_exit (int status) G_GNUC_NORETURN;
 #undef gpiod_line_request_get_value
 #undef gpiod_line_request_release
 #undef gpiod_chip_open
+#undef gpiod_chip_get_line_info
+#undef gpiod_line_info_get_name
+#undef gpiod_line_info_get_consumer
+#undef gpiod_line_info_is_used
+#undef gpiod_line_info_free
+#undef gpiod_line_settings_new
+#undef gpiod_line_settings_free
+#undef gpiod_line_settings_set_direction
+#undef gpiod_line_settings_set_output_value
+#undef gpiod_line_config_new
+#undef gpiod_line_config_free
+#undef gpiod_line_config_add_line_settings
+#undef gpiod_chip_request_lines
+#undef gpiod_chip_close
 #undef g_usleep
 #undef open
 #undef fstat
@@ -161,6 +232,7 @@ static void mock_exit (int status) G_GNUC_NORETURN;
 #undef g_udev_device_get_parent
 #undef g_udev_device_get_sysfs_path
 #undef g_udev_device_get_device_file
+#undef g_udev_device_get_driver
 #undef realpath
 #undef medion_power_prepare
 #undef medion_power_restore
@@ -189,8 +261,12 @@ reset_mocks (void)
   mock_sleep_count = mock_sleep_signal_at = 0;
   mock_expected_exit = -1;
   mock_spi_mode = ORIGINAL_MODE;
+  mock_original_spi_max_speed = ORIGINAL_MAX_SPEED;
+  mock_spi_max_speed = mock_original_spi_max_speed;
   mock_spi_bits = ORIGINAL_BITS;
   mock_spi_lsb = ORIGINAL_LSB;
+  memset (mock_config_requests, 0, sizeof (mock_config_requests));
+  mock_config_request_count = 0;
   g_assert_null (power_state.nodes);
   if (events)
     g_string_free (events, TRUE);
@@ -205,11 +281,25 @@ reset_mocks (void)
   status_observation = FALSE;
   soft_reset_comparison = FALSE;
   legacy_id_observation = FALSE;
+  legacy_historical_observation = FALSE;
+  legacy_ctfdavis_observation = FALSE;
+  legacy_c6_read_count = 0;
+  legacy_c6_success_at = 1;
+  mock_discovery = MOCK_DISCOVERY_NONE;
+  mock_gpio_initial_value = GPIOD_LINE_VALUE_ERROR;
   memset (legacy_id_response, 0, sizeof (legacy_id_response));
   mock_after_status = 0;
   mock_mcu_status = mock_boot_edition = mock_chip_id = 0;
   g_clear_pointer (&tx_frames, g_ptr_array_unref);
   tx_frames = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+}
+
+static guint32
+mock_ctfdavis_speed (void)
+{
+  return mock_original_spi_max_speed == 0 ||
+         mock_original_spi_max_speed > 1000000 ?
+         1000000 : mock_original_spi_max_speed;
 }
 
 static void
@@ -236,9 +326,16 @@ mock_ioctl (int fd, unsigned long request, ...)
       struct spi_ioc_transfer *transfers = value;
       const struct spi_ioc_transfer *tx = &transfers[0];
       const struct spi_ioc_transfer *rx = &transfers[1];
-      const guint8 expected[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+      const guint8 identity_command[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
+      const guint8 c6_command[] = { 0x08, 0xf7, 0xc6, 0 };
+      gboolean c6_read = tx->len == sizeof (c6_command);
+      guint32 speed = legacy_historical_observation ?
+                      FTE3600_LEGACY_SPI_SPEED_HZ :
+                      legacy_ctfdavis_observation ? mock_ctfdavis_speed () :
+                                                    1000000;
 
-      g_assert_true (legacy_id_observation);
+      g_assert_true (legacy_id_observation || legacy_historical_observation ||
+                     legacy_ctfdavis_observation);
       g_assert_cmpint (fd, ==, full_cli ? 43 : spi_fd);
       if (full_cli)
         {
@@ -246,18 +343,38 @@ mock_ioctl (int fd, unsigned long request, ...)
           g_assert_cmpuint (mock_spi_bits, ==, 8);
           g_assert_cmpuint (mock_spi_lsb, ==, 0);
           g_assert_true (mock_power_active);
-          g_assert_null (req_gpo1);
-          g_assert_cmpuint (gpio_count, ==, 0);
+          if (legacy_historical_observation || legacy_ctfdavis_observation)
+            {
+              g_assert_cmpuint (mock_spi_max_speed, ==,
+                                legacy_historical_observation ?
+                                FTE3600_LEGACY_SPI_SPEED_HZ :
+                                mock_ctfdavis_speed ());
+              if (legacy_historical_observation)
+                g_assert_nonnull (req_gpo1);
+              else
+                {
+                  g_assert_null (req_gpo1);
+                  g_assert_cmpuint (gpio_count, ==, 0);
+                }
+            }
+          else
+            {
+              g_assert_null (req_gpo1);
+              g_assert_cmpuint (gpio_count, ==, 0);
+            }
         }
       g_assert_cmpuint (tx->tx_buf, !=, 0);
       g_assert_cmpuint (tx->rx_buf, ==, 0);
-      g_assert_cmpuint (tx->len, ==, sizeof (expected));
+      g_assert_cmpuint (tx->len, ==,
+                        c6_read ? sizeof (c6_command) :
+                                  sizeof (identity_command));
       g_assert_cmpuint (rx->tx_buf, ==, 0);
       g_assert_cmpuint (rx->rx_buf, !=, 0);
-      g_assert_cmpuint (rx->len, ==, sizeof (legacy_id_response));
+      g_assert_cmpuint (rx->len, ==,
+                        c6_read ? 1 : sizeof (legacy_id_response));
       for (guint i = 0; i < 2; i++)
         {
-          g_assert_cmpuint (transfers[i].speed_hz, ==, 1000000);
+          g_assert_cmpuint (transfers[i].speed_hz, ==, speed);
           g_assert_cmpuint (transfers[i].bits_per_word, ==, 8);
           g_assert_cmpuint (transfers[i].cs_change, ==, 0);
           g_assert_cmpuint (transfers[i].delay_usecs, ==, 0);
@@ -265,14 +382,18 @@ mock_ioctl (int fd, unsigned long request, ...)
           g_assert_cmpuint (transfers[i].rx_nbits, ==, 0);
         }
       g_assert_cmpmem ((const void *) (uintptr_t) tx->tx_buf, tx->len,
-                       expected, sizeof (expected));
+                       c6_read ? c6_command : identity_command,
+                       c6_read ? sizeof (c6_command) :
+                                 sizeof (identity_command));
       transfer_count++;
       last_tx_size = tx->len;
       memcpy (last_tx, (const void *) (uintptr_t) tx->tx_buf, tx->len);
       last_speed = tx->speed_hz;
       g_ptr_array_add (tx_frames, g_bytes_new ((const void *) (uintptr_t) tx->tx_buf,
                                                tx->len));
-      g_string_append (events, "spi2:04/6+4;");
+      g_string_append_printf (events, "spi2:%02x/%u+%u;",
+                              ((const guint8 *) (uintptr_t) tx->tx_buf)[0],
+                              tx->len, rx->len);
       if (mock_signal_at == transfer_count)
         {
           sig_handler (mock_signal_number);
@@ -282,25 +403,37 @@ mock_ioctl (int fd, unsigned long request, ...)
               return -1;
             }
         }
-      if (transfer_result == MOCK_ERROR)
+      if (transfer_result == MOCK_ERROR &&
+          (!mock_transfer_fail_at || mock_transfer_fail_at == transfer_count))
         {
           errno = EIO;
           return -1;
         }
-      if (transfer_result == MOCK_SHORT)
+      if (transfer_result == MOCK_SHORT &&
+          (!mock_transfer_fail_at || mock_transfer_fail_at == transfer_count))
         return tx->len + rx->len - 1;
-      memcpy ((void *) (uintptr_t) rx->rx_buf, legacy_id_response,
-              sizeof (legacy_id_response));
+      if (c6_read)
+        {
+          legacy_c6_read_count++;
+          *(guint8 *) (uintptr_t) rx->rx_buf =
+            legacy_c6_success_at != 0 &&
+            legacy_c6_read_count >= legacy_c6_success_at ? 1 : 0;
+        }
+      else
+        memcpy ((void *) (uintptr_t) rx->rx_buf, legacy_id_response,
+                sizeof (legacy_id_response));
       return tx->len + rx->len;
     }
   if (request != SPI_IOC_MESSAGE (1))
     {
       g_assert_true (full_cli);
       g_assert_cmpint (fd, ==, 43);
-      /* A per-transfer speed never writes the shared max-speed default. */
-      g_assert_cmpuint (request, !=, SPI_IOC_WR_MAX_SPEED_HZ);
+      g_assert_cmpuint (mock_config_request_count, <,
+                        G_N_ELEMENTS (mock_config_requests));
+      mock_config_requests[mock_config_request_count++] = request;
       if (request == SPI_IOC_RD_MODE32 || request == SPI_IOC_RD_MODE ||
-          request == SPI_IOC_RD_BITS_PER_WORD || request == SPI_IOC_RD_LSB_FIRST)
+          request == SPI_IOC_RD_BITS_PER_WORD || request == SPI_IOC_RD_LSB_FIRST ||
+          request == SPI_IOC_RD_MAX_SPEED_HZ)
         {
           mock_config_reads++;
           if (mock_config_read_fail_at == mock_config_reads)
@@ -321,6 +454,9 @@ mock_ioctl (int fd, unsigned long request, ...)
           return 0;
 
         case SPI_IOC_RD_LSB_FIRST: *(guint8 *) value = mock_spi_lsb;
+          return 0;
+
+        case SPI_IOC_RD_MAX_SPEED_HZ: *(guint32 *) value = mock_spi_max_speed;
           return 0;
 
         case SPI_IOC_WR_MODE32:
@@ -350,6 +486,9 @@ mock_ioctl (int fd, unsigned long request, ...)
                           (mock_spi_lsb ? SPI_LSB_FIRST : 0);
           break;
 
+        case SPI_IOC_WR_MAX_SPEED_HZ: mock_spi_max_speed = *(guint32 *) value;
+          break;
+
         default: g_assert_not_reached ();
         }
       mock_config_writes++;
@@ -370,8 +509,25 @@ mock_ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (mock_spi_bits, ==, 8);
       g_assert_cmpuint (mock_spi_lsb, ==, 0);
       g_assert_true (mock_power_active);
-      g_assert_null (req_gpo1);
-      g_assert_cmpuint (gpio_count, ==, 0);
+      if (legacy_historical_observation || legacy_ctfdavis_observation)
+        {
+          g_assert_cmpuint (mock_spi_max_speed, ==,
+                            legacy_historical_observation ?
+                            FTE3600_LEGACY_SPI_SPEED_HZ :
+                            mock_ctfdavis_speed ());
+          if (legacy_historical_observation)
+            g_assert_nonnull (req_gpo1);
+          else
+            {
+              g_assert_null (req_gpo1);
+              g_assert_cmpuint (gpio_count, ==, 0);
+            }
+        }
+      else
+        {
+          g_assert_null (req_gpo1);
+          g_assert_cmpuint (gpio_count, ==, 0);
+        }
     }
   transfer_count++;
   g_assert_cmpuint (transfer->bits_per_word, ==, 8);
@@ -403,6 +559,18 @@ mock_ioctl (int fd, unsigned long request, ...)
           g_assert_cmpmem (last_tx, transfer->len, expected, sizeof (expected));
           g_assert_cmpuint (transfer->rx_buf, !=, 0);
         }
+    }
+  if (legacy_historical_observation || legacy_ctfdavis_observation)
+    {
+      const guint8 expected[] = { 0x09, 0xf6, 0xc6, 0x01 };
+
+      g_assert_cmpuint (transfer->speed_hz, ==,
+                        legacy_historical_observation ?
+                        FTE3600_LEGACY_SPI_SPEED_HZ :
+                        mock_ctfdavis_speed ());
+      g_assert_cmpuint (transfer->len, ==, sizeof (expected));
+      g_assert_cmpuint (transfer->rx_buf, ==, 0);
+      g_assert_cmpmem (last_tx, transfer->len, expected, sizeof (expected));
     }
   if (expected_firmware && transfer->len == FW_SIZE + 7)
     {
@@ -492,6 +660,7 @@ mock_gpio_set (struct gpiod_line_request *request, unsigned int offset,
       errno = EIO;
       return -1;
     }
+  gpio_readback = value;
   return 0;
 }
 
@@ -575,15 +744,43 @@ mock_close (int fd)
             g_assert_cmpuint (mock_spi_mode, ==, ORIGINAL_MODE);
           g_assert_cmpuint (mock_spi_bits, ==, ORIGINAL_BITS);
           g_assert_cmpuint (mock_spi_lsb, ==, ORIGINAL_LSB);
+          g_assert_cmpuint (mock_spi_max_speed, ==,
+                            mock_original_spi_max_speed);
           g_assert_null (req_gpo1);
-          g_assert_cmpuint (gpio_count, ==, 0);
+          if (!legacy_historical_observation)
+            g_assert_cmpuint (gpio_count, ==, 0);
           g_assert_cmpuint (firmware_packets, ==, 0);
           g_assert_cmpuint (transfer_count, ==, mock_cli_expected_transfers);
           for (guint i = 0; i < tx_frames->len; i++)
             {
               gsize size;
               const guint8 *frame = g_bytes_get_data (g_ptr_array_index (tx_frames, i), &size);
-              if (legacy_id_observation)
+              if (legacy_historical_observation || legacy_ctfdavis_observation)
+                {
+                  static const guint8 c6_write[] = {
+                    0x09, 0xf6, 0xc6, 0x01,
+                  };
+                  static const guint8 c6_read[] = {
+                    0x08, 0xf7, 0xc6, 0x00,
+                  };
+                  static const guint8 identity[] = {
+                    0x04, 0xfb, 0x9a, 0x8b, 0x00, 0x00,
+                  };
+
+                  if (size == sizeof (identity))
+                    {
+                      g_assert_cmpuint (i + 1, ==, tx_frames->len);
+                      g_assert_cmpmem (frame, size, identity,
+                                       sizeof (identity));
+                    }
+                  else if ((i & 1) == 0)
+                    g_assert_cmpmem (frame, size, c6_write,
+                                     sizeof (c6_write));
+                  else
+                    g_assert_cmpmem (frame, size, c6_read,
+                                     sizeof (c6_read));
+                }
+              else if (legacy_id_observation)
                 {
                   const guint8 expected[] = { 0x04, 0xfb, 0x9a, 0x8b, 0, 0 };
                   g_assert_cmpmem (frame, size, expected, sizeof (expected));
@@ -620,6 +817,33 @@ mock_file_get_contents (const gchar *filename, gchar **contents,
         *length = strlen (*contents);
       return TRUE;
     }
+  if (legacy_historical_observation &&
+      g_str_equal (filename,
+                   "/sys/class/gpio/gpiochip-test/device/firmware_node/path"))
+    {
+      *contents = g_strdup ("\\_SB_.GPO1\n");
+      if (length)
+        *length = strlen (*contents);
+      return TRUE;
+    }
+  if (legacy_historical_observation &&
+      g_str_equal (filename,
+                   "/sys/class/gpio/gpiochip-test/device/firmware_node/hid"))
+    {
+      *contents = g_strdup ("INT3453\n");
+      if (length)
+        *length = strlen (*contents);
+      return TRUE;
+    }
+  if (legacy_historical_observation &&
+      g_str_equal (filename,
+                   "/sys/class/gpio/gpiochip-test/device/firmware_node/uid"))
+    {
+      *contents = g_strdup ("1\n");
+      if (length)
+        *length = strlen (*contents);
+      return TRUE;
+    }
   static const struct { const gchar *file;
                         const gchar *value;
   } dmi[] = {
@@ -644,7 +868,13 @@ mock_udev_client_new (const gchar * const *subsystems)
 {
   if (full_cli)
     {
-      g_assert_cmpstr (subsystems[0], ==, "spidev");
+      if (g_str_equal (subsystems[0], "spidev"))
+        mock_discovery = MOCK_DISCOVERY_SPIDEV;
+      else if (legacy_historical_observation &&
+               g_str_equal (subsystems[0], "gpio"))
+        mock_discovery = MOCK_DISCOVERY_GPIO;
+      else
+        g_assert_not_reached ();
       g_assert_null (subsystems[1]);
       return (GUdevClient *) g_object_new (G_TYPE_OBJECT, NULL);
     }
@@ -657,7 +887,9 @@ mock_udev_query (GUdevClient *client, const gchar *subsystem)
 {
   g_assert_true (full_cli);
   g_assert_nonnull (client);
-  g_assert_cmpstr (subsystem, ==, "spidev");
+  g_assert_cmpstr (subsystem, ==,
+                   mock_discovery == MOCK_DISCOVERY_SPIDEV ? "spidev" :
+                                                             "gpio");
   return g_list_append (NULL, g_object_new (G_TYPE_OBJECT, NULL));
 }
 
@@ -674,7 +906,8 @@ mock_udev_sysfs (GUdevDevice *device)
 {
   g_assert_true (full_cli);
   g_assert_nonnull (device);
-  return MOCK_SPI_SYSFS;
+  return mock_discovery == MOCK_DISCOVERY_SPIDEV ?
+         MOCK_SPI_SYSFS : "/sys/class/gpio/gpiochip-test";
 }
 
 static const gchar *
@@ -682,7 +915,17 @@ mock_udev_file (GUdevDevice *device)
 {
   g_assert_true (full_cli);
   g_assert_nonnull (device);
-  return "/dev/test-spidev";
+  return mock_discovery == MOCK_DISCOVERY_SPIDEV ?
+         "/dev/test-spidev" : "/dev/gpiochip-test";
+}
+
+static const gchar *
+mock_udev_driver (GUdevDevice *device)
+{
+  g_assert_true (full_cli);
+  g_assert_nonnull (device);
+  g_assert_cmpint (mock_discovery, ==, MOCK_DISCOVERY_GPIO);
+  return "mock-gpio";
 }
 
 static char *
@@ -747,8 +990,119 @@ mock_power_report (MedionPower *power, const gchar *tag)
 static struct gpiod_chip *
 mock_gpio_open (const char *path)
 {
-  g_error ("Unexpected hardware GPIO access: %s", path);
+  g_assert_true (legacy_historical_observation);
+  g_assert_cmpstr (path, ==, "/dev/gpiochip-test");
+  return (struct gpiod_chip *) (uintptr_t) 0x11;
+}
+
+static struct gpiod_line_info *
+mock_gpio_get_line_info (struct gpiod_chip *chip,
+                         unsigned int       offset)
+{
+  g_assert_true (chip == (struct gpiod_chip *) (uintptr_t) 0x11);
+  g_assert_cmpuint (offset, ==, PIN_GPO1_RESET);
+  return (struct gpiod_line_info *) (uintptr_t) 0x12;
+}
+
+static const char *
+mock_gpio_info_name (struct gpiod_line_info *info)
+{
+  g_assert_true (info == (struct gpiod_line_info *) (uintptr_t) 0x12);
+  return "legacy-control";
+}
+
+static const char *
+mock_gpio_info_consumer (struct gpiod_line_info *info)
+{
+  g_assert_true (info == (struct gpiod_line_info *) (uintptr_t) 0x12);
   return NULL;
+}
+
+static bool
+mock_gpio_info_is_used (struct gpiod_line_info *info)
+{
+  g_assert_true (info == (struct gpiod_line_info *) (uintptr_t) 0x12);
+  return false;
+}
+
+static void
+mock_gpio_info_free (struct gpiod_line_info *info)
+{
+  g_assert_true (info == (struct gpiod_line_info *) (uintptr_t) 0x12);
+}
+
+static struct gpiod_line_settings *
+mock_gpio_settings_new (void)
+{
+  return (struct gpiod_line_settings *) (uintptr_t) 0x13;
+}
+
+static void
+mock_gpio_settings_free (struct gpiod_line_settings *settings)
+{
+  g_assert_true (settings == (struct gpiod_line_settings *) (uintptr_t) 0x13);
+}
+
+static int
+mock_gpio_set_direction (struct gpiod_line_settings *settings,
+                         enum gpiod_line_direction   direction)
+{
+  g_assert_true (settings == (struct gpiod_line_settings *) (uintptr_t) 0x13);
+  g_assert_cmpint (direction, ==, GPIOD_LINE_DIRECTION_OUTPUT);
+  return 0;
+}
+
+static int
+mock_gpio_set_output_value (struct gpiod_line_settings *settings,
+                            enum gpiod_line_value      value)
+{
+  g_assert_true (settings == (struct gpiod_line_settings *) (uintptr_t) 0x13);
+  mock_gpio_initial_value = value;
+  return 0;
+}
+
+static struct gpiod_line_config *
+mock_gpio_config_new (void)
+{
+  return (struct gpiod_line_config *) (uintptr_t) 0x14;
+}
+
+static void
+mock_gpio_config_free (struct gpiod_line_config *config)
+{
+  g_assert_true (config == (struct gpiod_line_config *) (uintptr_t) 0x14);
+}
+
+static int
+mock_gpio_add_settings (struct gpiod_line_config   *config,
+                        const unsigned int         *offsets,
+                        size_t                      num_offsets,
+                        struct gpiod_line_settings *settings)
+{
+  g_assert_true (config == (struct gpiod_line_config *) (uintptr_t) 0x14);
+  g_assert_true (settings == (struct gpiod_line_settings *) (uintptr_t) 0x13);
+  g_assert_cmpuint (num_offsets, ==, 1);
+  g_assert_cmpuint (offsets[0], ==, PIN_GPO1_RESET);
+  return 0;
+}
+
+static struct gpiod_line_request *
+mock_gpio_request_lines (struct gpiod_chip           *chip,
+                         struct gpiod_request_config *request_config,
+                         struct gpiod_line_config    *line_config)
+{
+  g_assert_true (chip == (struct gpiod_chip *) (uintptr_t) 0x11);
+  g_assert_null (request_config);
+  g_assert_true (line_config == (struct gpiod_line_config *) (uintptr_t) 0x14);
+  g_assert_cmpint (mock_gpio_initial_value, ==, GPIOD_LINE_VALUE_INACTIVE);
+  gpio_readback = mock_gpio_initial_value;
+  return (struct gpiod_line_request *) (uintptr_t) 0x15;
+}
+
+static void
+mock_gpio_chip_close (struct gpiod_chip *chip)
+{
+  g_assert_true (chip == (struct gpiod_chip *) (uintptr_t) 0x11);
 }
 
 static void
@@ -1249,6 +1603,191 @@ test_legacy_id_cli (gconstpointer data)
 }
 
 static void
+test_legacy_candidate_cli (gconstpointer data,
+                           gboolean      ctfdavis)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      full_cli = mock_assert_restored = TRUE;
+      if (ctfdavis)
+        legacy_ctfdavis_observation = TRUE;
+      else
+        legacy_historical_observation = TRUE;
+      legacy_id_response[0] = 0x93;
+      legacy_id_response[1] = 0x62;
+      mock_cli_expected_transfers = 3;
+
+      switch (scenario)
+        {
+        case 0: /* C6 succeeds on attempt 1. */
+          break;
+
+        case 1:
+        case 2:
+        case 3: /* C6 succeeds on attempt 2, 3, or 4. */
+          legacy_c6_success_at = scenario + 1;
+          mock_cli_expected_transfers = 3 + scenario * 2;
+          break;
+
+        case 4: /* Four failed C6 readbacks must not accept an ID. */
+          legacy_c6_success_at = 0;
+          mock_cli_expected_transfers = 9;
+          break;
+
+        case 5:
+          legacy_id_response[0] = 0x26;
+          legacy_id_response[1] = 0xc4;
+          break;
+
+        case 6:
+          memset (legacy_id_response, 0, sizeof (legacy_id_response));
+          break;
+
+        case 7:
+          transfer_result = MOCK_ERROR;
+          mock_cli_expected_transfers = 1;
+          break;
+
+        case 8:
+          transfer_result = MOCK_SHORT;
+          mock_cli_expected_transfers = 1;
+          break;
+
+        case 9:
+        case 10: /* Error/short return from the C6 read MESSAGE(2). */
+          transfer_result = scenario == 9 ? MOCK_ERROR : MOCK_SHORT;
+          mock_transfer_fail_at = 2;
+          mock_cli_expected_transfers = 2;
+          break;
+
+        case 11:
+        case 12: /* Error/short return from the identity MESSAGE(2). */
+          transfer_result = scenario == 11 ? MOCK_ERROR : MOCK_SHORT;
+          mock_transfer_fail_at = 3;
+          mock_cli_expected_transfers = 3;
+          break;
+
+        case 13: /* A zero device maximum falls back to 1 MHz. */
+          g_assert_true (ctfdavis);
+          mock_original_spi_max_speed = 0;
+          mock_spi_max_speed = mock_original_spi_max_speed;
+          break;
+
+        case 14: /* A device maximum above 1 MHz is capped. */
+          g_assert_true (ctfdavis);
+          mock_original_spi_max_speed = 4000000;
+          mock_spi_max_speed = mock_original_spi_max_speed;
+          break;
+
+        default:
+          g_assert_not_reached ();
+        }
+
+      gchar *argv[] = { (gchar *) "diagnostic",
+                        (gchar *) (ctfdavis ? "--legacy-ctfdavis-id" :
+                                              "--legacy-historical-id"),
+                        NULL };
+      int result = medion_diagnostic_main (2, argv);
+
+      if (scenario == 0 || (ctfdavis && scenario >= 13))
+        {
+          static const unsigned long expected_config[] = {
+            SPI_IOC_RD_MODE32,
+            SPI_IOC_RD_BITS_PER_WORD,
+            SPI_IOC_RD_LSB_FIRST,
+            SPI_IOC_RD_MAX_SPEED_HZ,
+            SPI_IOC_WR_MODE,
+            SPI_IOC_WR_BITS_PER_WORD,
+            SPI_IOC_WR_LSB_FIRST,
+            SPI_IOC_WR_MAX_SPEED_HZ,
+            SPI_IOC_RD_MODE,
+            SPI_IOC_RD_BITS_PER_WORD,
+            SPI_IOC_RD_LSB_FIRST,
+            SPI_IOC_RD_MAX_SPEED_HZ,
+            SPI_IOC_WR_MAX_SPEED_HZ,
+            SPI_IOC_WR_LSB_FIRST,
+            SPI_IOC_WR_BITS_PER_WORD,
+            SPI_IOC_WR_MODE32,
+          };
+
+          g_assert_cmpint (result, ==, 0);
+          if (ctfdavis && scenario >= 13)
+            g_assert_cmpuint (cur_speed_hz, ==, 1000000);
+          g_assert_cmpuint (mock_power_checks, ==, 2);
+          g_assert_cmpuint (gpio_count, ==, ctfdavis ? 0 : 6);
+          if (ctfdavis)
+            g_assert_cmpstr (events->str, ==,
+                             "sleep:2000;spi:09/4;sleep:4000;"
+                             "spi2:08/4+1;spi2:04/6+4;");
+          else
+            g_assert_cmpstr (events->str, ==,
+                             "gpio:0;gpio:0;sleep:10000;gpio:1;"
+                             "gpio:0;sleep:10000;gpio:1;sleep:2000;"
+                             "spi:09/4;sleep:4000;spi2:08/4+1;"
+                             "spi2:04/6+4;gpio:1;release;");
+          g_assert_cmpuint (mock_config_request_count, ==,
+                            G_N_ELEMENTS (expected_config));
+          g_assert_cmpmem (mock_config_requests,
+                           mock_config_request_count *
+                           sizeof (mock_config_requests[0]),
+                           expected_config, sizeof (expected_config));
+        }
+      exit (result);
+    }
+
+  g_test_trap_subprocess (NULL, 0, 0);
+  if (scenario <= 3 || (ctfdavis && scenario >= 13))
+    g_test_trap_assert_passed ();
+  else
+    g_test_trap_assert_failed ();
+  g_test_trap_assert_stdout (ctfdavis ?
+                             "*ctfdavis candidate prefix:*speed capped at 1 MHz*no GPIO request*" :
+                             "*Later proposed attachment prefix:*Mode 0 / 4 MHz*Pin 39*");
+  if (ctfdavis)
+    g_test_trap_assert_stdout_unmatched ("*Successfully claimed Reset Line*");
+  else
+    g_test_trap_assert_stdout ("*Successfully claimed Reset Line*");
+  g_test_trap_assert_stdout ("*MOCK SPI RESTORE VERIFIED*");
+  g_test_trap_assert_stdout ("*MOCK PM RESTORE VERIFIED*");
+  if (scenario == 0 || (ctfdavis && scenario >= 13))
+    g_test_trap_assert_stdout ("*Accepted archived FW9362-branch identity 9362*");
+  else if (scenario >= 1 && scenario <= 3)
+    g_test_trap_assert_stdout (scenario == 1 ? "*C6 readback attempt 2/4: 01*" :
+                               scenario == 2 ? "*C6 readback attempt 3/4: 01*" :
+                                               "*C6 readback attempt 4/4: 01*");
+  else if (scenario == 4)
+    {
+      g_test_trap_assert_stdout ("*C6 readback attempt 4/4: 00*");
+      g_test_trap_assert_stdout ("*C6 never read back 01*");
+    }
+  else if (scenario == 5)
+    g_test_trap_assert_stdout ("*shifted-ID condition*");
+  else if (scenario == 6)
+    g_test_trap_assert_stdout ("*No supported FW9362-branch identity*");
+  else if (scenario == 7 || scenario == 8)
+    g_test_trap_assert_stderr ("*SPI transfer failed: len=4,*");
+  else if (scenario == 9 || scenario == 10)
+    g_test_trap_assert_stderr ("*SPI write-then-read failed: tx=4, rx=1,*");
+  else
+    g_test_trap_assert_stderr ("*SPI write-then-read failed: tx=6, rx=4,*");
+}
+
+static void
+test_legacy_historical_cli (gconstpointer data)
+{
+  test_legacy_candidate_cli (data, FALSE);
+}
+
+static void
+test_legacy_ctfdavis_cli (gconstpointer data)
+{
+  test_legacy_candidate_cli (data, TRUE);
+}
+
+static void
 test_comparison_cli (gconstpointer data)
 {
   guint scenario = GPOINTER_TO_UINT (data);
@@ -1410,6 +1949,58 @@ test_legacy_id_speed (void)
 }
 
 static void
+test_legacy_historical_speed (void)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic",
+                        (gchar *) "--legacy-historical-id",
+                        (gchar *) "--speed", (gchar *) "1000000", NULL };
+      exit (medion_diagnostic_main (4, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*--legacy-historical-id fixes the historical SPI speed at 4000000 Hz*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
+test_legacy_ctfdavis_speed (void)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic",
+                        (gchar *) "--legacy-ctfdavis-id",
+                        (gchar *) "--speed", (gchar *) "1000000", NULL };
+      exit (medion_diagnostic_main (4, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*--legacy-ctfdavis-id derives speed from the device maximum, capped at 1000000 Hz*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
+test_legacy_ctfdavis_exclusive (void)
+{
+  if (g_test_subprocess ())
+    {
+      reset_mocks ();
+      gchar *argv[] = { (gchar *) "diagnostic",
+                        (gchar *) "--legacy-ctfdavis-id",
+                        (gchar *) "--legacy-historical-id",
+                        NULL };
+      exit (medion_diagnostic_main (3, argv));
+    }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*Choose exactly one*");
+  g_test_trap_assert_stderr_unmatched ("*Unexpected hardware*");
+}
+
+static void
 test_speed_invalid (gconstpointer data)
 {
   if (g_test_subprocess ())
@@ -1542,6 +2133,36 @@ main (int argc, char **argv)
                                                 legacy_scenarios[i]);
       g_test_add_data_func (path, GUINT_TO_POINTER (i), test_legacy_id_cli);
     }
+  const gchar *historical_scenarios[] = {
+    "fw9362-c6-attempt-1", "fw9362-c6-attempt-2",
+    "fw9362-c6-attempt-3", "fw9362-c6-attempt-4", "c6-fails",
+    "shifted-id", "all-zero", "c6-write-error", "c6-write-short",
+    "c6-read-error", "c6-read-short", "identity-read-error",
+    "identity-read-short",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (historical_scenarios); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf (
+        "/medion-diagnostic/legacy-historical/cli/%s",
+        historical_scenarios[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i),
+                            test_legacy_historical_cli);
+    }
+  const gchar *ctfdavis_scenarios[] = {
+    "fw9362-c6-attempt-1", "fw9362-c6-attempt-2",
+    "fw9362-c6-attempt-3", "fw9362-c6-attempt-4", "c6-fails",
+    "shifted-id", "all-zero", "c6-write-error", "c6-write-short",
+    "c6-read-error", "c6-read-short", "identity-read-error",
+    "identity-read-short", "zero-max-speed-cap", "high-max-speed-cap",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (ctfdavis_scenarios); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf (
+        "/medion-diagnostic/legacy-ctfdavis/cli/%s",
+        ctfdavis_scenarios[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i),
+                            test_legacy_ctfdavis_cli);
+    }
   const gchar *comparison_results[] = { "neither-idle", "becomes-idle", "loses-idle",
                                         "both-idle", "all-ff", "unknown-data" };
   for (guint i = 0; i < G_N_ELEMENTS (comparison_results); i++)
@@ -1577,6 +2198,12 @@ main (int argc, char **argv)
     }
   g_test_add_func ("/medion-diagnostic/comparison/fixed-speed", test_comparison_speed);
   g_test_add_func ("/medion-diagnostic/legacy-id/fixed-speed", test_legacy_id_speed);
+  g_test_add_func ("/medion-diagnostic/legacy-historical/fixed-speed",
+                   test_legacy_historical_speed);
+  g_test_add_func ("/medion-diagnostic/legacy-ctfdavis/fixed-speed",
+                   test_legacy_ctfdavis_speed);
+  g_test_add_func ("/medion-diagnostic/legacy-ctfdavis/exclusive",
+                   test_legacy_ctfdavis_exclusive);
   int result = g_test_run ();
   if (events)
     g_string_free (events, TRUE);

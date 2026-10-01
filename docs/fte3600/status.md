@@ -9,7 +9,7 @@ validation; it is not a general authentication-safety certification.
 | One-Netbook A1 | Maintainer reports discovery, capture, enrollment, verification and cold-boot recovery on A1. Independent replication and a complete power/cancellation matrix remain needed. | `\_SB_.PCI0.GPI0`, 85 (`0x55`), active-low | Same controller, 86 (`0x56`), active-high |
 | GPD Pocket 3, Jasper Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT34C8`. | `\_SB_.GPI0`, 211, active-low | Same controller, 56, active-high |
 | GPD Pocket 3, Tiger Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT3455`. | `\_SB_.GPI0`, 179, active-low | Same controller, 24, active-high |
-| Medion E3224 | Separate experimental `medion-e3224` branch. Current implementation has not produced a successful identity/capture result on the reported machine. | `\_SB_.GPO1`, 39 (`0x27`); active-low is the current hypothesis, not a completed board-level validation | `\_SB_.GPO2`, 0; reported active-high IRQ |
+| Medion E3224 | Previous implementation never worked. Independent legacy bring-up; ordinary FT9361 driver rejects this platform before I/O. | Reported GPO1 pin 39; role/polarity not established. ctfdavis candidate does not request it. | Reported GPO2 pin 0, active-high; not yet used by new backend |
 
 DMI names are `ONE-NETBOOK TECHNOLOGY CO., LTD. / A1`,
 `GPD / Pocket 3` or `GPD / GPD Pocket 3`, and `MEDION / E3224`,
@@ -23,6 +23,11 @@ route. These checks constrain configuration; they do not establish electrical
 safety or successful operation of an experimental board.
 
 ## Medion evidence and next comparison
+
+See the [rebuild evidence record](medion-rebuild.md). The Mint success report
+names ctfdavis's module. Do not substitute the later unverified 4 MHz attachment
+or infer Medion support from A1 tests. Old mock Medion capture coverage modeled
+an A1 response, not a Medion response, and has been replaced by a no-I/O gate test.
 
 The Medion report identifies separate GPO1/GPO2 controllers; the reset-controller
 log identifies `INT3453`, not `INT3452`. Do not substitute reset 40 / IRQ 39.

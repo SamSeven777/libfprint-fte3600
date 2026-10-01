@@ -25,6 +25,7 @@
 
 #include "medion-power.h"
 #include "../libfprint/drivers/fte3600-gpio.h"
+#include "../libfprint/drivers/fte3600-legacy-proto.h"
 
 #define FW_SIZE 10396
 #define FW_SHA "027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f"
@@ -37,14 +38,19 @@ static MedionPower power_state;
 static volatile sig_atomic_t interrupted;
 static gboolean cleanup_failed;
 static uint32_t cur_speed_hz = 1000000;
+static void check_comparison_power (void);
+static void set_pin39 (int high);
+static void report_reset_value (int high);
 /* Observation and controlled comparison restore shared SPI settings.
  * Keep the full mode word, including flags beyond the legacy 8-bit ioctl. */
 static struct
 {
   uint32_t mode;
+  uint32_t speed_hz;
   uint8_t  bits;
   uint8_t  lsb;
   gboolean mode_changed;
+  gboolean speed_changed;
   gboolean bits_changed;
   gboolean lsb_changed;
 } saved_spi;
@@ -89,9 +95,15 @@ cleanup (void)
     {
       /* Attempt every restoration even if an earlier ioctl fails. Mark before
        * writes during setup so a partially applied failing ioctl is covered. */
-      if (saved_spi.mode_changed && ioctl (spi_fd, SPI_IOC_WR_MODE32, &saved_spi.mode) < 0)
+      if (saved_spi.speed_changed &&
+          ioctl (spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &saved_spi.speed_hz) < 0)
         {
-          fprintf (stderr, "ERROR: restoring SPI mode: %s\n", strerror (errno));
+          fprintf (stderr, "ERROR: restoring SPI maximum speed: %s\n", strerror (errno));
+          cleanup_failed = TRUE;
+        }
+      if (saved_spi.lsb_changed && ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &saved_spi.lsb) < 0)
+        {
+          fprintf (stderr, "ERROR: restoring SPI bit order: %s\n", strerror (errno));
           cleanup_failed = TRUE;
         }
       if (saved_spi.bits_changed && ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &saved_spi.bits) < 0)
@@ -99,9 +111,9 @@ cleanup (void)
           fprintf (stderr, "ERROR: restoring SPI word size: %s\n", strerror (errno));
           cleanup_failed = TRUE;
         }
-      if (saved_spi.lsb_changed && ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &saved_spi.lsb) < 0)
+      if (saved_spi.mode_changed && ioctl (spi_fd, SPI_IOC_WR_MODE32, &saved_spi.mode) < 0)
         {
-          fprintf (stderr, "ERROR: restoring SPI bit order: %s\n", strerror (errno));
+          fprintf (stderr, "ERROR: restoring SPI mode: %s\n", strerror (errno));
           cleanup_failed = TRUE;
         }
       memset (&saved_spi, 0, sizeof (saved_spi));
@@ -396,6 +408,108 @@ vendor_recognizes_identity (guint16 identity)
     if (identity == recognized[i])
       return TRUE;
   return FALSE;
+}
+
+static void
+legacy_run_transaction (Fte3600LegacyStep step,
+                        guint8           *response)
+{
+  Fte3600LegacyTransaction transaction;
+
+  if (!fte3600_legacy_get_transaction (step, &transaction))
+    fail ("Invalid legacy protocol transaction");
+  if (transaction.rx_length > 0)
+    {
+      require (response != NULL, "legacy transaction response buffer");
+      spi_write_then_read_once (transaction.tx, transaction.tx_length,
+                                response, transaction.rx_length,
+                                cur_speed_hz);
+    }
+  else
+    {
+      spi_xfer (transaction.tx, NULL, transaction.tx_length, cur_speed_hz);
+    }
+  if (transaction.delay_after_us > 0)
+    g_usleep (transaction.delay_after_us);
+}
+
+/* Two source-backed candidates, not proof of the installed Mint artifact.
+ * The later proposed attachment (SHA256 ed1c273d...) used Mode 0 at 4 MHz,
+ * required ACPI GPIO resource index 0, and used GPIOD_OUT_LOW followed by
+ * descriptor values 0->10ms->1. The source registered no ACPI GPIO polarity
+ * mapping and requested the unnamed _CRS resource, so that is raw
+ * low->10ms->high on the archived path. The vendor library then repeated the
+ * same ioctl cycle before its FW9362 C6 and identity sequence.
+ *
+ * This stops at identity. It deliberately does not run 1a84, FD/FE, FDT,
+ * image capture, firmware upload or the unsafe error swallowing of the old
+ * library. */
+static int
+observe_legacy_c6_identity (gboolean attachment_gpio)
+{
+  guint8 c6_value = 0;
+  guint8 response[FTE3600_LEGACY_ID_RESPONSE_LENGTH] = { 0 };
+  Fte3600LegacyIdentity identity;
+
+  check_comparison_power ();
+  if (attachment_gpio)
+    {
+      printf ("Later proposed attachment prefix: Mode 0 / 4 MHz, Pin 39 raw low->10ms->high, C6, then identity.\n");
+      printf ("Source attachment SHA256: ed1c273d4988f8d490b7a81fd76e47927ab24785f0f400691f34cf3ba137b2f8.\n");
+      printf ("The author asked tuxman2 to validate this version AFTER his ctfdavis success report.\n");
+      for (guint cycle = 0; cycle < 2; cycle++)
+        {
+          printf ("%s Pin 39 cycle (raw low, 10 ms, raw high).\n",
+                  cycle == 0 ? "Bridge probe-equivalent" : "Vendor reset-ioctl-equivalent");
+          set_pin39 (0);
+          g_usleep (10000);
+          set_pin39 (1);
+          report_reset_value (1);
+        }
+    }
+  else
+    {
+      printf ("ctfdavis candidate prefix: Mode 0, speed capped at 1 MHz, no GPIO request.\n");
+      printf ("Source: vobademi/FTEXX00-Ubuntu a0a35d3e47873a1712e02e3210f0e6e4fe75eeee alt/focal_spi.c.\n");
+      printf ("Source SHA256: fdcf6e583291ab719007896b38742a0ff2cfbdc26e5f9de10d22959932902b2c.\n");
+      printf ("This models absent named reset/power/enable GPIO mappings, consistent with the reported ACPI fragment.\n");
+      printf ("It does not establish the exact file installed on Mint or a complete initialization.\n");
+    }
+  printf ("C6 writes follow. Stops before 1a84, FD/FE, FDT, capture or firmware.\n");
+  /* The archived userspace waits 2 ms after the bridge reset ioctl. With
+   * absent optional GPIOs that ioctl has no electrical effect. */
+  g_usleep (2000);
+
+  for (guint attempt = 1; attempt <= 4; attempt++)
+    {
+      legacy_run_transaction (FTE3600_LEGACY_STEP_C6_WRITE, NULL);
+      legacy_run_transaction (FTE3600_LEGACY_STEP_C6_READ, &c6_value);
+      printf ("C6 readback attempt %u/4: %02x%s\n", attempt, c6_value,
+              c6_value == 0x01 ? " (expected)" : "");
+      if (c6_value == 0x01)
+        break;
+    }
+
+  legacy_run_transaction (FTE3600_LEGACY_STEP_IDENTITY_READ, response);
+  fte3600_legacy_parse_identity (FTE3600_LEGACY_BRANCH_FW9362,
+                                 response, &identity);
+  printf ("FW9362-branch raw identity response: %02x %02x %02x %02x; candidate=%04x.\n",
+          response[0], response[1], response[2], response[3], identity.identity);
+  check_comparison_power ();
+
+  if (c6_value == 0x01 && fte3600_legacy_identity_is_accepted (&identity))
+    {
+      printf ("Accepted archived FW9362-branch identity 9362. Full initialization and capture were not attempted.\n");
+      return 0;
+    }
+  if (identity.shifted_fw9362)
+    printf ("Response 26c4 is the archived shifted-ID condition; its recovery was intentionally not run.\n");
+  else if (c6_value != 0x01)
+    printf ("C6 never read back 01; the archived code continued anyway, but this diagnostic does not call that success.\n");
+  else
+    printf ("No supported FW9362-branch identity. This mode does not fall through to the electrical FD/FE path.\n");
+
+  return 2;
 }
 
 static void
@@ -740,6 +854,9 @@ main (int argc, char **argv)
   gboolean status_no_reset = FALSE;
   gboolean compare_soft_reset = FALSE;
   gboolean legacy_id_no_init = FALSE;
+  gboolean legacy_historical_id = FALSE;
+  gboolean legacy_ctfdavis_id = FALSE;
+  gboolean speed_requested = FALSE;
   int result = 0;
   const char *firmware_file = NULL;
   const char *requested_spi = NULL;
@@ -764,6 +881,14 @@ main (int argc, char **argv)
         {
           legacy_id_no_init = TRUE;
         }
+      else if (!strcmp (argv[i], "--legacy-historical-id"))
+        {
+          legacy_historical_id = TRUE;
+        }
+      else if (!strcmp (argv[i], "--legacy-ctfdavis-id"))
+        {
+          legacy_ctfdavis_id = TRUE;
+        }
       else if (!strcmp (argv[i], "--reset"))
         {
           do_reset = TRUE;
@@ -783,6 +908,7 @@ main (int argc, char **argv)
         }
       else if (!strcmp (argv[i], "--speed") && i + 1 < argc)
         {
+          speed_requested = TRUE;
           cur_speed_hz = parse_spi_speed (argv[++i]);
         }
       else
@@ -792,6 +918,8 @@ main (int argc, char **argv)
           printf ("  --status-no-reset            Status/geometry reads; no GPIO, reset or upload (default)\n");
           printf ("  --compare-soft-reset         MUTATING: same reads before/after dual 70; no GPIO/ROM/upload\n");
           printf ("  --legacy-id-no-init          ACTIVE: one old-protocol TX6+RX4 identity candidate read\n");
+          printf ("  --legacy-ctfdavis-id         MUTATING: ctfdavis no-GPIO candidate, <=1MHz, C6 then ID\n");
+          printf ("  --legacy-historical-id       MUTATING: later unverified 4MHz/GPIO attachment candidate\n");
           printf ("  --probe                      MUTATING: dual soft reset, then status/ROM queries\n");
           printf ("  --chip-id                    Explicit scratch-RAM chip-family probe; no GPIO/reset\n");
           printf ("  --test-vendor-recovery <fw>  Test the experimental Medion recovery sequence:\n");
@@ -814,15 +942,23 @@ main (int argc, char **argv)
     }
 
   if (!probe_only && !vendor_recover && !do_reset && !chip_id_only && !status_no_reset &&
-      !compare_soft_reset && !legacy_id_no_init)
+      !compare_soft_reset && !legacy_id_no_init && !legacy_historical_id && !legacy_ctfdavis_id)
     status_no_reset = TRUE;
   if (probe_only + vendor_recover + do_reset + chip_id_only + status_no_reset +
-      compare_soft_reset + legacy_id_no_init != 1)
+      compare_soft_reset + legacy_id_no_init + legacy_historical_id + legacy_ctfdavis_id != 1)
     fail ("Choose exactly one diagnostic operation");
   if (compare_soft_reset && cur_speed_hz != 1000000)
     fail ("--compare-soft-reset fixes the SPI speed at 1000000 Hz");
   if (legacy_id_no_init && cur_speed_hz != 1000000)
     fail ("--legacy-id-no-init fixes the SPI speed at 1000000 Hz");
+  if (legacy_ctfdavis_id && speed_requested)
+    fail ("--legacy-ctfdavis-id derives speed from the device maximum, capped at 1000000 Hz");
+  if (legacy_historical_id)
+    {
+      if (speed_requested)
+        fail ("--legacy-historical-id fixes the historical SPI speed at 4000000 Hz");
+      cur_speed_hz = FTE3600_LEGACY_SPI_SPEED_HZ;
+    }
 
   setvbuf (stdout, NULL, _IOLBF, 0);
   signal (SIGINT, sig_handler);
@@ -830,7 +966,7 @@ main (int argc, char **argv)
   atexit (cleanup);
 
   printf ("=== Medion Akoya E3224 Hardware Diagnostic & Recovery Tool ===\n");
-  printf ("Diagnostic revision: 2026-10-01.1 (bounded legacy-protocol mode added)\n");
+  printf ("Diagnostic revision: 2026-10-01.3 (separate ctfdavis and later-attachment candidates)\n");
   check_dmi ();
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
@@ -854,12 +990,12 @@ main (int argc, char **argv)
 
   /* Resolve GPO1 (Pin 39 reset) */
   g_autofree gchar *chip_gpo1 = NULL;
-  if (do_reset || vendor_recover)
+  if (do_reset || vendor_recover || legacy_historical_id)
     {
       chip_gpo1 = find_gpiochip_for_acpi ("\\_SB_.GPO1");
       printf ("Resolved GPO1 (Pin 39): %s\n", chip_gpo1 ? chip_gpo1 : "NOT FOUND");
     }
-  if (!chip_gpo1 && (do_reset || vendor_recover))
+  if (!chip_gpo1 && (do_reset || vendor_recover || legacy_historical_id))
     fail ("Reset controller ACPI path was not found; refusing to guess gpiochip0");
 
   /* Open SPI device */
@@ -872,33 +1008,56 @@ main (int argc, char **argv)
   g_autofree gchar *opened_sysfs = realpath (char_link, NULL);
   if (!S_ISCHR (spi_stat.st_mode) || g_strcmp0 (opened_sysfs, spi_sysfs) != 0)
     fail ("Opened SPI node does not match FTE3600 sysfs device");
-  if (status_no_reset || compare_soft_reset || legacy_id_no_init)
+  if (status_no_reset || compare_soft_reset || legacy_id_no_init || legacy_historical_id || legacy_ctfdavis_id)
     {
-      /* Read all originals before changing anything. No WR_MAX_SPEED_HZ is
-       * issued: speed_hz is selected per transfer and does not change that
-       * spidev default, so there is no max-speed setting to restore. */
+      /* Read all originals before changing anything. These candidates also
+       * change spidev's cached default speed and request a speed explicitly
+       * on each transfer. Neither setting measures the physical wire clock. */
       require (ioctl (spi_fd, SPI_IOC_RD_MODE32, &saved_spi.mode) == 0, "save SPI mode");
       require (ioctl (spi_fd, SPI_IOC_RD_BITS_PER_WORD, &saved_spi.bits) == 0, "save SPI word size");
       require (ioctl (spi_fd, SPI_IOC_RD_LSB_FIRST, &saved_spi.lsb) == 0, "save SPI bit order");
+      if (legacy_historical_id || legacy_ctfdavis_id)
+        require (ioctl (spi_fd, SPI_IOC_RD_MAX_SPEED_HZ,
+                        &saved_spi.speed_hz) == 0,
+                 "save SPI maximum speed");
       saved_spi.mode_changed = TRUE;
     }
   set_spi_mode (SPI_MODE_0);
   uint8_t bits = 8, lsb = 0;
-  saved_spi.bits_changed = status_no_reset || compare_soft_reset || legacy_id_no_init;
+  saved_spi.bits_changed = status_no_reset || compare_soft_reset || legacy_id_no_init ||
+                           legacy_historical_id || legacy_ctfdavis_id;
   require (ioctl (spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) == 0, "set SPI 8-bit");
-  saved_spi.lsb_changed = status_no_reset || compare_soft_reset || legacy_id_no_init;
+  saved_spi.lsb_changed = status_no_reset || compare_soft_reset || legacy_id_no_init ||
+                          legacy_historical_id || legacy_ctfdavis_id;
   require (ioctl (spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb) == 0, "set SPI MSB-first");
+  if (legacy_historical_id || legacy_ctfdavis_id)
+    {
+      if (legacy_ctfdavis_id)
+        cur_speed_hz = saved_spi.speed_hz == 0 ? 1000000 : MIN (saved_spi.speed_hz, 1000000);
+      uint32_t speed = cur_speed_hz;
+
+      saved_spi.speed_changed = TRUE;
+      require (ioctl (spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) == 0,
+               "set historical SPI maximum speed");
+    }
   uint8_t mode_read = 0, bits_read = 0, lsb_read = 0;
+  uint32_t speed_read = 0;
   require (ioctl (spi_fd, SPI_IOC_RD_MODE, &mode_read) == 0, "read SPI mode");
   require (ioctl (spi_fd, SPI_IOC_RD_BITS_PER_WORD, &bits_read) == 0, "read SPI word size");
   require (ioctl (spi_fd, SPI_IOC_RD_LSB_FIRST, &lsb_read) == 0, "read SPI bit order");
+  if (legacy_historical_id || legacy_ctfdavis_id)
+    require (ioctl (spi_fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed_read) == 0,
+             "read SPI maximum speed");
   printf ("SPI %s: mode=%u bits=%u lsb_first=%u; each transfer requests %u Hz\n",
           spi_dev, mode_read, bits_read, lsb_read, cur_speed_hz);
   if (mode_read != SPI_MODE_0 || bits_read != 8 || lsb_read != 0)
     fail ("SPI settings did not read back as requested");
+  if ((legacy_historical_id || legacy_ctfdavis_id) && speed_read != cur_speed_hz)
+    fail ("Legacy SPI maximum speed did not read back as requested");
 
-  /* Request GPO1 Pin 39 (Active-Low reset line, idle = 1) */
-  if (do_reset || vendor_recover)
+  /* Request GPO1 Pin 39. The historical mode reproduces the unnamed ACPI
+   * descriptor's raw initial low; the FT9361 experiments retain raw high. */
+  if (do_reset || vendor_recover || legacy_historical_id)
     {
       struct gpiod_chip *chip = gpiod_chip_open (chip_gpo1);
       require (chip != NULL, "open reset GPIO controller");
@@ -915,8 +1074,10 @@ main (int argc, char **argv)
         require (s != NULL && c != NULL, "allocate reset GPIO settings");
         require (gpiod_line_settings_set_direction (s, GPIOD_LINE_DIRECTION_OUTPUT) == 0,
                  "set reset GPIO direction");
-        require (gpiod_line_settings_set_output_value (s, GPIOD_LINE_VALUE_ACTIVE) == 0,
-                 "set reset GPIO initial high");
+        require (gpiod_line_settings_set_output_value (
+                   s, legacy_historical_id ? GPIOD_LINE_VALUE_INACTIVE :
+                                             GPIOD_LINE_VALUE_ACTIVE) == 0,
+                 "set control GPIO initial value");
         unsigned off = PIN_GPO1_RESET;
         if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)
           req_gpo1 = gpiod_chip_request_lines (chip, NULL, c);
@@ -927,8 +1088,8 @@ main (int argc, char **argv)
           printf ("Successfully claimed Reset Line (GPO1 Pin 39) on %s\n", chip_gpo1);
         else
           fail ("Could not claim reset GPIO; stop fprintd before testing");
-        set_pin39 (1);
-        report_reset_value (1);
+        set_pin39 (legacy_historical_id ? 0 : 1);
+        report_reset_value (legacy_historical_id ? 0 : 1);
       }
     }
 
@@ -947,6 +1108,12 @@ main (int argc, char **argv)
   if (legacy_id_no_init)
     {
       result = observe_legacy_identity_without_init ();
+      goto done;
+    }
+
+  if (legacy_historical_id || legacy_ctfdavis_id)
+    {
+      result = observe_legacy_c6_identity (legacy_historical_id);
       goto done;
     }
 

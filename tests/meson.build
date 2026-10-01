@@ -380,6 +380,21 @@ if 'fte3600' in drivers
         env: fte3600_driver_envs,
     )
 
+    fte3600_legacy_proto_test = executable('test-fte3600-legacy-proto',
+        sources: [
+            'test-fte3600-legacy-proto.c',
+            '../libfprint/drivers/fte3600-legacy-proto.c',
+        ],
+        dependencies: glib_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-legacy-proto',
+        fte3600_legacy_proto_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
     fte3600_mock_symbols = [
         'open', 'open64', 'close', 'ioctl', 'g_file_get_contents',
         'g_udev_client_new', 'g_udev_client_query_by_subsystem',
@@ -411,7 +426,10 @@ if 'fte3600' in drivers
     )
 
     test_medion_e3224 = executable('test-medion-e3224',
-        sources: '../tools/test_medion_e3224.c',
+        sources: [
+            '../tools/test_medion_e3224.c',
+            '../libfprint/drivers/fte3600-legacy-proto.c',
+        ],
         dependencies: [glib_dep, gpiod_dep, gudev_dep],
         c_args: common_cflags,
         install: false,
@@ -426,7 +444,10 @@ if 'fte3600' in drivers
     test('medion-power', medion_power_test, suite: ['unit-tests'])
 
     medion_diagnostic_test = executable('test-medion-diagnostic',
-        sources: 'test-medion-diagnostic.c',
+        sources: [
+            'test-medion-diagnostic.c',
+            '../libfprint/drivers/fte3600-legacy-proto.c',
+        ],
         dependencies: [glib_dep, gpiod_dep, gudev_dep],
         c_args: common_cflags,
         install: false,

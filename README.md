@@ -1,29 +1,25 @@
 # Medion E3224 experimental FTE3600 support
 
-This branch contains the Medion-specific GPIO routing, power diagnostics and
-recovery work. It is not a successful Medion driver release. The latest reported
-tests of this implementation did not obtain a valid device response or capture;
-the exact module chip remains unconfirmed.
+Medion development is restarting from tuxman2's reported working Mint 22.2
+stack: vobademi's package and ctfdavis's SPI module. The previous Medion code
+never worked on his machine and is not the basis for the new protocol.
+The exact module chip remains unconfirmed. This is not a working driver release.
 
-The same user's machine worked with an older Mint software stack. Preserve
-that known-good result and compare startup/transport/firmware behavior against
-it. Do not request another run of an unchanged recovery sequence that already
-failed. A new hardware experiment needs a narrow question and an explicit
-description of the state it changes.
+The ordinary driver now rejects Medion before opening SPI or claiming GPIO;
+it cannot automatically enter the A1 FT9361 protocol. The new bounded ctfdavis
+comparison makes no GPIO request, uses Mode 0 at no more than 1 MHz, and tests
+the archived userspace C6/identity prefix with sequential SPI transfers.
+This is not full initialization or capture. The later 4 MHz/GPIO attachment
+was a proposed patch, not the code confirmed by the Mint success report.
 
-Reset is currently modeled on `\_SB_.GPO1` pin 39 and IRQ on
-`\_SB_.GPO2` pin 0. Active-low reset remains a hypothesis requiring validation.
-The diagnostic recovery command resets hardware, uploads firmware and temporarily
-changes runtime-power policy; it is not a read-only probe.
-The regular Medion driver does not claim the reset output or automatically
-upload firmware, including in capture-only builds. An unresponsive device fails
-to open; hardware recovery remains an explicitly selected standalone experiment.
-The recovery and soft-reset wrappers share an exclusive lock through diagnostic
-and service cleanup. Direct invocations of the diagnostic bypass that lock.
+Do not request another run of the unchanged FT9361 recovery sequence that
+already failed. The diagnostic wrappers share an exclusive lock through device
+and service cleanup. Direct diagnostic invocations bypass that lock.
 
+- [Independent Medion rebuild and source provenance](docs/fte3600/medion-rebuild.md)
+- [Bounded ctfdavis candidate test](docs/medion-legacy-id-test.md)
 - [Evidence and hardware routes](docs/fte3600/status.md)
-- [Diagnostic boundaries and known-good comparison](docs/fte3600/troubleshooting.md)
-- [Bounded old-stack identity comparison](docs/medion-legacy-id-test.md)
+- [Diagnostic boundaries](docs/fte3600/troubleshooting.md)
 - [Build, installation and rollback](docs/fte3600/install.md)
 - [Security and biometric privacy](SECURITY.md)
 - [Implementation provenance](docs/fte3600/clean-room.md)
