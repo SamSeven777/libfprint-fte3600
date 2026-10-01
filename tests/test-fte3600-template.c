@@ -801,6 +801,7 @@ test_dual_enrollment_tied_peaks (void)
   Fte3600BriskFeatureSet brisk;
   Fte3600IpaFeatureSet ipa;
   guint physical_count;
+
   g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
 
   make_fingerprint_pattern (image);
@@ -1201,6 +1202,7 @@ test_mosaic_semantic_roundtrip (void)
   static const guint probe_ids[] = { 0, 1, 2, 10, 11, 12 };
   static const gfloat probe_jitter[] = { -0.81f, 0.0f };
   Fte3600BriskFeatureSet samples[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
+
   g_autoptr(Fte3600Template) original = fpi_fte3600_template_new ();
   g_autoptr(Fte3600Template) reversed = fpi_fte3600_template_new ();
   g_autoptr(Fte3600Template) decoded = NULL;
@@ -1393,16 +1395,16 @@ test_boundary_straddling_probe (void)
    * Only points 0, 1, 2 match (3 inliers < 5 minimum). Must NOT reach consensus! */
   Fte3600BriskMatchResult s0_match;
   Fte3600BriskStatus s0_status = fpi_fte3600_brisk_match (&query,
-                                                         &s0_feats,
-                                                         &s0_match);
+                                                          &s0_feats,
+                                                          &s0_match);
   g_assert_cmpint (s0_status, ==, FTE3600_BRISK_NO_CONSENSUS);
 
   /* 2. Directly test matching against Sample 1 alone:
    * Only points 10, 11, 12 match (3 inliers < 5 minimum). Must NOT reach consensus! */
   Fte3600BriskMatchResult s1_match;
   Fte3600BriskStatus s1_status = fpi_fte3600_brisk_match (&query,
-                                                         &s1_feats,
-                                                         &s1_match);
+                                                          &s1_feats,
+                                                          &s1_match);
   g_assert_cmpint (s1_status, ==, FTE3600_BRISK_NO_CONSENSUS);
 
   /* 3. Test comparing against the template container:
@@ -1437,11 +1439,61 @@ test_boundary_straddling_probe (void)
 #endif
 }
 
+typedef struct
+{
+  guint calls;
+  guint cancel_at;
+} DecodeCancellation;
+
+static gboolean
+cancel_decode (gpointer data)
+{
+  DecodeCancellation *cancel = data;
+
+  return ++cancel->calls >= cancel->cancel_at;
+}
+
+static void
+test_decode_cancellation (void)
+{
+  g_autoptr(Fte3600Template) original = make_ready_template (FALSE);
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(GBytes) roundtrip = NULL;
+  DecodeCancellation complete = { 0, G_MAXUINT };
+
+  g_assert_cmpint (fpi_fte3600_template_encode (original, &wire), ==,
+                   FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_decode_cancellable (
+                     wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded,
+                     cancel_decode, &complete), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_encode (decoded, &roundtrip), ==,
+                   FTE3600_TEMPLATE_OK);
+  g_assert_true (g_bytes_equal (wire, roundtrip));
+  g_clear_pointer (&decoded, fpi_fte3600_template_free);
+
+  /* Exercise cancellation before parsing, during parsing and during mosaic
+   * reconstruction, including after partial output has been allocated. */
+  g_assert_cmpuint (complete.calls, >, 2 * FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+  const guint stops[] = { 1, 2, complete.calls / 2, complete.calls - 1 };
+  for (guint i = 0; i < G_N_ELEMENTS (stops); i++)
+    {
+      DecodeCancellation cancel = { 0, stops[i] };
+
+      g_assert_cmpint (fpi_fte3600_template_decode_cancellable (
+                         wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded,
+                         cancel_decode, &cancel), ==, FTE3600_TEMPLATE_CANCELLED);
+      g_assert_null (decoded);
+      g_assert_cmpuint (cancel.calls, ==, stops[i]);
+    }
+}
+
 int
 main (int   argc,
       char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fte3600-template/decode-cancellation", test_decode_cancellation);
   g_test_add_func ("/fte3600-template/validate-feature-set",
                    test_validate_feature_set);
   g_test_add_func ("/fte3600-template/roundtrip-and-header",

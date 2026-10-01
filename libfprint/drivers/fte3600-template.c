@@ -534,14 +534,33 @@ template_stitch_sample (Fte3600Template              *templ,
     }
 }
 
+typedef struct
+{
+  gboolean                computed[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES][FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  Fte3600BriskStatus      status[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES][FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  Fte3600BriskMatchResult match[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES][FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+} MosaicMatchCache;
+
 static void
-template_reconstruct_mosaic (Fte3600Template *templ)
+mosaic_match_cache_clear (MosaicMatchCache *cache)
+{
+  template_secure_clear (cache, sizeof (*cache));
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (MosaicMatchCache, mosaic_match_cache_clear)
+
+static gboolean
+template_reconstruct_mosaic (Fte3600Template          *templ,
+                             Fte3600TemplateCancelFunc is_cancelled,
+                             gpointer                  cancel_data)
 {
   gboolean aligned[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { FALSE };
   TemplatePose poses[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
 
+  g_auto(MosaicMatchCache) cache = { 0 };
+
   if (templ == NULL || templ->n_subtemplates == 0)
-    return;
+    return TRUE;
 
   /* Encoding uses this same order. Anchor choice, alignment ties and fusion
    * must not depend on capture order or change after loading the saved wire. */
@@ -582,9 +601,19 @@ template_reconstruct_mosaic (Fte3600Template *templ)
               Fte3600BriskMatchResult match;
               Fte3600BriskStatus status;
 
-              status = fpi_fte3600_brisk_match (&templ->subtemplates[u].features,
-                                                &templ->subtemplates[a].features,
-                                                &match);
+              if (is_cancelled && is_cancelled (cancel_data))
+                return FALSE;
+              /* Reuse directed comparisons without changing traversal or tie
+              * breaking. Reversing a match is not necessarily equivalent. */
+              if (!cache.computed[u][a])
+                {
+                  cache.status[u][a] = fpi_fte3600_brisk_match (
+                    &templ->subtemplates[u].features,
+                    &templ->subtemplates[a].features, &cache.match[u][a]);
+                  cache.computed[u][a] = TRUE;
+                }
+              status = cache.status[u][a];
+              match = cache.match[u][a];
               if (status == FTE3600_BRISK_OK && match.inliers >= FTE3600_BRISK_MIN_INLIERS)
                 {
                   if (!found_match || match_is_better (&match, &best_match))
@@ -621,6 +650,7 @@ template_reconstruct_mosaic (Fte3600Template *templ)
 
   if (templ->mosaic.n_features >= FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES)
     templ->has_mosaic = TRUE;
+  return !(is_cancelled && is_cancelled (cancel_data));
 }
 
 const Fte3600BriskFeatureSet *
@@ -739,7 +769,7 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
   templ->subtemplates[templ->n_subtemplates++] = candidate;
   if (templ->n_subtemplates < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
     return FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
-  template_reconstruct_mosaic (templ);
+  template_reconstruct_mosaic (templ, NULL, NULL);
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -951,6 +981,16 @@ fpi_fte3600_template_decode (GBytes                    *wire,
                              Fte3600TemplateLoadPurpose purpose,
                              Fte3600Template          **templ)
 {
+  return fpi_fte3600_template_decode_cancellable (wire, purpose, templ, NULL, NULL);
+}
+
+Fte3600TemplateStatus
+fpi_fte3600_template_decode_cancellable (GBytes                    *wire,
+                                         Fte3600TemplateLoadPurpose purpose,
+                                         Fte3600Template          **templ,
+                                         Fte3600TemplateCancelFunc  is_cancelled,
+                                         gpointer                   cancel_data)
+{
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
   const guint8 *data;
   gsize size;
@@ -968,6 +1008,8 @@ fpi_fte3600_template_decode (GBytes                    *wire,
       (purpose != FTE3600_TEMPLATE_LOAD_DIAGNOSTIC &&
        purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION))
     return FTE3600_TEMPLATE_INVALID_WIRE;
+  if (is_cancelled && is_cancelled (cancel_data))
+    return FTE3600_TEMPLATE_CANCELLED;
   data = g_bytes_get_data (wire, &size);
   status = validate_header (data, size);
   if (status != FTE3600_TEMPLATE_OK)
@@ -986,6 +1028,8 @@ fpi_fte3600_template_decode (GBytes                    *wire,
       guint stored_physical_count;
       gsize expected_record_size;
 
+      if (is_cancelled && is_cancelled (cancel_data))
+        return FTE3600_TEMPLATE_CANCELLED;
       memset (&parsed, 0, sizeof (parsed));
       if (offset > size || size - offset < TEMPLATE_SUBTEMPLATE_HEADER_SIZE)
         return FTE3600_TEMPLATE_INVALID_WIRE;
@@ -1104,7 +1148,8 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
       FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
-  template_reconstruct_mosaic (decoded);
+  if (!template_reconstruct_mosaic (decoded, is_cancelled, cancel_data))
+    return FTE3600_TEMPLATE_CANCELLED;
   *templ = g_steal_pointer (&decoded);
   return FTE3600_TEMPLATE_OK;
 }

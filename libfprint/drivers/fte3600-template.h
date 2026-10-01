@@ -51,6 +51,7 @@ typedef enum {
   FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR,
   FTE3600_TEMPLATE_UNSUPPORTED_POLICY,
   FTE3600_TEMPLATE_NOT_CALIBRATED,
+  FTE3600_TEMPLATE_CANCELLED,
 } Fte3600TemplateStatus;
 
 typedef enum {
@@ -117,6 +118,16 @@ Fte3600TemplateStatus fpi_fte3600_template_encode (const Fte3600Template *templ,
 Fte3600TemplateStatus fpi_fte3600_template_decode (GBytes                    *wire,
                                                    Fte3600TemplateLoadPurpose purpose,
                                                    Fte3600Template          **templ);
+
+typedef gboolean (*Fte3600TemplateCancelFunc) (gpointer data);
+
+/* The optional callback is polled between bounded units of decoding and
+ * mosaic matching. Cancellation returns CANCELLED and leaves *templ NULL. */
+Fte3600TemplateStatus fpi_fte3600_template_decode_cancellable (GBytes                    *wire,
+                                                               Fte3600TemplateLoadPurpose purpose,
+                                                               Fte3600Template          **templ,
+                                                               Fte3600TemplateCancelFunc  is_cancelled,
+                                                               gpointer                   cancel_data);
 
 /* Compare query against gallery using a specific engine mode (BRISK, IPA, or DUAL). */
 Fte3600TemplateStatus fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,

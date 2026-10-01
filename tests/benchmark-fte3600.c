@@ -182,6 +182,21 @@ main (void)
     }
   printf ("Encoded gallery: %" G_GSIZE_FORMAT " bytes\n", g_bytes_get_size (wire));
 
+  /* Loading includes mosaic reconstruction and is part of every verification,
+   * even though the gallery-comparison timing below intentionally excludes it. */
+  gint64 load_started = g_get_monotonic_time ();
+  for (guint i = 0; i < 10; i++)
+    {
+      g_autoptr(Fte3600Template) loaded = NULL;
+
+      if (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                                       &loaded) != FTE3600_TEMPLATE_OK)
+        return 1;
+    }
+  printf ("Template load + mosaic: %.2f us/call (10 iterations)\n",
+          (gdouble) (g_get_monotonic_time () - load_started) / 10);
+
+
   for (guint mode = 0; mode < G_N_ELEMENTS (modes); mode++)
     {
       Fte3600TemplateCompareResult result = { 0 };

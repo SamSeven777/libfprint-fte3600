@@ -125,6 +125,15 @@ decisions are descriptive observations, not guaranteed successful matches.
 Capture-only builds have no authentication benchmark. No hard latency threshold
 is asserted, so sanitizer and slower machines may legitimately be slower.
 
+Template loading and mosaic reconstruction are timed separately from gallery
+comparison. Reconstruction caches directed sample comparisons within one load;
+this preserves canonical traversal and tie-breaking without changing the wire
+format or authentication policy. Verification checks cancellation between sample
+records and pair comparisons, and clears its private serialized-template copy
+on release. Enrollment retains the encoder's cleared-on-release backing buffer
+when passing its template to the framework. A single pair comparison remains a
+bounded, non-interruptible unit.
+
 The output reports a small fixed synthetic fixture set, not real population
 FAR/FRR. It does not measure heap allocation counts or justify a general
 rotation/accuracy guarantee. Earlier fixed zero-FAR and sub-2-ms summaries must

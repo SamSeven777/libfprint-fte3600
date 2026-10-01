@@ -9,8 +9,8 @@
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
 
-__typeof__ (fpi_fte3600_template_decode) __wrap_fpi_fte3600_template_decode;
-__typeof__ (fpi_fte3600_template_decode) __real_fpi_fte3600_template_decode;
+__typeof__ (fpi_fte3600_template_decode_cancellable) __wrap_fpi_fte3600_template_decode_cancellable;
+__typeof__ (fpi_fte3600_template_decode_cancellable) __real_fpi_fte3600_template_decode_cancellable;
 
 static struct
 {
@@ -19,13 +19,16 @@ static struct
   GThread *main_thread;
   gint     enabled;
   gint     entered;
+  gint     cancelled;
   gboolean released;
 } load_gate;
 
 Fte3600TemplateStatus
-__wrap_fpi_fte3600_template_decode (GBytes                    *wire,
-                                    Fte3600TemplateLoadPurpose purpose,
-                                    Fte3600Template          **templ)
+__wrap_fpi_fte3600_template_decode_cancellable (GBytes                    *wire,
+                                                Fte3600TemplateLoadPurpose purpose,
+                                                Fte3600Template          **templ,
+                                                Fte3600TemplateCancelFunc  is_cancelled,
+                                                gpointer                   cancel_data)
 {
   if (g_atomic_int_get (&load_gate.enabled))
     {
@@ -37,7 +40,11 @@ __wrap_fpi_fte3600_template_decode (GBytes                    *wire,
         g_cond_wait (&load_gate.cond, &load_gate.mutex);
       g_mutex_unlock (&load_gate.mutex);
     }
-  return __real_fpi_fte3600_template_decode (wire, purpose, templ);
+  Fte3600TemplateStatus status = __real_fpi_fte3600_template_decode_cancellable (
+    wire, purpose, templ, is_cancelled, cancel_data);
+  if (g_atomic_int_get (&load_gate.enabled) && status == FTE3600_TEMPLATE_CANCELLED)
+    g_atomic_int_set (&load_gate.cancelled, TRUE);
+  return status;
 }
 
 static FpPrint *
@@ -98,9 +105,9 @@ make_maximum_load_print (FpDevice *device,
 }
 
 static void
-wait_for_load_flag (gint *flag)
+wait_for_load_flag_timeout (gint *flag, gint64 timeout)
 {
-  const gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  const gint64 deadline = g_get_monotonic_time () + timeout;
 
   while (!g_atomic_int_get (flag))
     {
@@ -112,9 +119,15 @@ wait_for_load_flag (gint *flag)
 }
 
 static void
+wait_for_load_flag (gint *flag)
+{
+  wait_for_load_flag_timeout (flag, 5 * G_TIME_SPAN_SECOND);
+}
+
+static void
 load_cancelled (GObject      *object,
-                 GAsyncResult *result,
-                 gpointer      user_data)
+                GAsyncResult *result,
+                gpointer      user_data)
 {
   g_autoptr(GError) error = NULL;
   gboolean match = FALSE;
@@ -134,7 +147,7 @@ cancel_load_in_main_context (gpointer user_data)
 
 static void
 load_device_finalized (gpointer user_data,
-                        GObject *object)
+                       GObject *object)
 {
   g_atomic_int_set ((gint *) user_data, TRUE);
 }
@@ -143,6 +156,7 @@ static void
 test_verify_load_cancel (void)
 {
   FpDevice *device = new_device ();
+
   g_autoptr(FpPrint) print = make_maximum_load_print (device, FALSE);
   g_autoptr(GError) error = NULL;
   gint completed = FALSE;
@@ -154,10 +168,11 @@ test_verify_load_cancel (void)
   load_gate.main_thread = g_thread_self ();
   load_gate.released = FALSE;
   g_atomic_int_set (&load_gate.entered, FALSE);
+  g_atomic_int_set (&load_gate.cancelled, FALSE);
   g_atomic_int_set (&load_gate.enabled, TRUE);
 
   fp_device_verify (device, print, sensor.cancellable, NULL, NULL, NULL,
-                     load_cancelled, &completed);
+                    load_cancelled, &completed);
   wait_for_load_flag (&load_gate.entered);
 
   /* The decoder remains blocked while the main context dispatches cancellation
@@ -171,7 +186,7 @@ test_verify_load_cancel (void)
   g_assert_no_error (error);
 
   /* Drop the device and print while the task still owns its private wire.
-   * Let the real decoder finish, then wait for task/device cleanup. */
+   * Let the real decoder observe cancellation, then wait for task/device cleanup. */
   g_object_weak_ref (G_OBJECT (device), load_device_finalized, &finalized);
   g_clear_object (&print);
   finish_device (device);
@@ -179,7 +194,10 @@ test_verify_load_cancel (void)
   load_gate.released = TRUE;
   g_cond_signal (&load_gate.cond);
   g_mutex_unlock (&load_gate.mutex);
-  wait_for_load_flag (&finalized);
+  /* Cancellation responsiveness above remains limited to five seconds.
+   * Final cleanup may include instrumented worker teardown. */
+  wait_for_load_flag_timeout (&finalized, 30 * G_TIME_SPAN_SECOND);
+  g_assert_true (g_atomic_int_get (&load_gate.cancelled));
   g_atomic_int_set (&load_gate.enabled, FALSE);
 }
 
@@ -187,6 +205,7 @@ static void
 test_verify_load_previous_policy (void)
 {
   FpDevice *device = new_device ();
+
   g_autoptr(FpPrint) print = make_maximum_load_print (device, TRUE);
   g_autoptr(GError) error = NULL;
   gboolean match = FALSE;
@@ -195,7 +214,7 @@ test_verify_load_previous_policy (void)
   open_device (device);
   resets = sensor.resets;
   g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
-                                        &match, NULL, &error));
+                                         &match, NULL, &error));
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_assert_cmpuint (sensor.images, ==, 0);
   g_assert_cmpuint (sensor.resets, ==, resets);

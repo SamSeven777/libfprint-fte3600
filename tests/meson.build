@@ -394,7 +394,7 @@ if 'fte3600' in drivers
     ]
     fte3600_mock_link_args = []
     if get_option('fte3600_personal_auth')
-        fte3600_mock_symbols += 'fpi_fte3600_template_decode'
+        fte3600_mock_symbols += 'fpi_fte3600_template_decode_cancellable'
     endif
     foreach symbol : fte3600_mock_symbols
         fte3600_mock_link_args += '-Wl,--wrap=' + symbol

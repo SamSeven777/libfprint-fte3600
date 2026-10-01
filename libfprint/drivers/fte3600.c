@@ -1837,6 +1837,7 @@ fte3600_enroll_retry_error (Fte3600TemplateStatus status)
     case FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA:
     case FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR:
     case FTE3600_TEMPLATE_UNSUPPORTED_POLICY:
+    case FTE3600_TEMPLATE_CANCELLED:
     case FTE3600_TEMPLATE_NOT_CALIBRATED:
       g_assert_not_reached ();
     }
@@ -1858,6 +1859,7 @@ fte3600_enroll_fatal_error (const Fte3600EnrollJob *job)
     case FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA:
     case FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR:
     case FTE3600_TEMPLATE_UNSUPPORTED_POLICY:
+    case FTE3600_TEMPLATE_CANCELLED:
     case FTE3600_TEMPLATE_NOT_CALIBRATED:
       return fpi_device_error_new_msg (
         FP_DEVICE_ERROR_NOT_SUPPORTED,
@@ -2003,6 +2005,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
     case FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA:
     case FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR:
     case FTE3600_TEMPLATE_UNSUPPORTED_POLICY:
+    case FTE3600_TEMPLATE_CANCELLED:
     case FTE3600_TEMPLATE_NOT_CALIBRATED:
       fte3600_complete_action_error (self,
                                      fte3600_enroll_fatal_error (job));
@@ -2061,9 +2064,10 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
         return;
       }
 
+    /* Retain the encoder's securely cleared backing buffer instead of making
+     * a second, ordinarily freed copy of the biometric template. */
     data = g_variant_ref_sink (
-      g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, wire_data, wire_size,
-                                 sizeof (*wire_data)));
+      g_variant_new_from_bytes (G_VARIANT_TYPE ("ay"), job->encoded_template, TRUE));
     g_assert (g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")));
     fpi_device_get_enroll_data (dev, &print);
     fpi_print_set_type (print, FPI_PRINT_RAW);
@@ -2136,6 +2140,10 @@ fte3600_verify_template_error (Fte3600TemplateStatus status)
 {
   switch (status)
     {
+    case FTE3600_TEMPLATE_CANCELLED:
+      return g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                  "Fingerprint template loading was cancelled");
+
     case FTE3600_TEMPLATE_INVALID_WIRE:
     case FTE3600_TEMPLATE_NEED_MORE_SAMPLES:
     case FTE3600_TEMPLATE_RETRY_LOW_CONTRAST:
@@ -2161,6 +2169,27 @@ fte3600_verify_template_error (Fte3600TemplateStatus status)
     }
 
   g_assert_not_reached ();
+}
+
+typedef struct
+{
+  gsize  size;
+  guint8 data[];
+} Fte3600VerifyWire;
+
+static void
+fte3600_verify_wire_free (gpointer data)
+{
+  Fte3600VerifyWire *wire = data;
+
+  fte3600_secure_clear (wire->data, wire->size);
+  g_free (wire);
+}
+
+static gboolean
+fte3600_load_is_cancelled (gpointer data)
+{
+  return data && g_cancellable_is_cancelled (G_CANCELLABLE (data));
 }
 
 static GError *
@@ -2197,7 +2226,11 @@ fte3600_verify_get_wire (FpiDeviceFte3600 *self,
       FP_DEVICE_ERROR_DATA_INVALID,
       "FTE3600 verification template has an invalid length");
 
-  *wire = g_bytes_new (wire_data, wire_size);
+  Fte3600VerifyWire *copy = g_malloc (sizeof (*copy) + wire_size);
+  copy->size = wire_size;
+  memcpy (copy->data, wire_data, wire_size);
+  *wire = g_bytes_new_with_free_func (copy->data, wire_size,
+                                      fte3600_verify_wire_free, copy);
   return NULL;
 }
 
@@ -2208,19 +2241,20 @@ fte3600_verify_load_worker (GTask        *task,
                             GCancellable *cancellable)
 {
   GBytes *wire = task_data;
+
   g_autoptr(Fte3600Template) templ = NULL;
   Fte3600TemplateStatus status;
 
   (void) source_object;
-  (void) cancellable;
 
   if (g_task_return_error_if_cancelled (task))
     return;
 
   /* Reconstruction can be expensive. Only task-owned data is touched here,
    * so cancellation may finish the action while this worker unwinds. */
-  status = fpi_fte3600_template_decode (
-    wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &templ);
+  status = fpi_fte3600_template_decode_cancellable (
+    wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &templ,
+    fte3600_load_is_cancelled, cancellable);
   if (g_task_return_error_if_cancelled (task))
     return;
   if (status != FTE3600_TEMPLATE_OK)
@@ -2231,8 +2265,8 @@ fte3600_verify_load_worker (GTask        *task,
   if (!fpi_fte3600_template_is_ready (templ))
     {
       g_task_return_error (task, fpi_device_error_new_msg (
-                            FP_DEVICE_ERROR_DATA_INVALID,
-                            "FTE3600 verification template was incomplete"));
+                             FP_DEVICE_ERROR_DATA_INVALID,
+                             "FTE3600 verification template was incomplete"));
       return;
     }
 
@@ -2246,6 +2280,7 @@ fte3600_verify_load_complete (GObject      *source_object,
                               gpointer      user_data)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (source_object);
+
   g_autoptr(GError) error = NULL;
 
   (void) user_data;
@@ -2879,6 +2914,7 @@ static void
 fte3600_verify (FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+
   g_autoptr(GTask) task = NULL;
   g_autoptr(GBytes) wire = NULL;
   GError *error;
