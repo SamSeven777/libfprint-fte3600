@@ -9,9 +9,13 @@ permissions:
 
 jobs:
   fedora:
-    name: Fedora 43
+    name: Fedora ${{ matrix.fedora }}
     runs-on: ubuntu-latest
-    container: fedora:43
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: ["43", "44"]
+    container: fedora:${{ matrix.fedora }}
     steps:
       - name: Install dependencies
         run: >-

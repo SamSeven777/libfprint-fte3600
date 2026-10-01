@@ -60,8 +60,10 @@ the host implementation.
 
 The implemented prefix is deliberately finite:
 
-1. Configure Mode 0 / 8-bit / MSB first, cap the existing maximum at 1 MHz.
-2. With no mapped optional GPIO, retain the old userspace's 2 ms settling delay.
+1. Require a non-zero original spidev maximum so it can be restored, then
+   configure Mode 0 / 8-bit / MSB first and cap that maximum at 1 MHz.
+2. With no mapped optional GPIO, retain the bridge reset ioctl's unconditional
+   10 ms wait. The archived userspace adds no delay between reset and C6.
 3. Send `09 f6 c6 01`, wait 4 ms, then TX `08 f7 c6 00` / RX 1.
    Stop retrying on `01`, with at most four attempts.
 4. TX `04 fb 9a 8b 00 00` / RX 4, with TX and RX in one message.

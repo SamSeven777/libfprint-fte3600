@@ -478,6 +478,39 @@ for fte_test_load in not-found error bad-setting; do
   fte_test_ok "unloaded service ($fte_test_load) rejected before isolation"
 done
 
+fte_test_new
+fte_test_script=test-medion-recovery.sh
+fte_test_run 0
+fte_test_restored_active
+grep -q '^tool --test-vendor-recovery /usr/lib/firmware/fte3600/ft9361.bin$' "$FTE_TEST_CASE/events" || fte_test_fail 'recovery wrapper dispatched wrong mode'
+fte_test_ok 'recovery wrapper restores an active service after success'
+
+fte_test_new
+fte_test_script=test-medion-recovery.sh
+echo 'loaded inactive' > "$FTE_TEST_CASE/state"
+ln -s /dev/null "$FTE_TEST_RUNTIME_UNIT"
+fte_test_run 0
+[[ -L $FTE_TEST_RUNTIME_UNIT && $(readlink "$FTE_TEST_RUNTIME_UNIT") == /dev/null ]] || fte_test_fail 'recovery wrapper removed a pre-existing runtime mask'
+! grep -Eq '^systemctl (mask|unmask|start)' "$FTE_TEST_CASE/events" || fte_test_fail 'recovery wrapper changed a pre-existing runtime mask'
+fte_test_ok 'recovery wrapper preserves a pre-existing runtime mask'
+
+fte_test_new
+fte_test_script=test-medion-recovery.sh
+export FTE_TEST_UNMASK_FAIL=1
+fte_test_run 1
+[[ -L $FTE_TEST_RUNTIME_UNIT && $(readlink "$FTE_TEST_RUNTIME_UNIT") == /dev/null ]] || fte_test_fail 'recovery wrapper lost its mask after failed unmask'
+grep -q '^systemctl unmask --runtime fprintd.service$' "$FTE_TEST_CASE/events" || fte_test_fail 'recovery wrapper did not attempt unmask'
+! grep -q '^systemctl start ' "$FTE_TEST_CASE/events" || fte_test_fail 'recovery wrapper restarted after failed unmask'
+fte_test_ok 'recovery wrapper reports unmask failure without unsafe restart'
+
+fte_test_new
+fte_test_script=test-medion-recovery.sh
+export FTE_TEST_REPLACE_UNIT=1
+fte_test_run 1
+[[ $(< "$FTE_TEST_RUNTIME_UNIT") == replacement ]] || fte_test_fail 'recovery wrapper deleted an external runtime replacement'
+! grep -Eq '^systemctl (unmask|start)' "$FTE_TEST_CASE/events" || fte_test_fail 'recovery wrapper changed an external runtime replacement'
+fte_test_ok 'recovery wrapper preserves an external runtime replacement'
+
 # Run every pair against the same service and lock. The second wrapper must
 # neither launch a diagnostic nor unmask/restart the first wrapper's daemon.
 for fte_test_holder in test-medion-soft-reset.sh test-medion-recovery.sh; do

@@ -474,11 +474,13 @@ observe_legacy_c6_identity (gboolean attachment_gpio)
       printf ("Source SHA256: fdcf6e583291ab719007896b38742a0ff2cfbdc26e5f9de10d22959932902b2c.\n");
       printf ("This models absent named reset/power/enable GPIO mappings, consistent with the reported ACPI fragment.\n");
       printf ("It does not establish the exact file installed on Mint or a complete initialization.\n");
+      /* The bridge's reset ioctl always calls msleep(10), even when its
+       * optional GPIO descriptor is NULL. The archived userspace calls C6
+       * immediately after that ioctl; it does not add a 2 ms delay. */
+      printf ("Preserving the bridge reset-ioctl's 10 ms wait without GPIO access.\n");
+      g_usleep (10000);
     }
   printf ("C6 writes follow. Stops before 1a84, FD/FE, FDT, capture or firmware.\n");
-  /* The archived userspace waits 2 ms after the bridge reset ioctl. With
-   * absent optional GPIOs that ioctl has no electrical effect. */
-  g_usleep (2000);
 
   for (guint attempt = 1; attempt <= 4; attempt++)
     {
@@ -966,7 +968,7 @@ main (int argc, char **argv)
   atexit (cleanup);
 
   printf ("=== Medion Akoya E3224 Hardware Diagnostic & Recovery Tool ===\n");
-  printf ("Diagnostic revision: 2026-10-01.3 (separate ctfdavis and later-attachment candidates)\n");
+  printf ("Diagnostic revision: 2026-10-01.4 (corrected bridge wait and restorable SPI preconditions)\n");
   check_dmi ();
   if (vendor_recover)
     firmware = load_verified_firmware (firmware_file);
@@ -1017,9 +1019,16 @@ main (int argc, char **argv)
       require (ioctl (spi_fd, SPI_IOC_RD_BITS_PER_WORD, &saved_spi.bits) == 0, "save SPI word size");
       require (ioctl (spi_fd, SPI_IOC_RD_LSB_FIRST, &saved_spi.lsb) == 0, "save SPI bit order");
       if (legacy_historical_id || legacy_ctfdavis_id)
-        require (ioctl (spi_fd, SPI_IOC_RD_MAX_SPEED_HZ,
-                        &saved_spi.speed_hz) == 0,
-                 "save SPI maximum speed");
+        {
+          require (ioctl (spi_fd, SPI_IOC_RD_MAX_SPEED_HZ,
+                          &saved_spi.speed_hz) == 0,
+                   "save SPI maximum speed");
+          /* spidev rejects SPI_IOC_WR_MAX_SPEED_HZ(0). Unlike the old
+           * in-kernel bridge, this temporary diagnostic must be able to
+           * restore the original userspace setting on every handled exit. */
+          if (saved_spi.speed_hz == 0)
+            fail ("Cannot safely restore a zero SPI maximum speed; refusing before SPI configuration or sensor traffic");
+        }
       saved_spi.mode_changed = TRUE;
     }
   set_spi_mode (SPI_MODE_0);
@@ -1033,7 +1042,7 @@ main (int argc, char **argv)
   if (legacy_historical_id || legacy_ctfdavis_id)
     {
       if (legacy_ctfdavis_id)
-        cur_speed_hz = saved_spi.speed_hz == 0 ? 1000000 : MIN (saved_spi.speed_hz, 1000000);
+        cur_speed_hz = MIN (saved_spi.speed_hz, 1000000);
       uint32_t speed = cur_speed_hz;
 
       saved_spi.speed_changed = TRUE;
@@ -1076,7 +1085,7 @@ main (int argc, char **argv)
                  "set reset GPIO direction");
         require (gpiod_line_settings_set_output_value (
                    s, legacy_historical_id ? GPIOD_LINE_VALUE_INACTIVE :
-                                             GPIOD_LINE_VALUE_ACTIVE) == 0,
+                   GPIOD_LINE_VALUE_ACTIVE) == 0,
                  "set control GPIO initial value");
         unsigned off = PIN_GPO1_RESET;
         if (gpiod_line_config_add_line_settings (c, &off, 1, s) == 0)

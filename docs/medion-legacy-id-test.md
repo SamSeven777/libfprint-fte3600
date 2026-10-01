@@ -6,6 +6,7 @@ ctfdavis alternative named in tuxman2's successful Mint report. The secondary
 comparison follows a different 4 MHz/GPIO patch posted later for validation.
 Neither proves the exact files installed on Mint, and neither is a complete
 initialization, capture, enrollment, or authentication test.
+These diagnostics do not enable or claim production support for the Medion.
 
 ## Provenance boundary
 
@@ -48,14 +49,30 @@ the files installed together on the old Mint system.
 The pinned alternative bridge:
 
 1. selects Mode 0, 8 bits, and MSB first;
-2. keeps a non-zero device maximum at or below 1 MHz, or caps it to 1 MHz;
+2. uses 1 MHz when the kernel-side maximum is zero or above 1 MHz, otherwise
+   keeps the existing non-zero maximum;
 3. looks only for optional named `reset`, `power`, then `enable` GPIOs;
 4. skips its probe reset when none of those named mappings exists.
 
 The reported Medion ACPI fragment contains an unnamed GPIO resource, not one
 of those named mappings. The diagnostic therefore models this source path
-without requesting or changing any GPIO. It waits the userspace library's 2 ms
-post-reset-ioctl interval, then sends the C6 and identity transactions below.
+without requesting or changing any GPIO. The bridge's reset-ioctl handler
+still calls a routine with an unconditional 10 ms sleep between its GPIO
+setters. With no optional GPIO descriptor, the pin operations have no
+electrical effect, but that 10 ms delay remains. The diagnostic models that
+delay before sending the C6 and identity transactions below.
+
+Static inspection of the archived userspace library shows no additional 2 ms
+delay after the reset ioctl: its reset call is followed immediately by the C6
+helper. The diagnostic therefore does not add one.
+
+The generic-spidev diagnostic intentionally has a stricter speed precondition
+than the kernel bridge. Before changing any SPI setting or sending traffic, it
+requires spidev to report a non-zero original maximum speed. A zero value
+fails closed; it is not converted to 1 MHz and later "restored" by writing
+zero. This preserves the diagnostic's recoverable-state promise. The public
+bridge's zero-to-1-MHz fallback occurs during kernel-driver probe and is not
+evidence that writing zero back through spidev is a valid restoration.
 
 This is a source-backed comparison with the code family named in the success
 report. It is not a claim that the pinned revision is byte-identical to the old
@@ -77,7 +94,8 @@ low, wait 10 ms, raw high. It must not be inverted using the unproven FT9361
 reset interpretation.
 
 The diagnostic models both the bridge probe cycle and the library's reset
-ioctl cycle, then waits 2 ms.
+ioctl cycle: each is raw low, waits 10 ms, then raw high. It does not add an
+unsupported 2 ms delay before C6.
 
 ## Common bounded protocol
 
@@ -96,10 +114,11 @@ one SPI message, CS held:
   RX 4 bytes, first two bytes are the big-endian identity
 ```
 
-Both comparisons run the C6 loop and one FW9362 identity read. They deliberately
-stop before `1a84`, shifted-ID recovery, the other-93xx `FD/FE` electrical
-configuration, FDT/calibration, IRQ capture, image data, or either firmware
-path.
+Both comparisons run the C6 loop and one FW9362 identity read. C6 is a sensor
+register write, so these are bounded identity checkpoints, not read-only
+probes. They deliberately stop before `1a84`, shifted-ID recovery, the
+other-93xx `FD/FE` electrical configuration, FDT/calibration, IRQ capture,
+image data, or either firmware path.
 
 ## Safety and interpretation
 

@@ -15,13 +15,15 @@ fi
 
 fte_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fte_work=$(mktemp -d /tmp/fte3600-medion-test.XXXXXX)
+fte_runtime_unit=/run/systemd/system/fprintd.service
 fte_lockfile=/run/fte3600-medion-diagnostic.lock
 fte_child=
 fte_masked=0
+fte_existing_mask=0
 fte_was_active=0
 
 fte_cleanup() {
-  local fte_status=$?
+  local fte_status=$? fte_restore_ok=1 fte_load fte_active
   trap - EXIT
   trap '' INT TERM
   if [[ -n $fte_child ]]; then
@@ -30,12 +32,39 @@ fte_cleanup() {
     fte_child=
   fi
   if (( fte_masked )); then
-    systemctl unmask --runtime fprintd.service || fte_status=1
-    if (( fte_was_active )); then
-      systemctl start fprintd.service || fte_status=1
+    if [[ -L $fte_runtime_unit && $(readlink -- "$fte_runtime_unit") == /dev/null ]]; then
+      if ! systemctl unmask --runtime fprintd.service; then
+        echo 'Could not remove our runtime mask; inspect fprintd manually.' >&2
+        fte_restore_ok=0
+      fi
+    elif [[ -e $fte_runtime_unit || -L $fte_runtime_unit ]]; then
+      echo 'Runtime unit changed during the test; leaving it untouched. Inspect fprintd manually.' >&2
+      fte_restore_ok=0
+    fi
+    if (( fte_restore_ok && fte_was_active )); then
+      if ! fte_load=$(systemctl show fprintd.service -p LoadState --value) || [[ $fte_load == masked ]]; then
+        echo 'Cannot safely restart fprintd; inspect its current unit configuration.' >&2
+        fte_restore_ok=0
+      elif ! systemctl start fprintd.service; then
+        echo 'Could not restart the previously active fprintd service.' >&2
+        fte_restore_ok=0
+      fi
     fi
   fi
-  rm -rf -- "$fte_work"
+  if (( fte_existing_mask )); then
+    if ! fte_load=$(systemctl show fprintd.service -p LoadState --value) ||
+       ! fte_active=$(systemctl show fprintd.service -p ActiveState --value) ||
+       [[ $fte_load != masked || ( $fte_active != inactive && $fte_active != failed ) ]]; then
+      echo 'The pre-existing masked state changed during the diagnostic; inspect fprintd manually.' >&2
+      fte_restore_ok=0
+    fi
+  fi
+  if ! rm -rf -- "$fte_work"; then
+    fte_restore_ok=0
+  fi
+  if (( ! fte_restore_ok )); then
+    fte_status=1
+  fi
   exit "$fte_status"
 }
 trap fte_cleanup EXIT
@@ -72,8 +101,9 @@ if [[ $fte_load == masked ]]; then
     echo 'fprintd is active but already masked; cannot restore this state automatically.' >&2
     exit 1
   fi
+  fte_existing_mask=1
 else
-  if [[ -e /run/systemd/system/fprintd.service || -L /run/systemd/system/fprintd.service ]]; then
+  if [[ -e $fte_runtime_unit || -L $fte_runtime_unit ]]; then
     echo 'Existing runtime fprintd unit override; leaving it untouched.' >&2
     exit 1
   fi
