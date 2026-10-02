@@ -34,6 +34,15 @@ The ultimate goal of the **FPrint** project is to make
 fingerprint scanners widely and easily usable under
 common Linux environments.
 
+## FTE3600 support in this fork
+
+This fork adds an experimental host driver and opt-in personal authentication
+for the FocalTech FTE3600/FT9361 SPI fingerprint sensor. The One-Netbook A1
+implementation has been maintainer-validated on Arch Linux and NixOS 26.05,
+including discovery, capture, enrollment, verification and cold-boot firmware
+recovery. See the [hardware and validation status](docs/fte3600/status.md) for
+the exact platform, build options and remaining validation limits.
+
 ## License
 
 `Section 6` of the license states that for compiled works that use
