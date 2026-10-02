@@ -1,0 +1,27 @@
+name: Medion baseline (no hardware)
+on:
+  push:
+    branches: [medion-e3224]
+  pull_request:
+    branches: [medion-e3224]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libglib2.0-dev linux-headers-generic zstd kmod pkg-config
+      - name: No-hardware tests
+        run: python3 -m unittest discover -s tests -p test_baseline.py -v
+      - name: Compile only (no vendor binary download or execution)
+        run: |
+          kernel_dir=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
+          test -n "$kernel_dir"
+          python3 scripts/prepare.py --compile-only --kernel-build "$kernel_dir"

@@ -1,12 +1,8 @@
-*.o
-*.swp
-_build
+.baseline/
 build*/
 __pycache__/
 *.py[cod]
-*.plist
-*.pkg.tar.*
-packaging/arch/pkg/
-packaging/arch/src/
-packaging/arch/libfprint/
-firmware/*.bin
+*.o
+*.ko
+*.deb
+*.so*
