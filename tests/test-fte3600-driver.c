@@ -95,43 +95,20 @@ test_firmware_fifo (void)
 }
 
 static void
-test_dmi_profile_lookup (void)
+test_sensor_identity (void)
 {
-  const Fte3600GpioProfile *profile;
-
-  /* Verified One-Netbook A1 profile must match */
-  profile = fpi_fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", "A1");
-  g_assert_nonnull (profile);
-  g_assert_cmpstr (profile->sys_vendor, ==, "ONE-NETBOOK TECHNOLOGY CO., LTD.");
-  g_assert_cmpstr (profile->product_name, ==, "A1");
-  g_assert_cmpstr (profile->controller_acpi_path, ==, "\\_SB_.PCI0.GPI0");
-  g_assert_cmpuint (profile->reset_offset, ==, 0x55);
-  g_assert_cmpuint (profile->irq_offset, ==, 0x56);
-
-  /* GPD Pocket 3 profiles must match */
-  profile = fpi_fte3600_lookup_gpio_profile ("GPD", "Pocket 3");
-  g_assert_nonnull (profile);
-  g_assert_cmpstr (profile->sys_vendor, ==, "GPD");
-  g_assert_cmpstr (profile->product_name, ==, "Pocket 3");
-  g_assert_cmpstr (profile->controller_acpi_path, ==, "\\_SB_.GPI0");
-
-  profile = fpi_fte3600_lookup_gpio_profile ("GPD", "GPD Pocket 3");
-  g_assert_nonnull (profile);
-  g_assert_cmpstr (profile->sys_vendor, ==, "GPD");
-  g_assert_cmpstr (profile->product_name, ==, "GPD Pocket 3");
-  g_assert_cmpstr (profile->controller_acpi_path, ==, "\\_SB_.GPI0");
-
-  /* Unknown or unverified DMI platforms must be rejected (return NULL) */
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("MEDION", "E3224"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("LENOVO", "ThinkPad"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("Dell Inc.", "XPS 13"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("HP", "Spectre"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", "A2"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("Other", "A1"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("", ""));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile (NULL, "A1"));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile ("ONE-NETBOOK TECHNOLOGY CO., LTD.", NULL));
-  g_assert_null (fpi_fte3600_lookup_gpio_profile (NULL, NULL));
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0x40, 0x50), ==, FTE3600_SENSOR_FT9361);
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0x58, 0x58), ==, FTE3600_SENSOR_FT9338);
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0x60, 0x60), ==, FTE3600_SENSOR_FT9348);
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0x40, 0x80), ==, FTE3600_SENSOR_FT9536);
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0, 0), ==, FTE3600_SENSOR_UNKNOWN);
+  g_assert_cmpint (fpi_fte3600_runtime_sensor (0xff, 0xff), ==, FTE3600_SENSOR_UNKNOWN);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0x95a8, 0x04), ==, FTE3600_SENSOR_FT9361);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0x2b50, 0x1e), ==, FTE3600_SENSOR_FT9361);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0x23dd, 0xff), ==, FTE3600_SENSOR_FT9361);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0x95a8, 0x02), ==, FTE3600_SENSOR_FT9348);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0x95a8, 0), ==, FTE3600_SENSOR_UNKNOWN);
+  g_assert_cmpint (fpi_fte3600_boot_sensor (0xffff, 4), ==, FTE3600_SENSOR_UNKNOWN);
 }
 
 static void
@@ -150,9 +127,9 @@ test_published_capabilities (void)
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_assert_nonnull (klass->enroll);
   g_assert_nonnull (klass->verify);
-  g_assert_cmpuint (klass->nr_enroll_stages, ==, 8);
+  g_assert_cmpuint (klass->nr_enroll_stages, ==, 0);
 #else
-  g_assert_null (klass->enroll);
+  g_assert_nonnull (klass->enroll); /* Rejecting vfunc: the API calls it directly. */
   g_assert_null (klass->verify);
   g_assert_cmpuint (klass->nr_enroll_stages, ==, 0);
 #endif
@@ -172,7 +149,7 @@ test_udev_rule_pattern (void)
 
   for (entry = klass->id_table; entry->udev_types != 0; entry++)
     {
-      if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
+      if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
         {
           g_autofree gchar *pattern = NULL;
 
@@ -209,10 +186,6 @@ test_udev_rules_generator_output (void)
   g_autofree gchar *standard_error = NULL;
   gint exit_status = 0;
   GError *error = NULL;
-  const gchar *line_start;
-  const gchar *pattern_start;
-  const gchar *pattern_end;
-  g_autofree gchar *extracted_pattern = NULL;
   gboolean ok;
 
   if (!bin_path || !*bin_path)
@@ -230,33 +203,10 @@ test_udev_rules_generator_output (void)
   g_assert_cmpint (exit_status, ==, 0);
   g_assert_nonnull (standard_output);
 
-  /* The same rule must require an unbound SPI device before scheduling
-   * module loading, driver_override or bind writes. */
-  line_start = strstr (standard_output,
-                       "ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", "
-                       "ENV{MODALIAS}==\"acpi:FTE3600:*\"");
-  g_assert_nonnull (line_start);
-
-  /* Extract the pattern directly from the generator output and verify semantics */
-  pattern_start = strstr (line_start, "ENV{MODALIAS}==\"") + strlen ("ENV{MODALIAS}==\"");
-  pattern_end = strchr (pattern_start, '"');
-  g_assert_nonnull (pattern_end);
-  extracted_pattern = g_strndup (pattern_start, pattern_end - pattern_start);
-  g_assert_cmpstr (extracted_pattern, ==, "acpi:FTE3600:*");
-
-  /* Must match single ACPI HID without _CID */
-  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:"));
-
-  /* Must match repeated ACPI _CID (as seen on Medion Akoya E3224) */
-  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:FTE3600:"));
-
-  /* Must match generic alternative _CID */
-  g_assert_true (g_pattern_match_simple (extracted_pattern, "acpi:FTE3600:PNP0C02:"));
-
-  /* Boundary checks: must NOT match longer HID or foreign devices */
-  g_assert_false (g_pattern_match_simple (extracted_pattern, "acpi:FTE36000:"));
-  g_assert_false (g_pattern_match_simple (extracted_pattern, "acpi:ELAN7001:"));
-  g_assert_false (g_pattern_match_simple (extracted_pattern, "spi:FTE3600"));
+  g_assert_nonnull (strstr (standard_output, "SUBSYSTEM==\"misc\", KERNEL==\"fte3600-*\""));
+  g_assert_nonnull (strstr (standard_output, "ATTR{fte3600_abi}==\"1\""));
+  g_assert_null (strstr (standard_output, "acpi:FTE3600:*"));
+  g_assert_null (strstr (standard_output, "driver_override"));
 }
 
 int
@@ -280,8 +230,8 @@ main (int   argc,
                         test_firmware_invalid);
   g_test_add_func ("/fte3600-driver/published-capabilities",
                    test_published_capabilities);
-  g_test_add_func ("/fte3600-driver/dmi-profile-lookup",
-                   test_dmi_profile_lookup);
+  g_test_add_func ("/fte3600-driver/sensor-identity",
+                   test_sensor_identity);
   g_test_add_func ("/fte3600-driver/udev-rule-pattern",
                    test_udev_rule_pattern);
   g_test_add_func ("/fte3600-driver/udev-rules-generator-output",

@@ -359,6 +359,149 @@ endif
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
 
 if 'fte3600' in drivers
+    test('fte3600-install-firmware', python3,
+        args: files('test-install-firmware.py'),
+        suite: ['unit-tests'], env: envs)
+
+    foreach chip, test_source : {
+        'fw9369': 'test-fte3600-fw9369-protocol.c',
+        'ft93xx': 'test-fte3600-ft93xx-protocol.c',
+        'ft9368': 'test-ft9368-protocol.c',
+    }
+        chip_protocol_test = executable('test-' + chip + '-protocol',
+            sources: [test_source, '../libfprint/drivers/fte3600-' + chip + '-protocol.c'],
+            dependencies: gio_dep,
+            include_directories: include_directories('../libfprint'),
+            c_args: common_cflags,
+            install: false,
+        )
+        test(chip + '-protocol', chip_protocol_test, suite: ['unit-tests'], env: envs)
+    endforeach
+
+    ft9368_backend_test = executable('test-ft9368-backend',
+        sources: ['test-ft9368-backend.c',
+                  '../libfprint/drivers/fte3600-ft9368.c',
+                  '../libfprint/drivers/fte3600-ft9368-protocol.c',
+                  '../libfprint/drivers/fte3600-ft9368-update.c',
+                  '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        link_args: ['-Wl,--wrap=fpi_spi_transfer_submit',
+                    '-Wl,--wrap=fpi_device_get_cancellable',
+                    '-Wl,--wrap=fpi_fte3600_firmware_load'],
+        install: false,
+    )
+    test('ft9368-backend', ft9368_backend_test, suite: ['unit-tests'], env: envs, timeout: 120)
+
+    fw9369_backend_test = executable('test-fw9369-backend',
+        sources: ['test-fw9369-backend.c',
+                  '../libfprint/drivers/fte3600-fw9369.c',
+                  '../libfprint/drivers/fte3600-fw9369-protocol.c'],
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        link_args: ['-Wl,--wrap=fpi_spi_transfer_submit',
+                    '-Wl,--wrap=fpi_device_get_cancellable',
+                    '-Wl,--wrap=fpi_device_get_current_action'],
+        install: false,
+    )
+    test('fw9369-backend', fw9369_backend_test, suite: ['unit-tests'], env: envs, timeout: 120)
+
+    ft93xx_backend_test = executable('test-ft93xx-backend',
+        sources: ['test-ft93xx-backend.c',
+                  '../libfprint/drivers/fte3600-ft93xx.c',
+                  '../libfprint/drivers/fte3600-ft93xx-protocol.c',
+                  '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('ft93xx-backend', ft93xx_backend_test, suite: ['unit-tests'], env: envs, timeout: 120)
+
+    legacy38_recovery_test = executable('test-legacy38-recovery',
+        sources: ['test-legacy38-recovery.c',
+                  '../libfprint/drivers/fte3600-legacy-recovery.c',
+                  '../libfprint/drivers/fte3600-legacy-recovery-protocol.c',
+                  '../libfprint/drivers/fte3600-protocol.c',
+                  '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        link_args: ['-Wl,--wrap=fpi_fte3600_firmware_load'],
+        install: false,
+    )
+    test('legacy38-recovery', legacy38_recovery_test, suite: ['unit-tests'], env: envs, timeout: 120)
+
+    fte3600_special_probe_test = executable('test-fte3600-special-probe',
+        sources: ['test-fte3600-special-probe.c',
+                  '../libfprint/drivers/fte3600-special-probe.c',
+                  '../libfprint/drivers/fte3600-fw9369-protocol.c',
+                  '../libfprint/drivers/fte3600-ft93xx-protocol.c',
+                  '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        link_args: ['-Wl,--wrap=fpi_ssm_next_state_delayed'],
+        install: false,
+    )
+    test('fte3600-special-probe', fte3600_special_probe_test,
+        suite: ['unit-tests'], env: envs, timeout: 120)
+
+    brisk_core_test = executable('test-brisk-core',
+        sources: 'test-brisk-core.c',
+        dependencies: brisk_core_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+    test('brisk-core', brisk_core_test, suite: ['unit-tests'], env: envs)
+
+    fte3600_protocol_test = executable('test-fte3600-protocol',
+        sources: ['test-fte3600-protocol.c', '../libfprint/drivers/fte3600-protocol.c'],
+        dependencies: gio_dep,
+        include_directories: include_directories('../libfprint'),
+        c_args: common_cflags,
+        install: false,
+    )
+    test('fte3600-protocol', fte3600_protocol_test, suite: ['unit-tests'], env: envs)
+
+    fte3600_sensor_test = executable('test-fte3600-sensor',
+        sources: ['test-fte3600-sensor.c', '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: glib_dep,
+        include_directories: include_directories('../libfprint'),
+        c_args: common_cflags,
+    )
+    test('fte3600-sensor', fte3600_sensor_test, suite: ['unit-tests'], env: envs)
+
+    fte3600_firmware_test = executable('test-fte3600-firmware',
+        sources: ['test-fte3600-firmware.c',
+                  '../libfprint/drivers/fte3600-firmware.c',
+                  '../libfprint/drivers/fte3600-sensor.c'],
+        dependencies: gio_dep,
+        include_directories: include_directories('../libfprint'),
+        c_args: common_cflags,
+        link_args: ['-Wl,--wrap=read', '-Wl,--wrap=__read_chk'],
+    )
+    test('fte3600-firmware', fte3600_firmware_test, suite: ['unit-tests'], env: envs)
+
+    fte3600_context_wraps = [
+        'fpi_get_driver_types', 'g_usb_context_new', 'g_udev_client_new',
+        'g_udev_client_query_by_subsystem', 'g_udev_device_get_parent',
+        'g_udev_device_get_device_file', 'g_udev_device_get_subsystem',
+        'g_udev_device_get_driver', 'g_udev_device_get_sysfs_attr', 'open', 'open64',
+    ]
+    fte3600_context_link_args = []
+    foreach symbol : fte3600_context_wraps
+        fte3600_context_link_args += '-Wl,--wrap=' + symbol
+    endforeach
+    fte3600_context_test = executable('test-fte3600-context',
+        sources: ['test-fte3600-context.c', '../libfprint/fp-context.c',
+                  '../libfprint/fp-device.c', '../libfprint/fp-image.c',
+                  '../libfprint/fp-print.c', fp_enums],
+        dependencies: deps,
+        include_directories: include_directories('../libfprint'),
+        link_with: [libfprint_private, libfprint_drivers],
+        link_args: fte3600_context_link_args,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+    )
+    test('fte3600-context', fte3600_context_test, suite: ['unit-tests'], env: envs)
+
     fte3600_driver_envs = envs
     fte3600_driver_deps = []
     if install_udev_rules
@@ -382,14 +525,7 @@ if 'fte3600' in drivers
 
     fte3600_mock_symbols = [
         'open', 'open64', 'close', 'ioctl', 'g_file_get_contents',
-        'g_udev_client_new', 'g_udev_client_query_by_subsystem',
-        'g_udev_device_get_device_file', 'g_udev_device_get_sysfs_path',
-        'gpiod_chip_open', 'gpiod_chip_close', 'gpiod_chip_request_lines',
-        'gpiod_line_request_release', 'gpiod_line_request_set_value',
-        'gpiod_line_request_get_fd', 'gpiod_line_request_wait_edge_events',
-        'gpiod_line_request_read_edge_events',
-        'gpiod_edge_event_buffer_get_event', 'gpiod_edge_event_get_event_type',
-        'gpiod_edge_event_get_line_offset',
+        'g_unix_fd_source_new',
     ]
     fte3600_mock_link_args = []
     if get_option('fte3600_personal_auth')
@@ -417,8 +553,9 @@ if 'fte3600' in drivers
         sources: [
             'test-fte3600-brisk.c',
             '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-match-profile.c',
         ],
-        dependencies: [glib_dep, mathlib_dep],
+        dependencies: brisk_core_dep,
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )
@@ -433,8 +570,9 @@ if 'fte3600' in drivers
             'test-fte3600-template.c',
             '../libfprint/drivers/fte3600-template.c',
             '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-match-profile.c',
         ],
-        dependencies: [glib_dep, mathlib_dep],
+        dependencies: brisk_core_dep,
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )
@@ -443,6 +581,36 @@ if 'fte3600' in drivers
         suite: ['unit-tests'],
         env: envs,
     )
+
+    fte3600_family_template_test = executable('test-fte3600-family-template',
+        sources: [
+            'test-fte3600-family-template.c',
+            '../libfprint/drivers/fte3600-template.c',
+            '../libfprint/drivers/fte3600-brisk.c',
+            '../libfprint/drivers/fte3600-match-profile.c',
+            '../libfprint/drivers/fte3600-sensor.c',
+        ],
+        dependencies: brisk_core_dep,
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-family-template', fte3600_family_template_test,
+        suite: ['unit-tests'], env: envs, timeout: 120)
+
+    fte3600_auth_lifecycle_test = executable('test-fte3600-auth-lifecycle',
+        sources: 'test-fte3600-auth-lifecycle.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        link_args: [
+            '-Wl,--wrap=open', '-Wl,--wrap=open64', '-Wl,--wrap=close',
+            '-Wl,--wrap=ioctl', '-Wl,--wrap=fpi_fte3600_backend_for_sensor',
+            '-Wl,--wrap=fpi_fte3600_discovery_new',
+        ],
+        c_args: common_cflags + fte3600_personal_auth_cflags,
+        install: false,
+    )
+    test('fte3600-auth-lifecycle', fte3600_auth_lifecycle_test,
+        suite: ['unit-tests'], env: envs, timeout: 120)
 
 endif
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # Safe, read-only hardware probe script for FTE3600 / FT9361 fingerprint sensors.
-# Collects non-biometric hardware topology to prepare a new Fte3600GpioProfile.
+# Collects non-biometric hardware topology to diagnose ACPI resource discovery.
 
 set -u
 
@@ -19,26 +19,13 @@ if [ -f /etc/os-release ]; then
   echo "- **Distribution:** ${PRETTY_NAME:-Linux}"
 fi
 
-if command -v pkg-config >/dev/null 2>&1; then
-  gpiod_ver=$(pkg-config --modversion libgpiod 2>/dev/null || true)
-  if [ -n "$gpiod_ver" ]; then
-    echo "- **libgpiod version:** $gpiod_ver"
-  else
-    echo "- **libgpiod version:** not found via pkg-config"
-  fi
-fi
-echo ""
-
-echo "### 2. DMI Identity"
-echo "\`\`\`"
-for node in sys_vendor product_name product_version board_name; do
-  path="/sys/class/dmi/id/$node"
-  if [ -f "$path" ]; then
-    val=$(cat "$path" 2>/dev/null || true)
-    printf "%-18s: %s\n" "$node" "$val"
-  fi
+echo "### 2. FTE3600 resource bridge"
+for node in /sys/class/misc/fte3600-*; do
+  [ -r "$node/fte3600_abi" ] || continue
+  echo "Node: /dev/$(basename "$node")"
+  echo "ABI: $(cat "$node/fte3600_abi")"
+  echo "SPI device: $(readlink -f "$node/device")"
 done
-echo "\`\`\`"
 echo ""
 
 echo "### 3. ACPI FTE3600 Discovery"
@@ -67,7 +54,7 @@ fi
 echo "\`\`\`"
 echo ""
 
-echo "### 4. SPI Bus & Buffer Status"
+echo "### 4. Legacy spidev status (not used by the bridge)"
 echo "\`\`\`"
 spidevs=$(ls -l /dev/spidev* 2>/dev/null || true)
 if [ -n "$spidevs" ]; then

@@ -1,5 +1,5 @@
 /*
- * Versioned clean-room BRISK template container for FocalTech FT9361
+ * Versioned BRISK template container for the FocalTech FTE3600 family
  *
  * Copyright (C) 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -19,9 +19,12 @@ G_BEGIN_DECLS
  * and reserved.  Each of the eight records has a u32 record size, u16 feature
  * count, u16 recomputed physical count, then 44-byte features containing three
  * IEEE binary32 values and a 32-byte descriptor.  Decoder limits include room
- * for twelve maximum-sized records for safe future parsing, while v1 strictly
- * requires eight and therefore cannot exceed CURRENT_MAX_WIRE_SIZE. */
+ * for twelve maximum-sized records for safe future parsing, while v1/v2
+ * strictly require eight and cannot exceed CURRENT_MAX_WIRE_SIZE. Wire v2
+ * preserves this layout, requires a registered model/geometry pair, and uses
+ * the final reserved u32 as the image-processing revision. */
 #define FTE3600_TEMPLATE_WIRE_VERSION 1
+#define FTE3600_TEMPLATE_PROFILE_WIRE_VERSION 2
 #define FTE3600_TEMPLATE_WIRE_HEADER_SIZE 40
 #define FTE3600_TEMPLATE_FEATURE_RECORD_SIZE 44
 #define FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES 8
@@ -67,6 +70,12 @@ typedef struct
  * use FE_TONEAREST and restore the caller's rounding mode before returning. */
 
 Fte3600Template *fpi_fte3600_template_new (void);
+/* New profile containers use wire v2: the same 40-byte header as v1, with
+ * model/width/height at offsets 16/18/20 and processing_version as a complete
+ * little-endian u32 at offset 36 (upper 16 bits must be zero). Old new() keeps
+ * wire v1 FT9361 and its canonical bytes. Both use extractor schema 3. */
+Fte3600Template *fpi_fte3600_template_new_for_profile (const Fte3600MatchProfile *profile);
+const Fte3600MatchProfile *fpi_fte3600_template_get_profile (const Fte3600Template *templ);
 Fte3600Template *fpi_fte3600_template_copy (const Fte3600Template *templ);
 void             fpi_fte3600_template_free (Fte3600Template *templ);
 
@@ -100,6 +109,14 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features (const Fte3600Templa
                                                              const Fte3600BriskFeatureSet *query,
                                                              Fte3600TemplateLoadPurpose    purpose,
                                                              Fte3600TemplateCompareResult *result);
+/* The untagged FeatureSet cannot identify its capture source. Drivers should
+ * use this entry point with the actual selected sensor profile; differing
+ * models are rejected even when their image geometries are identical. */
+Fte3600TemplateStatus fpi_fte3600_template_compare_features_for_profile (const Fte3600Template        *templ,
+                                                                         const Fte3600MatchProfile    *profile,
+                                                                         const Fte3600BriskFeatureSet *query,
+                                                                         Fte3600TemplateLoadPurpose    purpose,
+                                                                         Fte3600TemplateCompareResult *result);
 
 /* The mosaic is reconstructed in canonical order when enrollment completes.
  * Returns a borrowed reference, or NULL before completion/without a mosaic. */

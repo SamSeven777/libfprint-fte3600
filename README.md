@@ -1,18 +1,40 @@
-# Experimental FTE3600 / FT9361 Linux support
+# Experimental FTE3600 sensor-family Linux support
 
-This downstream libfprint fork implements SPI image capture, external RAM
-firmware recovery, and opt-in BRISK host-side enrollment/verification for the
-FT9361 sensor family. It is not a production-security or population-accuracy
-certification.
+This downstream libfprint fork implements runtime-selected SPI capture for
+FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 (silicon ID 9362) and
+FT9769 (9391/9392). It implements external RAM recovery for FT9348/FT9361,
+explicit FT9368 flash updates, and opt-in BRISK enrollment/verification for all
+eight identified chips. Templates are bound to the chip and image-processing
+profile; sharing the matcher does not make different sensors' templates interchangeable.
+FT9536 supports positively identified boot-A RAM recovery; FT9338-family boot-B
+recovery additionally requires a matching runtime identity observed during the
+current open. An unidentified blank FT9338 is not guessed from an absent reply.
+New paths have software test coverage, not hardware
+qualification or population-accuracy certification.
 
-| Platform | Current evidence |
-| --- | --- |
-| One-Netbook A1 | Maintainer-reported capture, enrollment, verification and cold-boot recovery; independent replication remains useful. |
-| GPD Pocket 3 | Experimental Jasper Lake/Tiger Lake profiles with distinct controller-HID routing; real-hardware validation is incomplete. |
-| Medion E3224 | Separate `medion-e3224` experiment, currently without a successful device-response/capture result. The same reported machine worked with an older Mint stack. |
+The transport now uses a small Linux ACPI resource bridge instead of a DMI
+model/pin whitelist. Reset and IRQ may reside on different controllers.
+Chip identity comes from repeated runtime/word-register responses or a
+ROM-family/OTP probe. Discovery can negotiate SPI chip-select polarity when
+ACPI describes it incorrectly, without a machine table. Eight catalogued chips
+now have capture backends across six protocol families. Each backend has its
+own initialization, raw framing and cleanup; this is not a claim that all
+eight have passed physical-device tests. See the [support matrix](docs/fte3600/architecture.md).
 
-See [hardware status](docs/fte3600/status.md) for exact routes and evidence limits.
-Do not infer pin safety or chip identity from `ACPI\FTE3600` alone.
+The [architecture](docs/fte3600/architecture.md) separates device lifecycle,
+wire protocol, reusable image matching and build policy. The
+[BRISK core](libfprint/matchers/brisk/README.md) accepts image dimensions and row
+stride, depends only on GLib and libm, and returns numerical match evidence.
+FTE3600 template compatibility and authentication decisions live in adapters.
+New enrollments use a versioned sensor-aware template; existing compatible
+wire-v1 FT9361 templates remain readable. Earlier wire-v2 templates with
+diagnostic policy 6 / authentication policy 7 require re-enrollment after the
+rotation and mosaic-quality corrections. See [family authentication](docs/fte3600/family-authentication.md).
+
+See [dynamic discovery](docs/fte3600/dynamic-discovery.md) for the new module,
+installation/migration, protocol limits and test evidence. Historical A1/GPD/
+Medion observations in [hardware status](docs/fte3600/status.md) do not validate
+this new transport on those machines.
 
 ## Build and use
 
@@ -29,6 +51,7 @@ experimental biometric authentication for system-wide sudo or root access.
 - [Security and privacy](SECURITY.md)
 - [Troubleshooting](docs/fte3600/troubleshooting.md)
 - [Implementation and provenance](docs/fte3600/clean-room.md)
+- [Windows hardware and protocol inventory](docs/fte3600/windows-hardware-inventory.md)
 - [Contributing](CONTRIBUTING.md)
 
 The host code is independently written under LGPL-2.1-or-later and does not run

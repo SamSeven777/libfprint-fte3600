@@ -1,5 +1,5 @@
 /*
- * Clean-room BRISK-style feature matcher prototype for the FocalTech FT9361
+ * Sensor-parameterized BRISK adapter for the FocalTech FTE3600 family
  *
  * Copyright (C) 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -7,10 +7,14 @@
 
 #pragma once
 
-#include <glib.h>
+#include "../matchers/brisk/brisk.h"
+#include "fte3600-build-config.h"
+#include "fte3600-match-profile.h"
 
 G_BEGIN_DECLS
 
+/* Wire-v1/legacy API compatibility only. Modern profile calls pass their
+* native image geometry and never use these as a reference image size. */
 #define FTE3600_BRISK_WIDTH 64
 #define FTE3600_BRISK_HEIGHT 80
 #define FTE3600_BRISK_IMAGE_SIZE (FTE3600_BRISK_WIDTH * FTE3600_BRISK_HEIGHT)
@@ -20,14 +24,14 @@ G_BEGIN_DECLS
 #define FTE3600_BRISK_MOSAIC_ANCHOR_X 64.0f
 #define FTE3600_BRISK_MOSAIC_ANCHOR_Y 80.0f
 
-#define FTE3600_BRISK_PATTERN_POINTS 45
-#define FTE3600_BRISK_DESCRIPTOR_BITS 256
-#define FTE3600_BRISK_DESCRIPTOR_BYTES (FTE3600_BRISK_DESCRIPTOR_BITS / 8)
-#define FTE3600_BRISK_MAX_FEATURES 160
+#define FTE3600_BRISK_PATTERN_POINTS FPI_BRISK_PATTERN_POINTS
+#define FTE3600_BRISK_DESCRIPTOR_BITS FPI_BRISK_DESCRIPTOR_BITS
+#define FTE3600_BRISK_DESCRIPTOR_BYTES FPI_BRISK_DESCRIPTOR_BYTES
+#define FTE3600_BRISK_MAX_FEATURES FPI_BRISK_MAX_FEATURES
 /* Inclusive representable orientation domain for schema v1.  Extractor
  * output is a gfloat, so validation uses this binary32 boundary rather than a
  * narrower binary64 approximation of pi. */
-#define FTE3600_BRISK_ORIENTATION_LIMIT ((gfloat) 3.14159265358979323846)
+#define FTE3600_BRISK_ORIENTATION_LIMIT FPI_BRISK_ORIENTATION_LIMIT
 
 /*
  * This version covers the complete extractor schema, including image scaling,
@@ -50,12 +54,10 @@ G_BEGIN_DECLS
  * lengths, and IEEE binary32 encoding; this structure must never be memcpy'd
  * to persistent storage.
  */
-#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION 3
+#define FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION FPI_BRISK_EXTRACTOR_SCHEMA_VERSION
 #define FTE3600_BRISK_DESCRIPTOR_VERSION FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION
-#define FTE3600_BRISK_PAIR_SEED ((guint32) 0x46544231u)
-#define FTE3600_BRISK_PAIR_TABLE_SHA256      \
-  "89a0eb6d633305294aeb095acaef2b87"     \
-  "2237ebd4499ea1bab68f403f791f21d8"
+#define FTE3600_BRISK_PAIR_SEED FPI_BRISK_PAIR_SEED
+#define FTE3600_BRISK_PAIR_TABLE_SHA256 FPI_BRISK_PAIR_TABLE_SHA256
 
 /* No population FAR/FRR calibration exists for this prototype.  The optional
  * personal policy is an explicit local opt-in which reuses the frozen strict
@@ -77,12 +79,6 @@ G_BEGIN_DECLS
  * version 3 retains those uncalibrated gates for contrast-normalized input;
  * version 5 adds canonical mosaic comparison to the eight-sample gallery.
  * Diagnostic version 4 belongs to the separate Pocket policy. */
-#ifndef FTE3600_ENABLE_PERSONAL_AUTH
-#define FTE3600_ENABLE_PERSONAL_AUTH 0
-#endif
-#if FTE3600_ENABLE_PERSONAL_AUTH != 0 && FTE3600_ENABLE_PERSONAL_AUTH != 1
-#error "FTE3600_ENABLE_PERSONAL_AUTH must be zero or one"
-#endif
 #define FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION 5
 #if FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 6
@@ -90,68 +86,63 @@ G_BEGIN_DECLS
 #define FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION 0
 #endif
 #define FTE3600_BRISK_THRESHOLDS_CALIBRATED 0
+/* Family policy 8/diagnostic 7 uses rotation-invariant principal variances.
+ * The minor/major variance ratio is compensated by (long/short sensor side)^2
+ * and capped at one. Minimum principal spreads replace axis/grid gates.
+ * Policy 7/diagnostic 6 used axis-scaled covariance and is not compatible.
+ * Neither policy has population FAR/FRR calibration. */
+#define FTE3600_BRISK_FAMILY_DIAGNOSTIC_POLICY_VERSION 7
+#if FTE3600_ENABLE_PERSONAL_AUTH
+#define FTE3600_BRISK_FAMILY_AUTHENTICATION_POLICY_VERSION 8
+#else
+#define FTE3600_BRISK_FAMILY_AUTHENTICATION_POLICY_VERSION 0
+#endif
 G_STATIC_ASSERT (FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION ==
                  (FTE3600_ENABLE_PERSONAL_AUTH ? 6 : 0));
-#define FTE3600_BRISK_MAX_HAMMING 64
-#define FTE3600_BRISK_RATIO_PERCENT 80
-#define FTE3600_BRISK_MIN_HAMMING_MARGIN 8
-#define FTE3600_BRISK_MIN_MUTUAL_MATCHES 5
+#define FTE3600_BRISK_MAX_HAMMING FPI_BRISK_MAX_HAMMING
+#define FTE3600_BRISK_RATIO_PERCENT FPI_BRISK_RATIO_PERCENT
+#define FTE3600_BRISK_MIN_HAMMING_MARGIN FPI_BRISK_MIN_HAMMING_MARGIN
+#define FTE3600_BRISK_MIN_MUTUAL_MATCHES FPI_BRISK_MIN_MUTUAL_MATCHES
 #define FTE3600_BRISK_MIN_INLIERS 5
 
-typedef enum {
-  FTE3600_BRISK_OK,
-  FTE3600_BRISK_INVALID_ARGUMENT,
-  FTE3600_BRISK_LOW_CONTRAST,
-  FTE3600_BRISK_INSUFFICIENT_FEATURES,
-  FTE3600_BRISK_NO_CONSENSUS,
-} Fte3600BriskStatus;
-
-/* Deliberately kept at the vendor-observed conceptual size without copying
- * the vendor representation or serialized format. */
-typedef struct
-{
-  gfloat x;
-  gfloat y;
-  gfloat orientation;
-  guint8 descriptor[FTE3600_BRISK_DESCRIPTOR_BYTES];
-} Fte3600BriskFeature;
-
-G_STATIC_ASSERT (sizeof (Fte3600BriskFeature) == 44);
+typedef FpiBriskStatus         Fte3600BriskStatus;
+typedef FpiBriskFeature        Fte3600BriskFeature;
+typedef FpiBriskFeatureSet     Fte3600BriskFeatureSet;
+typedef FpiBriskCorrespondence Fte3600BriskCorrespondence;
+#define FTE3600_BRISK_OK FPI_BRISK_OK
+#define FTE3600_BRISK_INVALID_ARGUMENT FPI_BRISK_INVALID_ARGUMENT
+#define FTE3600_BRISK_LOW_CONTRAST FPI_BRISK_LOW_CONTRAST
+#define FTE3600_BRISK_INSUFFICIENT_FEATURES FPI_BRISK_INSUFFICIENT_FEATURES
+#define FTE3600_BRISK_NO_CONSENSUS FPI_BRISK_NO_CONSENSUS
 
 typedef struct
 {
-  guint               extractor_schema_version;
-  guint               n_features;
-  Fte3600BriskFeature features[FTE3600_BRISK_MAX_FEATURES];
-} Fte3600BriskFeatureSet;
-
-typedef struct
-{
-  guint   query_index;
-  guint   reference_index;
-  guint16 hamming;
-} Fte3600BriskCorrespondence;
-
-typedef struct
-{
-  guint    mutual_matches;
-  guint    inliers;
-  guint    competing_inliers;
-  guint    occupied_cells;
-  guint    occupied_quadrants;
-  gdouble  inlier_ratio;
-  gdouble  mean_hamming;
-  gdouble  rms_error;
-  gdouble  median_error;
-  gdouble  angle;
-  gdouble  translate_x;
-  gdouble  translate_y;
-  gdouble  x_span;
-  gdouble  y_span;
-  gdouble  query_min_variance;
-  gdouble  query_anisotropy;
-  gdouble  reference_min_variance;
-  gdouble  reference_anisotropy;
+  guint   mutual_matches;
+  guint   inliers;
+  guint   competing_inliers;
+  guint   occupied_cells;
+  guint   occupied_quadrants;
+  gdouble inlier_ratio;
+  gdouble mean_hamming;
+  gdouble rms_error;
+  gdouble median_error;
+  gdouble angle;
+  gdouble translate_x;
+  gdouble translate_y;
+  gdouble x_span;
+  gdouble y_span;
+  gdouble query_min_variance;
+  gdouble query_anisotropy;
+  gdouble reference_min_variance;
+  gdouble reference_anisotropy;
+  /* Family policy: min(1, raw eigenvalue ratio * (long / short side)^2).
+   * The same sensor aspect ratio applies to a mosaic; its storage canvas
+   * does not change pixel scale. Legacy API results preserve raw ratios. */
+  gdouble  normalized_query_anisotropy;
+  gdouble  normalized_reference_anisotropy;
+  /* Family policy only; major principal variances in pixel squared. */
+  gdouble  query_max_variance;
+  gdouble  reference_max_variance;
   gboolean diagnostic_policy_passed;
   gboolean authentication_accepted;
 } Fte3600BriskMatchResult;
@@ -178,6 +169,26 @@ Fte3600BriskStatus fpi_fte3600_brisk_describe_at (const guint8        *image,
 Fte3600BriskStatus fpi_fte3600_brisk_extract (const guint8           *image,
                                               gsize                   length,
                                               Fte3600BriskFeatureSet *features);
+
+Fte3600BriskStatus fpi_fte3600_brisk_extract_for_profile (const Fte3600MatchProfile *profile,
+                                                          const FpiBriskImage       *image,
+                                                          Fte3600BriskFeatureSet    *features);
+gboolean fpi_fte3600_brisk_validate_feature_set_for_profile (const Fte3600MatchProfile    *profile,
+                                                             const Fte3600BriskFeatureSet *features,
+                                                             guint                        *physical_count);
+gboolean fpi_fte3600_brisk_validate_mosaic_feature_set_for_profile (const Fte3600MatchProfile    *profile,
+                                                                    const Fte3600BriskFeatureSet *features,
+                                                                    guint                        *physical_count);
+Fte3600BriskStatus fpi_fte3600_brisk_match_for_profile (const Fte3600MatchProfile    *profile,
+                                                        const Fte3600BriskFeatureSet *query,
+                                                        const Fte3600BriskFeatureSet *reference,
+                                                        Fte3600BriskMatchResult      *result);
+Fte3600BriskStatus fpi_fte3600_brisk_match_mosaic_for_profile (const Fte3600MatchProfile    *profile,
+                                                               const Fte3600BriskFeatureSet *query,
+                                                               const Fte3600BriskFeatureSet *mosaic,
+                                                               Fte3600BriskMatchResult      *result);
+guint16 fpi_fte3600_brisk_diagnostic_policy_version (const Fte3600MatchProfile *profile);
+guint16 fpi_fte3600_brisk_authentication_policy_version (const Fte3600MatchProfile *profile);
 
 /* Validate the extractor schema and every feature's finite coordinate and
  * orientation range.  If requested, @physical_count receives the number of

@@ -1,5 +1,5 @@
 /*
- * Versioned clean-room BRISK template container for FocalTech FT9361
+ * Versioned BRISK template container for the FocalTech FTE3600 family
  *
  * Copyright (C) 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TEMPLATE_MODEL_ID 0x9361
 #define TEMPLATE_SUBTEMPLATE_HEADER_SIZE 8
 
 static const guint8 template_magic[8] = {
@@ -48,11 +47,37 @@ typedef struct
 
 struct _Fte3600Template
 {
-  guint                  n_subtemplates;
-  CanonicalSubtemplate   subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
-  gboolean               has_mosaic;
-  Fte3600BriskFeatureSet mosaic;
+  const Fte3600MatchProfile *profile;
+  guint16                    wire_version;
+  guint                      n_subtemplates;
+  CanonicalSubtemplate       subtemplates[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES];
+  gboolean                   has_mosaic;
+  Fte3600BriskFeatureSet     mosaic;
 };
+
+static guint16
+template_authentication_policy (const Fte3600Template *templ)
+{
+  return templ->wire_version == FTE3600_TEMPLATE_WIRE_VERSION ?
+         FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION :
+         fpi_fte3600_brisk_authentication_policy_version (templ->profile);
+}
+
+static Fte3600BriskStatus
+template_match (const Fte3600Template        *templ,
+                const Fte3600BriskFeatureSet *query,
+                const Fte3600BriskFeatureSet *reference,
+                gboolean                      mosaic,
+                Fte3600BriskMatchResult      *result)
+{
+  /* Wire v1 preserves the historical FT9361 raw-coordinate policy. Every
+   * modern profile follows the same principal-axis geometry policy. */
+  if (templ->wire_version == FTE3600_TEMPLATE_WIRE_VERSION)
+    return mosaic ? fpi_fte3600_brisk_match_mosaic (query, reference, result) :
+           fpi_fte3600_brisk_match (query, reference, result);
+  return mosaic ? fpi_fte3600_brisk_match_mosaic_for_profile (templ->profile, query, reference, result) :
+         fpi_fte3600_brisk_match_for_profile (templ->profile, query, reference, result);
+}
 
 static void
 template_secure_clear (gpointer data,
@@ -213,7 +238,8 @@ same_location (const Fte3600BriskFeature *first,
 }
 
 static FeatureSetValidation
-canonicalize_feature_set (const Fte3600BriskFeatureSet *source,
+canonicalize_feature_set (const Fte3600MatchProfile    *profile,
+                          const Fte3600BriskFeatureSet *source,
                           CanonicalSubtemplate         *canonical)
 {
   guint public_physical_count;
@@ -225,7 +251,7 @@ canonicalize_feature_set (const Fte3600BriskFeatureSet *source,
   if (source->extractor_schema_version !=
       FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION)
     return FEATURE_SET_UNSUPPORTED_EXTRACTOR;
-  if (!fpi_fte3600_brisk_validate_feature_set (source, &public_physical_count))
+  if (!fpi_fte3600_brisk_validate_feature_set_for_profile (profile, source, &public_physical_count))
     return FEATURE_SET_INVALID;
 
   canonical->features.extractor_schema_version =
@@ -334,7 +360,31 @@ validation_to_status (FeatureSetValidation validation)
 Fte3600Template *
 fpi_fte3600_template_new (void)
 {
-  return g_new0 (Fte3600Template, 1);
+  Fte3600Template *templ = fpi_fte3600_template_new_for_profile (
+    fpi_fte3600_match_profile_get (FTE3600_SENSOR_FT9361));
+
+  templ->wire_version = FTE3600_TEMPLATE_WIRE_VERSION;
+  return templ;
+}
+
+Fte3600Template *
+fpi_fte3600_template_new_for_profile (const Fte3600MatchProfile *profile)
+{
+  Fte3600Template *templ;
+
+  profile = fpi_fte3600_match_profile_resolve (profile);
+  if (!profile)
+    return NULL;
+  templ = g_new0 (Fte3600Template, 1);
+  templ->profile = profile;
+  templ->wire_version = FTE3600_TEMPLATE_PROFILE_WIRE_VERSION;
+  return templ;
+}
+
+const Fte3600MatchProfile *
+fpi_fte3600_template_get_profile (const Fte3600Template *templ)
+{
+  return templ ? templ->profile : NULL;
 }
 
 Fte3600Template *
@@ -402,8 +452,8 @@ template_stitch_sample (Fte3600Template              *templ,
       if (orient_m > FTE3600_BRISK_ORIENTATION_LIMIT)
         orient_m = -FTE3600_BRISK_ORIENTATION_LIMIT;
 
-      if (xm < 0.0 || xm >= FTE3600_BRISK_MOSAIC_WIDTH ||
-          ym < 0.0 || ym >= FTE3600_BRISK_MOSAIC_HEIGHT)
+      if (xm < 0.0 || xm >= 3u * templ->profile->width ||
+          ym < 0.0 || ym >= 3u * templ->profile->height)
         continue;
 
       /* Check for duplicates in existing mosaic (within 2.5px & Hamming <= 40) */
@@ -456,8 +506,8 @@ template_reconstruct_mosaic (Fte3600Template *templ)
   /* Both enrollment completion and decoding supply the same canonical order.
    * Fusion retains the first descriptor and averages coordinates, so changing
    * this order would change the reconstructed authentication reference. */
-  poses[0].translate_x = FTE3600_BRISK_MOSAIC_ANCHOR_X;
-  poses[0].translate_y = FTE3600_BRISK_MOSAIC_ANCHOR_Y;
+  poses[0].translate_x = templ->profile->width;
+  poses[0].translate_y = templ->profile->height;
   template_stitch_sample (templ, &templ->subtemplates[0].features,
                           poses[0].angle,
                           poses[0].translate_x,
@@ -485,10 +535,15 @@ template_reconstruct_mosaic (Fte3600Template *templ)
               Fte3600BriskMatchResult match;
               Fte3600BriskStatus status;
 
-              status = fpi_fte3600_brisk_match (&templ->subtemplates[u].features,
-                                                &templ->subtemplates[a].features,
-                                                &match);
-              if (status == FTE3600_BRISK_OK && match.inliers >= FTE3600_BRISK_MIN_INLIERS)
+              status = template_match (templ, &templ->subtemplates[u].features,
+                                       &templ->subtemplates[a].features,
+                                       FALSE, &match);
+              /* Wire v1 keeps its historical reconstruction semantics.
+               * Modern mosaics may only inherit coordinates/descriptors
+               * through a connection which passes the complete pair gate. */
+              if (status == FTE3600_BRISK_OK &&
+                  (templ->wire_version == FTE3600_TEMPLATE_WIRE_VERSION ?
+                   match.inliers >= FTE3600_BRISK_MIN_INLIERS : match.diagnostic_policy_passed))
                 {
                   if (!found_match || match_is_better (&match, &best_match))
                     {
@@ -552,9 +607,9 @@ fpi_fte3600_template_add_features (Fte3600Template              *templ,
     memset (nearest_match, 0, sizeof (*nearest_match));
   if (!template_rounding_guard_enter (&rounding_guard))
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  validation = canonicalize_feature_set (features, &candidate);
   if (templ == NULL)
     return FTE3600_TEMPLATE_INVALID_WIRE;
+  validation = canonicalize_feature_set (templ->profile, features, &candidate);
   if (validation != FEATURE_SET_VALID)
     return validation_to_status (validation);
   if (templ->n_subtemplates > FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
@@ -566,8 +621,8 @@ fpi_fte3600_template_add_features (Fte3600Template              *templ,
 
       duplicate |=
         subtemplate_compare (&candidate, &templ->subtemplates[i]) == 0;
-      (void) fpi_fte3600_brisk_match (&candidate.features,
-                                      &templ->subtemplates[i].features, &match);
+      (void) template_match (templ, &candidate.features,
+                             &templ->subtemplates[i].features, FALSE, &match);
 #if FTE3600_ENABLE_PERSONAL_AUTH
       consistent |= match.authentication_accepted;
 #endif
@@ -633,7 +688,7 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
   for (guint i = 0; i < templ->n_subtemplates; i++)
     {
       const FeatureSetValidation validation =
-        canonicalize_feature_set (&templ->subtemplates[i].features, &sorted[i]);
+        canonicalize_feature_set (templ->profile, &templ->subtemplates[i].features, &sorted[i]);
 
       if (validation != FEATURE_SET_VALID)
         return validation_to_status (validation);
@@ -652,18 +707,22 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
 
   data = g_malloc0 (total_size);
   memcpy (data, template_magic, sizeof (template_magic));
-  put_uint16_le (&data[8], FTE3600_TEMPLATE_WIRE_VERSION);
+  put_uint16_le (&data[8], templ->wire_version);
   put_uint16_le (&data[10], FTE3600_TEMPLATE_WIRE_HEADER_SIZE);
   put_uint32_le (&data[12], total_size);
-  put_uint16_le (&data[16], TEMPLATE_MODEL_ID);
-  put_uint16_le (&data[18], FTE3600_BRISK_WIDTH);
-  put_uint16_le (&data[20], FTE3600_BRISK_HEIGHT);
+  put_uint16_le (&data[16], templ->profile->model);
+  put_uint16_le (&data[18], templ->profile->width);
+  put_uint16_le (&data[20], templ->profile->height);
   put_uint16_le (&data[22], FTE3600_TEMPLATE_FEATURE_RECORD_SIZE);
   put_uint16_le (&data[24], FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION);
-  put_uint16_le (&data[26], FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION);
-  put_uint16_le (&data[28], FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION);
+  put_uint16_le (&data[26], templ->wire_version == FTE3600_TEMPLATE_WIRE_VERSION ?
+                 FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION :
+                 fpi_fte3600_brisk_diagnostic_policy_version (templ->profile));
+  put_uint16_le (&data[28], template_authentication_policy (templ));
   put_uint16_le (&data[30], FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
-  /* flags and reserved are already the canonical all-zero representation. */
+  /* Flags remain zero; v1 reserves all four bytes of processing metadata. */
+  if (templ->wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION)
+    put_uint32_le (&data[36], templ->profile->processing_version);
 
   offset = FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   for (guint sample = 0; sample < G_N_ELEMENTS (sorted); sample++)
@@ -695,34 +754,48 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
 }
 
 static Fte3600TemplateStatus
-validate_header (const guint8 *data,
-                 gsize         size)
+validate_header (const guint8               *data,
+                 gsize                       size,
+                 const Fte3600MatchProfile **profile)
 {
+  guint16 version;
+  const Fte3600MatchProfile *identified;
+
   if (size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
       size > FTE3600_TEMPLATE_MAX_WIRE_SIZE ||
       memcmp (data, template_magic, sizeof (template_magic)) != 0)
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  if (get_uint16_le (&data[8]) != FTE3600_TEMPLATE_WIRE_VERSION)
+  version = get_uint16_le (&data[8]);
+  if (version != FTE3600_TEMPLATE_WIRE_VERSION &&
+      version != FTE3600_TEMPLATE_PROFILE_WIRE_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA;
+  identified = fpi_fte3600_match_profile_find (get_uint16_le (&data[16]));
+  if (!identified ||
+      (version == FTE3600_TEMPLATE_WIRE_VERSION && identified->sensor != FTE3600_SENSOR_FT9361))
+    return FTE3600_TEMPLATE_INVALID_WIRE;
   if (get_uint16_le (&data[10]) != FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
       get_uint32_le (&data[12]) != size ||
-      get_uint16_le (&data[16]) != TEMPLATE_MODEL_ID ||
-      get_uint16_le (&data[18]) != FTE3600_BRISK_WIDTH ||
-      get_uint16_le (&data[20]) != FTE3600_BRISK_HEIGHT ||
+      get_uint16_le (&data[18]) != identified->width ||
+      get_uint16_le (&data[20]) != identified->height ||
       get_uint16_le (&data[22]) != FTE3600_TEMPLATE_FEATURE_RECORD_SIZE ||
       get_uint16_le (&data[30]) != FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ||
-      get_uint32_le (&data[32]) != 0 || get_uint32_le (&data[36]) != 0)
+      get_uint32_le (&data[32]) != 0 ||
+      get_uint32_le (&data[36]) !=
+      (version == FTE3600_TEMPLATE_WIRE_VERSION ? 0 : identified->processing_version))
     return FTE3600_TEMPLATE_INVALID_WIRE;
   if (get_uint16_le (&data[24]) !=
       FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
   if (get_uint16_le (&data[26]) !=
-      FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION ||
+      (version == FTE3600_TEMPLATE_WIRE_VERSION ? FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION :
+       fpi_fte3600_brisk_diagnostic_policy_version (identified)) ||
       get_uint16_le (&data[28]) !=
-      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION)
+      (version == FTE3600_TEMPLATE_WIRE_VERSION ? FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION :
+       fpi_fte3600_brisk_authentication_policy_version (identified)))
     return FTE3600_TEMPLATE_UNSUPPORTED_POLICY;
   if (size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
     return FTE3600_TEMPLATE_INVALID_WIRE;
+  *profile = identified;
   return FTE3600_TEMPLATE_OK;
 }
 
@@ -737,6 +810,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   gsize offset = FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   g_autoptr(Fte3600Template) decoded = NULL;
   Fte3600TemplateStatus status;
+  const Fte3600MatchProfile *profile = NULL;
 
   if (templ != NULL)
     *templ = NULL;
@@ -747,11 +821,12 @@ fpi_fte3600_template_decode (GBytes                    *wire,
        purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION))
     return FTE3600_TEMPLATE_INVALID_WIRE;
   data = g_bytes_get_data (wire, &size);
-  status = validate_header (data, size);
+  status = validate_header (data, size, &profile);
   if (status != FTE3600_TEMPLATE_OK)
     return status;
 
-  decoded = fpi_fte3600_template_new ();
+  decoded = get_uint16_le (&data[8]) == FTE3600_TEMPLATE_WIRE_VERSION ?
+            fpi_fte3600_template_new () : fpi_fte3600_template_new_for_profile (profile);
   for (guint sample = 0;
        sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
     {
@@ -801,7 +876,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
           offset += FTE3600_TEMPLATE_FEATURE_RECORD_SIZE;
         }
 
-      if (canonicalize_feature_set (&parsed.features, &canonical) !=
+      if (canonicalize_feature_set (profile, &parsed.features, &canonical) !=
           FEATURE_SET_VALID || canonical.physical_count != stored_physical_count)
         return FTE3600_TEMPLATE_INVALID_WIRE;
       for (guint i = 0; i < feature_count; i++)
@@ -821,7 +896,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
   template_reconstruct_mosaic (decoded);
 
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
-      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
+      template_authentication_policy (decoded) == 0)
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
   *templ = g_steal_pointer (&decoded);
   return FTE3600_TEMPLATE_OK;
@@ -845,13 +920,13 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
     }
   if (!template_rounding_guard_enter (&rounding_guard))
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  validation = canonicalize_feature_set (query, &canonical_query);
   if (templ == NULL || result == NULL || !fpi_fte3600_template_is_ready (templ) ||
       (purpose != FTE3600_TEMPLATE_LOAD_DIAGNOSTIC &&
        purpose != FTE3600_TEMPLATE_LOAD_AUTHENTICATION))
     return FTE3600_TEMPLATE_INVALID_WIRE;
+  validation = canonicalize_feature_set (templ->profile, query, &canonical_query);
   if (purpose == FTE3600_TEMPLATE_LOAD_AUTHENTICATION &&
-      FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION == 0)
+      template_authentication_policy (templ) == 0)
     return FTE3600_TEMPLATE_NOT_CALIBRATED;
   if (validation != FEATURE_SET_VALID)
     return validation_to_status (validation);
@@ -860,8 +935,8 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
     {
       Fte3600BriskMatchResult match;
 
-      (void) fpi_fte3600_brisk_match (&canonical_query.features,
-                                      &templ->subtemplates[i].features, &match);
+      (void) template_match (templ, &canonical_query.features,
+                             &templ->subtemplates[i].features, FALSE, &match);
       result->n_compared++;
       if (match.diagnostic_policy_passed)
         result->diagnostic_passes++;
@@ -881,9 +956,9 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
       Fte3600BriskMatchResult mosaic_match;
 
       result->n_compared++;
-      if (fpi_fte3600_brisk_match_mosaic (&canonical_query.features,
-                                          &templ->mosaic,
-                                          &mosaic_match) == FTE3600_BRISK_OK)
+      if (template_match (templ, &canonical_query.features,
+                          &templ->mosaic, TRUE,
+                          &mosaic_match) == FTE3600_BRISK_OK)
         {
           if (mosaic_match.diagnostic_policy_passed)
             result->diagnostic_passes++;
@@ -906,4 +981,24 @@ fpi_fte3600_template_compare_features (const Fte3600Template        *templ,
   if (purpose == FTE3600_TEMPLATE_LOAD_DIAGNOSTIC)
     result->authentication_accepted = FALSE;
   return FTE3600_TEMPLATE_OK;
+}
+
+Fte3600TemplateStatus
+fpi_fte3600_template_compare_features_for_profile (const Fte3600Template        *templ,
+                                                   const Fte3600MatchProfile    *profile,
+                                                   const Fte3600BriskFeatureSet *query,
+                                                   Fte3600TemplateLoadPurpose    purpose,
+                                                   Fte3600TemplateCompareResult *result)
+{
+  profile = fpi_fte3600_match_profile_resolve (profile);
+  if (!templ || !profile || templ->profile != profile)
+    {
+      if (result)
+        {
+          memset (result, 0, sizeof (*result));
+          result->best_subtemplate = FTE3600_TEMPLATE_SUBTEMPLATE_NONE;
+        }
+      return FTE3600_TEMPLATE_INVALID_WIRE;
+    }
+  return fpi_fte3600_template_compare_features (templ, query, purpose, result);
 }

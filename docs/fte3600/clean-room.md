@@ -12,6 +12,14 @@ or establish a formally documented clean-room separation. Contributions must
 identify their sources and must not copy vendor code, decompiler listings,
 firmware, or private biometric material into the repository.
 
+## Resource and chip discovery
+
+The independent GPL-2.0-only kernel bridge consumes standard Linux ACPI GPIO
+and SPI interfaces. Its shared ioctl layout is MIT-licensed. The LGPL host
+driver no longer contains machine/controller/pin profiles. Technical sources
+and the supported subset are documented in [dynamic discovery](dynamic-discovery.md).
+This does not assert a formally separated clean-room process.
+
 ## Why a host matcher
 
 The FT9361 provides small 64 × 80 images. The author reports that the existing

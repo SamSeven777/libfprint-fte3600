@@ -150,7 +150,7 @@ drivers_info = {
 
     # SPI drivers (fte3600 is optional/experimental)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
-    'fte3600': { 'spi': true, 'helper': ['udev', 'gpiod'], 'optional': true },
+    'fte3600': { 'spi': true, 'helper': ['udev'], 'optional': true },
 
     # Virtual drivers (test-only, optional)
     'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },
@@ -278,15 +278,6 @@ foreach i : driver_helpers
         libfprint_conf.set10('HAVE_UDEV', true)
 
         optional_deps += gudev_dep
-    elif i == 'gpiod'
-        gpiod_dep = dependency('libgpiod', version: '>= 2.0', required: false)
-        if not gpiod_dep.found()
-            error('libgpiod >= 2.0 is required for @0@ and possibly others'.format(driver))
-        endif
-
-        libfprint_conf.set10('HAVE_GPIOD', true)
-
-        optional_deps += gpiod_dep
     endif
 endforeach
 

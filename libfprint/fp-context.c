@@ -478,6 +478,7 @@ fp_context_enumerate (FpContext *context)
      */
 
     g_autoptr(GList) spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
+    g_autoptr(GList) bridge_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
     g_autoptr(GList) hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
 
     /* for each potential driver, try to match all requested resources. */
@@ -507,6 +508,29 @@ fp_context_enumerate (FpContext *context)
                 /* If match was not found exit */
                 if (matched_spidev == NULL)
                   continue;
+              }
+            if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
+              {
+                for (GList *iter = bridge_devices; iter; iter = iter->next)
+                  {
+                    GUdevDevice *node = iter->data;
+                    g_autoptr(GUdevDevice) parent = g_udev_device_get_parent (node);
+                    const gchar *path = g_udev_device_get_device_file (node);
+
+                    if (!parent || !path || !g_path_is_absolute (path) ||
+                        g_strcmp0 (g_udev_device_get_subsystem (parent), "spi") != 0 ||
+                        g_strcmp0 (g_udev_device_get_driver (parent), "fte3600") != 0 ||
+                        g_strcmp0 (g_udev_device_get_sysfs_attr (node, "fte3600_abi"), "1") != 0)
+                      continue;
+                    priv->pending_devices++;
+                    g_async_initable_new_async (driver, G_PRIORITY_LOW,
+                                                priv->cancellable,
+                                                async_device_init_done_cb, context,
+                                                "fpi-driver-data", entry->driver_data,
+                                                "fpi-udev-data-spidev", path,
+                                                NULL);
+                  }
+                continue;
               }
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
               {
@@ -556,6 +580,7 @@ fp_context_enumerate (FpContext *context)
 
     /* free all unused elemnts in both lists */
     g_list_foreach (spidev_devices, (GFunc) g_object_unref, NULL);
+    g_list_foreach (bridge_devices, (GFunc) g_object_unref, NULL);
     g_list_foreach (hidraw_devices, (GFunc) g_object_unref, NULL);
   }
 #endif

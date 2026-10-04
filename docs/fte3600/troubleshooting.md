@@ -2,37 +2,34 @@
 
 ## Discovery
 
-Check `ls -l /dev/spidev* /dev/gpiochip*`, the DMI vendor/product strings and
-reviewed `journalctl -u fprintd.service -b` output. Compare exact values with
-[hardware status](status.md). Unknown DMI or a required unsupported/missing GPIO
-controller HID should be rejected. Do not bypass this check or guess pin numbers.
+Check `ls -l /dev/fte3600-*`, `/sys/class/misc/fte3600-*/fte3600_abi`, the bound
+SPI driver and relevant kernel/fprintd errors. DMI is not consulted. The
+`fte3600` kernel module must be installed for the running kernel. Remove only
+old FTE3600-specific spidev override rules as described in
+[dynamic discovery](dynamic-discovery.md); do not unbind another device.
 
-If no SPI node exists, check the installed udev rule and kernel spidev support.
-Use a narrowly scoped SPI udev trigger only after verifying the matched device;
-do not unbind an unrelated existing driver.
+The bridge rejects ambiguous ACPI descriptions, missing GPIO controllers and
+unsupported interrupt resource formats. This is resource validation, not a
+missing machine entry. Never guess GPIO numbers to work around it.
 
 ## No expected MCU response
 
-`00 00` only indicates that the expected response was not received. Missing RAM
-firmware, reset, transport and power problems can all require investigation;
-the bytes alone prove neither missing power nor the chip model.
+All-zero/all-one responses do not prove the sensor model or missing firmware.
+Cold recovery requires an accepted ROM-family/OTP response, then the exact
+10,396-byte external FT9361 image. Unknown responses stop before firmware load.
+The controller must allow an unsplit 10,403-byte transfer for recovery and
+5,128 bytes for capture; changing spidev.bufsiz does not affect the bridge.
 
-Check the expected 10,396-byte file and SHA256 documented in
-[installation](install.md), and read
-`/sys/module/spidev/parameters/bufsiz`. Recovery needs a continuous 10,403-byte
-transaction; the supplied setting is 32,768. A module setting change requires
-a controlled reboot. Follow the backup/rollback procedure before modifying
-configuration. Do not repeat unchanged failed recovery sequences on Medion;
-use the known-good Mint comparison described in [status](status.md).
+## Permissions and suspend
 
-## Permissions
+Nodes are root-only. If the systemd device sandbox blocks access, generate
+exact-node DeviceAllow entries using `scripts/fte3600-device-allow.sh` and review
+them before installing a service drop-in. GPIO-class permissions and the old
+GPIO SELinux policy are no longer needed by this transport. Diagnose actual
+AVC denials for the bridge node rather than granting broad GPIO/misc access.
 
-Inspect `systemctl cat fprintd.service` and actual access-denial logs before
-changing permissions. The example `DeviceAllow=char-gpiochip rw` and SELinux
-policy grant access to a GPIO device class, not just the fingerprint pins.
-On Fedora, install the CIL module only after confirming the matching AVC denial
-and recording whether a module already exists. Never disable SELinux.
-See [installation and rollback](install.md) for exact affected paths.
+Suspend invalidates an open session; cancel/close it and reopen after resume.
+Automatic suspend/resume recovery has not been validated on hardware.
 
 ## Enrollment
 

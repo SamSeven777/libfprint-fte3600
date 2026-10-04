@@ -37,7 +37,14 @@ print_driver (const FpDeviceClass *cls)
 
   for (entry = cls->id_table; entry->udev_types != 0; entry++)
     {
-      /* We only add rules for spidev right now. */
+      if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
+        {
+          /* ACPI module autoload binds the bridge; do not override it with spidev. */
+          g_print ("# FTE3600 ACPI resource bridge\n");
+          g_print ("SUBSYSTEM==\"misc\", KERNEL==\"fte3600-*\", ATTR{fte3600_abi}==\"1\", MODE=\"0600\"\n");
+          continue;
+        }
+      /* Other SPI drivers still use spidev. */
       if ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) == 0)
         continue;
 

@@ -17,7 +17,7 @@ jobs:
         run: >-
           dnf install -y git gcc gcc-c++ meson ninja-build
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
-          libgpiod-devel systemd systemd-devel cairo-devel
+          systemd systemd-devel cairo-devel
       - uses: actions/checkout@v6
       - name: Build both authentication policies
         run: ./scripts/check-fte3600.sh
@@ -34,8 +34,14 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates git meson ninja-build pkg-config \
-            libglib2.0-dev libgusb-dev libgudev-1.0-dev libgpiod-dev \
-            libudev-dev systemd-dev libcairo2-dev
+            libglib2.0-dev libgusb-dev libgudev-1.0-dev \
+            libudev-dev systemd-dev libcairo2-dev linux-headers-generic
       - uses: actions/checkout@v6
+      - name: Build ACPI resource bridge
+        run: |
+          kernel_headers=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
+          test -n "$kernel_headers"
+          make -C kernel/fte3600 KDIR="$kernel_headers" W=1
+          make -C kernel/fte3600 check
       - name: Build both authentication policies
         run: ./scripts/check-fte3600.sh

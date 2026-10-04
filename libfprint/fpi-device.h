@@ -26,12 +26,14 @@
 
 /**
  * FpiDeviceUdevSubtypeFlags:
+ * @FPI_DEVICE_UDEV_SUBTYPE_FTE3600: The device uses the FTE3600 resource bridge
  * @FPI_DEVICE_UDEV_SUBTYPE_SPIDEV: The device requires an spidev node
  * @FPI_DEVICE_UDEV_SUBTYPE_HIDRAW: The device requires a hidraw node
  *
  * Bitfield of required hardware resources for a udev-backed device.
  */
 typedef enum {
+  FPI_DEVICE_UDEV_SUBTYPE_FTE3600 = 1 << 2,
   FPI_DEVICE_UDEV_SUBTYPE_SPIDEV = 1 << 0,
   FPI_DEVICE_UDEV_SUBTYPE_HIDRAW = 1 << 1,
 } FpiDeviceUdevSubtypeFlags;

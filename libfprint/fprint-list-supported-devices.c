@@ -70,7 +70,8 @@ insert_drivers (GList **usb_list, GList **spi_list)
               char *key;
 
               /* Need SPI device */
-              if ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) == 0)
+              if ((entry->udev_types & (FPI_DEVICE_UDEV_SUBTYPE_SPIDEV |
+                                       FPI_DEVICE_UDEV_SUBTYPE_FTE3600)) == 0)
                 continue;
 
               key = g_strdup_printf ("SPI:%s:%04x:%04x", entry->spi_acpi_id, entry->hid_id.vid, entry->hid_id.pid);

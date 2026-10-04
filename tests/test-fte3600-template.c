@@ -440,6 +440,7 @@ assert_header_mutation (GBytes               *original,
 {
   guint8 *data;
   gsize size;
+
   g_autoptr(Fte3600Template) decoded = NULL;
 
   g_autoptr(GBytes) changed = mutable_copy (original, &data, &size);
@@ -465,7 +466,7 @@ test_malformed_headers_and_lengths (void)
                    FTE3600_TEMPLATE_OK);
   original = g_bytes_get_data (wire, &original_size);
 
-  assert_header_mutation (wire, 8, 2, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
+  assert_header_mutation (wire, 8, 3, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 10, 38, FTE3600_TEMPLATE_INVALID_WIRE);
   /* Both old raw and potentially double-normalized templates must be rejected. */
   assert_header_mutation (wire, 24, 1,
@@ -870,16 +871,16 @@ test_boundary_straddling_probe (void)
    * Only points 0, 1, 2 match (3 inliers < 5 minimum). Must NOT reach consensus! */
   Fte3600BriskMatchResult s0_match;
   Fte3600BriskStatus s0_status = fpi_fte3600_brisk_match (&query,
-                                                         &s0_feats,
-                                                         &s0_match);
+                                                          &s0_feats,
+                                                          &s0_match);
   g_assert_cmpint (s0_status, ==, FTE3600_BRISK_NO_CONSENSUS);
 
   /* 2. Directly test matching against Sample 1 alone:
    * Only points 10, 11, 12 match (3 inliers < 5 minimum). Must NOT reach consensus! */
   Fte3600BriskMatchResult s1_match;
   Fte3600BriskStatus s1_status = fpi_fte3600_brisk_match (&query,
-                                                         &s1_feats,
-                                                         &s1_match);
+                                                          &s1_feats,
+                                                          &s1_match);
   g_assert_cmpint (s1_status, ==, FTE3600_BRISK_NO_CONSENSUS);
 
   /* 3. Test comparing against the template container:
@@ -921,6 +922,7 @@ test_mosaic_roundtrip_decision (void)
   const guint probe_points[] = { 0, 1, 2, 10, 11, 12 };
   const gfloat probe_noise[] = { 0.0f, -0.27f * 3.0f };
   Fte3600BriskFeatureSet samples[FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES] = { 0 };
+
   g_autoptr(Fte3600Template) forward = fpi_fte3600_template_new ();
   g_autoptr(Fte3600Template) reverse = fpi_fte3600_template_new ();
   g_autoptr(Fte3600Template) decoded = NULL;
@@ -938,7 +940,7 @@ test_mosaic_roundtrip_decision (void)
       sample->n_features = 12;
       for (guint i = 0; i < 9; i++)
         make_noisy_boundary_point (&sample->features[i], s == 0 ? i : 4 + i,
-                                    0.015f * jitter_order[s]);
+                                   0.015f * jitter_order[s]);
       for (guint i = 0; i < 3; i++)
         {
           Fte3600BriskFeature *feature = &sample->features[9 + i];
@@ -951,7 +953,7 @@ test_mosaic_roundtrip_decision (void)
   for (guint s = 0; s < G_N_ELEMENTS (samples); s++)
     {
       const Fte3600TemplateStatus expected = s + 1 == G_N_ELEMENTS (samples) ?
-        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
+                                             FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES;
 
       g_assert_cmpint (fpi_fte3600_template_add_features (forward, &samples[s], NULL),
                        ==, expected);

@@ -87,6 +87,14 @@ nbis_sources = [
     'nbis/mindtct/xytreps.c',
 ]
 
+fte3600_sources = []
+driver_extra_deps = []
+if 'fte3600' in drivers
+    subdir('matchers/brisk')
+    subdir('drivers/fte3600')
+    driver_extra_deps += brisk_core_dep
+endif
+
 driver_sources = {
     'upekts' : files(
         'drivers/upekts.c',
@@ -122,11 +130,7 @@ driver_sources = {
     'elan' : files('drivers/elan.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
-    'fte3600' : files(
-        'drivers/fte3600.c',
-        'drivers/fte3600-brisk.c',
-        'drivers/fte3600-template.c',
-    ),
+    'fte3600' : fte3600_sources,
     'nb1010' : files('drivers/nb1010.c'),
     'virtual_image' : files('drivers/virtual-image.c'),
     'virtual_device' : files('drivers/virtual-device.c'),
@@ -262,7 +266,7 @@ libfprint_private = static_library('fprint-private',
 libfprint_drivers = static_library('fprint-drivers',
     sources: drivers_sources,
     c_args: drivers_cflags,
-    dependencies: deps,
+    dependencies: deps + driver_extra_deps,
     link_with: libfprint_private,
     install: false)
 

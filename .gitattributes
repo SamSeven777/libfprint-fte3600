@@ -1,0 +1,5 @@
+*.sh text eol=lf
+**/Makefile text eol=lf
+**/dkms.conf text eol=lf
+**/PKGBUILD text eol=lf
+packaging/arch/*.install text eol=lf

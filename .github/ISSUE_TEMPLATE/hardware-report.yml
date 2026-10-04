@@ -1,5 +1,5 @@
 name: Hardware compatibility report
-description: Report an FTE3600 system or request a carefully reviewed hardware profile
+description: Report an FTE3600 system or diagnose ACPI resources and chip discovery
 title: "[Hardware]: "
 labels:
   - hardware-report
@@ -60,14 +60,14 @@ body:
   - type: textarea
     id: dmi
     attributes:
-      label: Exact DMI identity
+      label: System model (optional context; not a runtime match key)
       description: Paste only the output of the two commands below. Do not include product_serial, board_serial, or product_uuid.
       render: shell
       placeholder: |
         cat /sys/class/dmi/id/sys_vendor
         cat /sys/class/dmi/id/product_name
     validations:
-      required: true
+      required: false
 
   - type: textarea
     id: acpi_spi
@@ -77,8 +77,8 @@ body:
       render: shell
       placeholder: |
         grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
-        ls -l /dev/spidev* /dev/gpiochip*
-        cat /sys/module/spidev/parameters/bufsiz
+        ls -l /dev/fte3600-*
+        cat /sys/class/misc/fte3600-*/fte3600_abi
     validations:
       required: true
 
@@ -89,7 +89,7 @@ body:
       options:
         - Not tested because this model is not enabled
         - Device is not discovered
-        - Device is rejected by the DMI safety gate
+        - ACPI bridge or chip identity is rejected
         - Open or initialization fails
         - Capture or enrollment fails
         - Verification fails
@@ -112,7 +112,7 @@ body:
       description: Optional. Paste only version/status text after checking it for private data. Keep libfprint debug logging disabled.
       render: shell
       placeholder: |
-        pkg-config --modversion libfprint-2 libgpiod
+        pkg-config --modversion libfprint-2
         systemctl show fprintd.service -p LoadState -p ActiveState -p FragmentPath -p DropInPaths
 
   - type: checkboxes
@@ -124,7 +124,7 @@ body:
           required: true
         - label: I understand that the ACPI name `FTE3600` alone is not a compatibility claim for this driver.
           required: true
-        - label: I understand that maintainers must review GPIO/SPI resources before this model can be enabled, and I will not bypass the DMI safety gate.
+        - label: I will report resource and identity failures without guessing GPIO offsets or bypassing chip identity checks.
           required: true
         - label: If I tested enrollment or verification, I kept a working password fallback.
           required: true

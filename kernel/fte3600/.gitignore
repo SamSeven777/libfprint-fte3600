@@ -1,0 +1,7 @@
+.*.cmd
+*.ko
+*.mod
+*.mod.c
+Module.symvers
+modules.order
+fte3600-policy-test

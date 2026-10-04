@@ -2,7 +2,8 @@ post_install() {
   systemctl daemon-reload
   udevadm control --reload
   printf '%s\n' \
-    'FTE3600: reboot before enrollment so spidev.bufsiz and enumeration are refreshed.'
+    'FTE3600: install headers for your running kernel so DKMS can build the bridge.' \
+    'Review docs/fte3600/dynamic-discovery.md for spidev migration and exact-node fprintd access.'
 }
 
 post_upgrade() {

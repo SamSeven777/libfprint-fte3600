@@ -1,0 +1,10 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+#pragma once
+#include "fte3600-timing.h"
+
+#define FTE3600_BOOT38_CONFIG_MS 20
+#define FTE3600_BOOT38_UPLOAD_MS 2
+#define FTE3600_BOOT38_FT9338_START_MS 80
+#define FTE3600_BOOT38_FT9536_START_MS 180
+#define FTE3600_BOOT38_POLL_MS 2
+#define FTE3600_BOOT38_POLL_ATTEMPTS 20
