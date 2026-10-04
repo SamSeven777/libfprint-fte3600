@@ -365,6 +365,24 @@ if 'fte3600' in drivers
     test('fte3600-setup', python3,
         args: files('test-setup-fte3600.py'),
         suite: ['unit-tests'], env: envs)
+    if get_option('fte3600_medion_spidev')
+        test('medion-spidev-launcher', python3,
+            args: files('test-medion-spidev.py'),
+            suite: ['unit-tests'], env: envs)
+        medion_transport_test = executable('test-medion-transport',
+            sources: ['test-medion-transport.c', '../examples/fte3600-medion-transport.c'],
+            dependencies: libfprint_private_dep,
+            c_args: common_cflags + fte3600_personal_auth_cflags,
+            link_args: ['-Wl,--wrap=open64', '-Wl,--wrap=fstat64',
+                        '-Wl,--wrap=stat64', '-Wl,--wrap=fcntl64',
+                        '-Wl,--wrap=ioctl', '-Wl,--wrap=close',
+                        '-Wl,--wrap=read', '-Wl,--wrap=__read_chk',
+                        '-Wl,--wrap=g_file_get_contents'],
+            install: false,
+        )
+        test('medion-transport', medion_transport_test,
+            suite: ['unit-tests'], env: envs)
+    endif
 
     foreach chip, test_source : {
         'fw9369': 'test-fte3600-fw9369-protocol.c',

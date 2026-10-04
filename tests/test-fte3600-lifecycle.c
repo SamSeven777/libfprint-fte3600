@@ -23,6 +23,7 @@
 #include "drivers/fte3600-bridge.h"
 
 #include "drivers/fte3600.h"
+#include "drivers/fte3600-private.h"
 #include "drivers/fte3600-ft93xx-protocol.h"
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
@@ -34,7 +35,9 @@
 #include "fte3600-test-image.h"
 #endif
 
-GType fpi_device_fte3600_get_type (void);
+static gboolean use_separate_irq_transport;
+static guint transport_configures;
+static guint transport_event_reads;
 
 /* Declarations also check wrapper signatures against the platform headers. */
 #define WRAPPED(name) __typeof__ (name) __wrap_ ## name
@@ -313,7 +316,7 @@ deliver_irq (gpointer unused)
 GSource *
 __wrap_g_unix_fd_source_new (gint fd, GIOCondition condition)
 {
-  g_assert_cmpint (fd, ==, sensor.spi_fd);
+  g_assert_cmpint (fd, ==, use_separate_irq_transport ? sensor.irq_pipe[0] : sensor.spi_fd);
   if (sensor.armed && sensor.irq_source == 0)
     sensor.irq_source = g_idle_add (deliver_irq, NULL);
   return __real_g_unix_fd_source_new (fd, condition);
@@ -625,6 +628,60 @@ typedef struct
   GError  *error;
 } DeviceInit;
 
+/* Exercise the real driver's transport seam with an IRQ descriptor distinct
+ * from the SPI descriptor. The separate adapter's syscall tests validate GPIO
+ * flags and resource ownership; this test covers actual probe/init/capture. */
+static gboolean
+separate_configure (FpiDeviceFte3600 *self, GError **error)
+{
+  (void) error;
+  transport_configures++;
+  self->max_transfer = sensor.buffer_size;
+  self->spi_mode = SPI_MODE_0;
+  self->bridge_capabilities = 0;
+  return TRUE;
+}
+
+static gboolean
+separate_reset (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
+{
+  (void) self;
+  if (set_reset (asserted) == 0)
+    return TRUE;
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Synthetic reset failure");
+  return FALSE;
+}
+
+static gboolean
+separate_events (FpiDeviceFte3600 *self, guint32 *events, GError **error)
+{
+  (void) error;
+  transport_event_reads++;
+  return __wrap_ioctl (self->spi_fd, FTE3600_IOC_GET_EVENTS, events) == 0;
+}
+
+static gint
+separate_irq_fd (FpiDeviceFte3600 *self)
+{
+  g_assert_cmpint (self->spi_fd, !=, sensor.irq_pipe[0]);
+  return sensor.irq_pipe[0];
+}
+
+static void
+separate_release (FpiDeviceFte3600 *self)
+{
+  (void) self;
+  sensor.reset_asserted = FALSE;
+}
+
+static const Fte3600TransportOps separate_ops = {
+  .configure = separate_configure,
+  .set_reset = separate_reset,
+  .get_events = separate_events,
+  .irq_fd = separate_irq_fd,
+  .release = separate_release,
+};
+
 static void
 init_complete (GObject *object, GAsyncResult *result, gpointer data)
 {
@@ -677,6 +734,8 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   sensor.cancellable = g_cancellable_new ();
   device = g_object_new (fpi_device_fte3600_get_type (),
                          "fpi-udev-data-spidev", "/mock/fte3600-spi", NULL);
+  if (use_separate_irq_transport)
+    FPI_DEVICE_FTE3600 (device)->transport_ops = &separate_ops;
   g_async_initable_init_async (G_ASYNC_INITABLE (device), G_PRIORITY_DEFAULT,
                                NULL, init_complete, &initialized);
   while (!initialized.complete)
@@ -1572,6 +1631,18 @@ test_open_error (gconstpointer data)
   finish_device (device);
 }
 
+static void
+test_separate_irq_transport (void)
+{
+  use_separate_irq_transport = TRUE;
+  transport_configures = transport_event_reads = 0;
+  test_family_warm_capture (GUINT_TO_POINTER (2)); /* FT9338: 88 x 88. */
+  test_family_cancel_and_reuse (GUINT_TO_POINTER (2));
+  g_assert_cmpuint (transport_configures, >=, 4);
+  g_assert_cmpuint (transport_event_reads, >, 0);
+  use_separate_irq_transport = FALSE;
+}
+
 #include "fte3600-test-load.h"
 
 int
@@ -1599,6 +1670,7 @@ main (int argc, char **argv)
   };
 
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fte3600-lifecycle/transport/separate-irq", test_separate_irq_transport);
   g_test_add_func ("/fte3600-lifecycle/discovery/FT9536-cold-boot-a", test_boot38_cold_enumeration);
   for (guint i = 0; i < G_N_ELEMENTS (probes); i++)
     {

@@ -1073,7 +1073,7 @@ fte3600_select_backend (FpiDeviceFte3600 *self, GError **error)
   if (frame_size > G_MAXUINT16 || transfer_size > self->max_transfer)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                   "%s requires a %zu-byte SPI transfer; bridge permits %u",
+                   "%s requires a %zu-byte SPI transfer; transport permits %u",
                    sensor->name, transfer_size, self->max_transfer);
       return FALSE;
     }
@@ -1158,14 +1158,14 @@ fte3600_begin_discovery (FpDevice *dev)
   if (!path || !g_path_is_absolute (path))
     {
       fte3600_discovery_failed (dev, fpi_device_error_new_msg (
-                                  FP_DEVICE_ERROR_GENERAL, "No absolute ACPI resource bridge path was provided"));
+                                  FP_DEVICE_ERROR_GENERAL, "No absolute FTE3600 transport path was provided"));
       return;
     }
   self->spi_fd = open (path, O_RDWR | O_CLOEXEC);
   if (self->spi_fd < 0)
     {
       g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
-                   "Failed to open FTE3600 bridge %s: %s", path, g_strerror (errno));
+                   "Failed to open FTE3600 transport %s: %s", path, g_strerror (errno));
       fte3600_discovery_failed (dev, error);
       return;
     }

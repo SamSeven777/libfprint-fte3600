@@ -18,11 +18,26 @@ typedef struct _Fte3600Backend Fte3600Backend;
 G_DECLARE_FINAL_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FPI,
                       DEVICE_FTE3600, FpDevice);
 
+/* Internal transport seam for the standalone Medion experiment. Normal device
+ * enumeration leaves this NULL and continues to require the kernel bridge.
+ * release must be idempotent; probe and open each configure a fresh session.
+ * The caller owns transport_data for the complete device object lifetime. */
+typedef struct
+{
+  gboolean (*configure) (FpiDeviceFte3600 *self, GError **error);
+  gboolean (*set_reset) (FpiDeviceFte3600 *self, gboolean asserted, GError **error);
+  gboolean (*get_events) (FpiDeviceFte3600 *self, guint32 *events, GError **error);
+  gint     (*irq_fd) (FpiDeviceFte3600 *self);
+  void     (*release) (FpiDeviceFte3600 *self);
+} Fte3600TransportOps;
+
 struct _FpiDeviceFte3600
 {
   FpDevice                       parent;
 
   gint                           spi_fd;
+  const Fte3600TransportOps      *transport_ops;
+  gpointer                       transport_data;
   gboolean                       capturing;
   gboolean                       armed;
   gboolean                       idle_verified;

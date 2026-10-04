@@ -45,6 +45,14 @@ fpi_fte3600_deassert_hardware_reset_best_effort (FpiDeviceFte3600 *self,
 {
   guint32 asserted = 0;
 
+  if (self->transport_ops)
+    {
+      g_autoptr(GError) error = NULL;
+
+      if (self->spi_fd >= 0 && !self->transport_ops->set_reset (self, FALSE, &error))
+        fp_warn ("Failed to release FTE3600 reset while %s: %s", context, error->message);
+      return;
+    }
   if (self->spi_fd >= 0 && ioctl (self->spi_fd, FTE3600_IOC_SET_RESET, &asserted) < 0)
     fp_warn ("Failed to release FTE3600 reset while %s: %s", context, g_strerror (errno));
 }
@@ -57,6 +65,8 @@ fpi_fte3600_release_transport (FpiDeviceFte3600 *self)
   self->enroll_needs_release = FALSE;
   self->waiting_for_release = FALSE;
   fpi_fte3600_clear_irq_source (self);
+  if (self->transport_ops)
+    self->transport_ops->release (self);
   if (self->backend && self->backend->destroy)
     self->backend->destroy (self);
   self->backend_data = NULL;
@@ -67,6 +77,8 @@ fpi_fte3600_release_transport (FpiDeviceFte3600 *self)
 static gboolean
 fte3600_get_irq_events (FpiDeviceFte3600 *self, guint32 *events, GError **error)
 {
+  if (self->transport_ops)
+    return self->transport_ops->get_events (self, events, error);
   if (ioctl (self->spi_fd, FTE3600_IOC_GET_EVENTS, events) == 0)
     return TRUE;
   g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
@@ -93,10 +105,10 @@ fte3600_irq_ready_cb (gint fd, GIOCondition condition, gpointer user_data)
   guint32 events = 0;
 
   g_assert (ssm != NULL);
-  g_assert_cmpint (fd, ==, self->spi_fd);
+  g_assert_cmpint (fd, ==, self->transport_ops ? self->transport_ops->irq_fd (self) : self->spi_fd);
   if (condition & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE,
-                                 "FTE3600 bridge was removed or suspended; reopen it");
+                                 "FTE3600 interrupt transport was lost; reopen the device");
   else if (fte3600_get_irq_events (self, &events, &error) && !events)
     return G_SOURCE_CONTINUE;
 
@@ -121,7 +133,13 @@ fpi_fte3600_wait_for_irq (FpiSsm *ssm)
   g_assert (self->irq_source == NULL);
   g_assert (self->irq_wait_ssm == NULL);
 
-  fd = self->spi_fd;
+  fd = self->transport_ops ? self->transport_ops->irq_fd (self) : self->spi_fd;
+  if (fd < 0)
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new_literal (
+                             G_IO_ERROR, G_IO_ERROR_CLOSED, "FTE3600 interrupt source is closed"));
+      return;
+    }
   self->irq_source = g_unix_fd_source_new (
     fd, G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL);
   self->irq_wait_ssm = ssm;
@@ -245,6 +263,16 @@ fpi_fte3600_set_hardware_reset (FpiSsm           *ssm,
 
   g_assert (self->spi_fd >= 0);
   self->idle_verified = FALSE;
+  if (self->transport_ops)
+    {
+      GError *error = NULL;
+
+      if (!self->transport_ops->set_reset (self, asserted, &error))
+        fpi_ssm_mark_failed (ssm, error);
+      else
+        fpi_ssm_next_state (ssm);
+      return;
+    }
   if (ioctl (self->spi_fd, FTE3600_IOC_SET_RESET, &value) < 0)
     {
       fpi_ssm_mark_failed (
@@ -282,6 +310,8 @@ fpi_fte3600_configure_spi (FpiDeviceFte3600 *self, GError **error)
 {
   struct fte3600_bridge_info info = { 0 };
 
+  if (self->transport_ops)
+    return self->transport_ops->configure (self, error);
   if (ioctl (self->spi_fd, FTE3600_IOC_GET_INFO, &info) < 0)
     {
       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),

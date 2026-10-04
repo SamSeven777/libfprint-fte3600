@@ -1,5 +1,11 @@
 # Experimental FTE3600 sensor-family Linux support
 
+**Medion experiment:** this branch adds a [standalone spidev diagnostic](docs/fte3600/medion-spidev.md)
+for Tuxman2's E3224 wiring. It tests identification, initialization and capture
+with the distribution's SPI/GPIO interfaces, without installing a custom kernel
+module or system libfprint. Use that guide for this experiment; the installation
+instructions below describe the regular bridge-based driver.
+
 This downstream libfprint fork implements runtime-selected SPI capture for
 FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 (silicon ID 9362) and
 FT9769 (9391/9392). It implements external RAM recovery for FT9348/FT9361,

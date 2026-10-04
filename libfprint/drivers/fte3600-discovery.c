@@ -213,6 +213,7 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
     case DISCOVER_CHECK_FAMILY:
       self->family = ((guint16) self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET] << 8) |
                      self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET + 1];
+      fp_dbg ("ROM family response: %04x", self->family);
       if (self->family != 0x2b50 && self->family != 0x95a8 && self->family != 0x23dd)
         fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                                FP_DEVICE_ERROR_NOT_SUPPORTED, "Unsupported FTE3600 ROM family %04x", self->family));
@@ -388,7 +389,7 @@ fte3600_confirm_identity (FpiSsm *ssm, Fte3600Identity identity, guint repeat_st
   else
     {
       self->identity = identity;
-      fp_dbg ("Detected %s with physical %s chip select",
+      fp_dbg ("Detected %s with Linux SPI %s chip-select configuration",
               fpi_fte3600_sensor_get (identity.sensor)->name,
               (self->spi_mode & SPI_CS_HIGH) ? "active-high" : "active-low");
       fpi_ssm_mark_completed (ssm);
@@ -472,6 +473,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
 
     case IDENTIFY_LEGACY_CHECK:
       identity = fpi_fte3600_identify_runtime (self->identity_high, fpi_fte3600_read_result_byte (self));
+      fp_dbg ("Legacy 14/15 response: %04x (runtime geometry)", identity.response);
       if (identity.sensor == FTE3600_SENSOR_UNKNOWN && identity.response != 0 && identity.response != 0xffff)
         data->unknown_application[data->alternate] = TRUE;
       if (!fte3600_confirm_identity (ssm, identity, IDENTIFY_LEGACY_HIGH))
@@ -485,6 +487,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
 
     case IDENTIFY_FW9369_CHECK:
       id = ((guint16) self->discovery_rx[6] << 8) | self->discovery_rx[7];
+      fp_dbg ("FW9369 1a8b response: %04x", id);
       if (id == FTE3600_FW9369_CHIP_ID &&
           fte3600_confirm_identity (ssm, fpi_fte3600_identify_special (id), IDENTIFY_FW9369))
         return;
@@ -497,6 +500,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
 
     case IDENTIFY_93XX_CHECK:
       id = ((guint16) self->discovery_rx[6] << 8) | self->discovery_rx[7];
+      fp_dbg ("FT93xx chip-ID response: %04x (checksum validation follows)", id);
       if ((id == 0x9365 || id == 0x9391 || id == 0x9392) &&
           !fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, &error))
         {
@@ -541,6 +545,8 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case IDENTIFY_93XX_VARIANT_CHECK:
+      fp_dbg ("FT93xx variant response: %02x%02x (checksum validation follows)",
+              self->discovery_rx[6], self->discovery_rx[7]);
       if (!fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, NULL) || id == 0x0fff)
         fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                                FP_DEVICE_ERROR_NOT_SUPPORTED, "Unsupported FT9391/FT9395 variant response"));
@@ -568,6 +574,8 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case IDENTIFY_9368_CHECK:
+      fp_dbg ("FT9368 info ID bytes: %02x%02x (metadata validation follows)",
+              self->discovery_rx[26], self->discovery_rx[27]);
       if (fpi_fte3600_ft9368_parse_info (self->discovery_rx + FTE3600_FT9368_HEADER, FTE3600_FT9368_INFO_SIZE, &info) &&
           fte3600_confirm_identity (ssm, fpi_fte3600_identify_special (0x9368), IDENTIFY_9368))
         return;

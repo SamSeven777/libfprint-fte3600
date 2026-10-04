@@ -6,6 +6,10 @@ option('fte3600_personal_auth',
        description: 'Enable the explicitly uncalibrated, personal-use FTE3600 verification policy',
        type: 'boolean',
        value: false)
+option('fte3600_medion_spidev',
+       description: 'Build the uninstalled Medion E3224 spidev diagnostic experiment',
+       type: 'boolean',
+       value: false)
 option('introspection',
        description: 'Build GObject Introspection repository',
        type: 'boolean',
