@@ -403,7 +403,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
 
     wire_data = g_bytes_get_data (job->encoded_template, &wire_size);
     if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-        wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
+        wire_size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE)
       {
         fte3600_complete_action_error (
           self, fpi_device_error_new_msg (

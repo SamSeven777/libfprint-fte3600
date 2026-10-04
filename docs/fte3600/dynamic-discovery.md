@@ -23,7 +23,17 @@ reads, or turn an unknown response into firmware-upload authorization.
    Raw `9391` also requires register `1816 != 0fff`; the 9395 variant is rejected.
    Empty/unrecognized responses try the alternate CS polarity when supported.
    Successful discovery keeps that polarity. Failure restores the original.
-   If these probes fail, the shared factory wake and verified `c6=01` sequence
+   If these probes cannot identify a chip, discovery first
+   retries the legacy application after `70`, a minimum 5 ms wait, `70`, and
+   a minimum 2 ms wait. This bounded wake runs once per supported CS polarity,
+   after the other application protocols had a chance to identify or reject
+   the chip. Inactive legacy registers can return stale bytes as well as zeros;
+   an unknown reply still prevents firmware recovery if waking fails. The two
+   commands finish before cancellation is observed; transport errors stop the
+   probe. A positive legacy identity still has to repeat unchanged. This
+   handles an inactive FT9361 application observed on the One-Netbook A1; it
+   does not authorize firmware upload or establish cold ROM identity.
+   If the application probes and legacy wake fail, the shared factory wake and verified `c6=01` sequence
    retries identification on each supported CS polarity. This state-changing
    fallback requires repeated IDs and the FT9391 variant check; it never writes
    FD/FE pad-voltage controls before selecting a family. Negative results require

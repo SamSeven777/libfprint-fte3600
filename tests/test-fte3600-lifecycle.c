@@ -105,6 +105,8 @@ typedef struct
 
 static const ProbeFixture *probe_fixture;
 static gboolean boot38_fixture;
+static gboolean wake_fixture;
+static gboolean stale_wake_fixture;
 
 static struct
 {
@@ -148,6 +150,14 @@ static struct
   guint            claims;
   guint            releases;
   guint            resets;
+  gboolean         inactive;
+  guint            wake_commands;
+  gint64           wake_first;
+  gint64           wake_last;
+  guint            awake_id_reads;
+  guint            fail_wake_at;
+  gboolean         cancel_wake;
+  gboolean         unstable_wake;
   guint            hardware_asserts;
   guint            hardware_deasserts;
   guint            images;
@@ -470,6 +480,22 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         gint64 when = g_get_monotonic_time ();
 
         g_array_append_val (sensor.soft_reset_times, when);
+        if (sensor.inactive)
+          {
+            sensor.wake_commands++;
+            if (sensor.wake_commands == 1)
+              sensor.wake_first = when;
+            else
+              g_assert_cmpint (when - sensor.wake_first, >=, 5000);
+            sensor.wake_last = when;
+            if (sensor.cancel_wake)
+              g_cancellable_cancel (sensor.cancellable);
+            if (sensor.fail_wake_at == sensor.wake_commands)
+              {
+                result = -1;
+                break;
+              }
+          }
       }
       sensor.resets++;
       sensor.armed = FALSE;
@@ -505,6 +531,23 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     case 0x10:
       g_assert_nonnull (rx);
       memset (rx, 0, transfer->len);
+      if (sensor.inactive)
+        {
+          if (sensor.wake_commands < 2)
+            {
+              if (stale_wake_fixture)
+                memset (rx, 1, transfer->len);
+              break;
+            }
+          g_assert_cmpint (g_get_monotonic_time () - sensor.wake_last, >=, 2000);
+          sensor.inactive = FALSE;
+        }
+      if (wake_fixture && (tx[2] == FT9361_REG_SENSOR_ID_HIGH || tx[2] == FT9361_REG_SENSOR_ID_LOW))
+        {
+          sensor.awake_id_reads++;
+          if (sensor.unstable_wake && sensor.awake_id_reads > 2)
+            break;
+        }
       if (tx[2] == FT9361_REG_MCU_STATUS)
         {
           if (sensor.cleanup_started && sensor.fail_cleanup_status)
@@ -655,6 +698,7 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   sensor.otp = sensor.model->otp;
   sensor.spi_fd = -1;
   sensor.firmware_fd = -1;
+  sensor.inactive = wake_fixture;
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
   sensor.registers[FT9361_REG_FW_VERSION] = sensor.model->firmware_version;
@@ -778,7 +822,7 @@ test_special_discovery (gconstpointer data)
       g_assert_no_error (error);
       g_assert_nonnull (strstr (fp_device_get_name (device), fixture->name));
       g_assert_cmpuint (sensor.special_reads, ==, 2);
-      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 3 : 1) : 0);
+      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 5 : 1) : 0);
       g_assert_cmpuint (sensor.spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
       g_assert_true (fp_device_has_feature (device, FP_DEVICE_FEATURE_CAPTURE));
       g_assert_cmpint (fp_device_has_feature (device, FP_DEVICE_FEATURE_VERIFY), ==,
@@ -815,6 +859,63 @@ open_device (FpDevice *device)
   g_assert_true (fp_device_open_sync (device, NULL, &error));
   g_assert_no_error (error);
   g_assert_true (fp_device_is_open (device));
+}
+
+static void
+test_inactive_discovery (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  wake_fixture = TRUE;
+  stale_wake_fixture = scenario == 5;
+  device = new_device_checked (&error);
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (fp_device_get_name (device), "FT9361"));
+  g_assert_cmpuint (sensor.wake_commands, ==, 2);
+  g_assert_cmpuint (sensor.awake_id_reads, ==, 4);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+
+  /* Enumeration's successful identity must not hide an inactive device at
+   * the next open, nor make a failed/unstable wake authorize ROM recovery. */
+  sensor.inactive = TRUE;
+  sensor.wake_commands = 0;
+  sensor.awake_id_reads = 0;
+  sensor.fail_wake_at = scenario == 1 ? 1 : scenario == 2 ? 2 : 0;
+  sensor.unstable_wake = scenario == 3;
+  sensor.cancel_wake = scenario == 4;
+  if (scenario == 0 || scenario == 5)
+    {
+      open_device (device);
+      g_assert_cmpuint (sensor.wake_commands, ==, 2);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      sensor.inactive = TRUE;
+      sensor.wake_commands = 0;
+      sensor.awake_id_reads = 0;
+      open_device (device);
+      g_assert_cmpuint (sensor.wake_commands, ==, 2);
+    }
+  else
+    {
+      g_assert_false (fp_device_open_sync (device, sensor.cancellable, &error));
+      g_assert_nonnull (error);
+      if (scenario == 3)
+        g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      if (scenario == 4)
+        {
+          g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+          g_assert_cmpuint (sensor.wake_commands, ==, 2);
+        }
+      g_assert_false (fp_device_is_open (device));
+    }
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_false (sensor.probe_started);
+  finish_device (device);
+  wake_fixture = FALSE;
+  stale_wake_fixture = FALSE;
 }
 
 static void
@@ -1229,7 +1330,8 @@ test_rom_discovery (gconstpointer data)
         g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
       else
         g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (sensor.resets, ==, 0);
+      /* Empty application replies get one bounded wake before ROM probing. */
+      g_assert_cmpuint (sensor.resets, ==, 2);
     }
   g_assert_false (sensor.otp_enabled);
   g_assert_false (sensor.reset_asserted);
@@ -1574,7 +1676,9 @@ test_open_error (gconstpointer data)
   if (sensor.bad_id)
     {
       g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (sensor.resets, ==, 0);
+      g_assert_cmpuint (sensor.resets, ==, 2);
+      g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+      g_assert_false (sensor.probe_started);
     }
 
   sensor.fail_config = sensor.fail_claim = sensor.bad_id = FALSE;
@@ -1668,6 +1772,11 @@ main (int argc, char **argv)
     {
       g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/rom-%u", scenario);
       g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_rom_discovery);
+    }
+  for (guint scenario = 0; scenario < 6; scenario++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/inactive-%u", scenario);
+      g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_inactive_discovery);
     }
   for (guint scenario = 0; scenario < 4; scenario++)
     {

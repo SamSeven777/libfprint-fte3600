@@ -339,6 +339,40 @@ fte3600_legacy_discovery_new (FpiDeviceFte3600 *self, gboolean boot_only)
                            "FTE3600 sensor discovery");
 }
 
+/* An inactive legacy application may return zeros until both soft-reset
+ * commands have completed. Finish the bounded pair before observing cancel;
+ * no reset GPIO is asserted and this never uploads firmware. */
+static void
+fte3600_legacy_wake_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  FpiSpiTransfer *transfer;
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case 0:
+    case 2:
+      self->idle_verified = FALSE;
+      transfer = fpi_spi_transfer_new_with_buffer_size (dev, self->spi_fd,
+                                                        self->max_transfer);
+      fpi_spi_transfer_write (transfer, FTE3600_SOFT_RESET_SIZE);
+      transfer->buffer_wr[0] = FTE3600_OPCODE_SOFT_RESET;
+      fpi_fte3600_submit_transfer (ssm, transfer, FALSE);
+      break;
+
+    case 1:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
+      break;
+
+    case 3:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_A8_RESET_SETTLE_MS);
+      break;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
 /* Identification is a bounded search over wire protocols, then electrical CS
  * polarity. No manufacturer/model name participates. Each positive result is
  * repeated before selecting a backend; unknown replies never authorize writes
@@ -349,6 +383,8 @@ enum {
   IDENTIFY_93XX, IDENTIFY_93XX_CHECK, IDENTIFY_93XX_VARIANT,
   IDENTIFY_93XX_VARIANT_CHECK, IDENTIFY_9368_WAKE, IDENTIFY_9368_DELAY,
   IDENTIFY_9368, IDENTIFY_9368_CHECK, IDENTIFY_NEXT_POLARITY,
+  IDENTIFY_LEGACY_WAKE, IDENTIFY_AWAKE_HIGH, IDENTIFY_AWAKE_SAVE,
+  IDENTIFY_AWAKE_LOW, IDENTIFY_AWAKE_CHECK, IDENTIFY_WAKE_NEXT,
   IDENTIFY_NEGOTIATE, IDENTIFY_NEGOTIATE_CHECK, IDENTIFY_NEGOTIATE_NEXT,
   IDENTIFY_ROM, IDENTIFY_DONE, IDENTIFY_CLEANUP, IDENTIFY_NSTATES,
 };
@@ -359,6 +395,7 @@ typedef struct
   gboolean        alternate;
   gboolean        rom_alternate;
   gboolean        negotiation_alternate;
+  gboolean        wake_alternate;
   gboolean        unknown_application[2];
   Fte3600Identity candidate;
   Fte3600Identity special_result;
@@ -601,6 +638,51 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
 
     case IDENTIFY_NEGOTIATE:
       fpi_ssm_start_subsm (ssm, fpi_fte3600_special_probe_new (self, &data->special_result));
+      return;
+
+    case IDENTIFY_LEGACY_WAKE:
+      /* Inactive legacy registers can also contain stale bus bytes. Retry
+       * only after the other family probes could identify/reject a chip;
+       * retain unknown_application so a failed wake cannot authorize ROM
+       * recovery. No identity is assumed: awake IDs must repeat unchanged. */
+      fpi_ssm_start_subsm (ssm, fpi_ssm_new_full (dev, fte3600_legacy_wake_handler,
+                                                4, 4, "FTE3600 legacy application wake"));
+      return;
+
+    case IDENTIFY_AWAKE_HIGH:
+      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_HIGH, 1, TRUE);
+      return;
+
+    case IDENTIFY_AWAKE_SAVE:
+      self->identity_high = fpi_fte3600_read_result_byte (self);
+      fpi_ssm_next_state (ssm);
+      return;
+
+    case IDENTIFY_AWAKE_LOW:
+      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_LOW, 1, TRUE);
+      return;
+
+    case IDENTIFY_AWAKE_CHECK:
+      identity = fpi_fte3600_identify_runtime (self->identity_high, fpi_fte3600_read_result_byte (self));
+      if (identity.sensor == FTE3600_SENSOR_UNKNOWN && identity.response != 0 && identity.response != 0xffff)
+        data->unknown_application[data->wake_alternate] = TRUE;
+      if (!fte3600_confirm_identity (ssm, identity, IDENTIFY_AWAKE_HIGH))
+        fte3600_next_protocol (ssm, IDENTIFY_WAKE_NEXT);
+      return;
+
+    case IDENTIFY_WAKE_NEXT:
+      if (!data->wake_alternate && (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY))
+        {
+          data->wake_alternate = TRUE;
+          if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
+            fpi_ssm_jump_to_state (ssm, IDENTIFY_LEGACY_WAKE);
+          else
+            fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+        }
+      else if (fpi_fte3600_set_cs_polarity (self, data->original_mode & SPI_CS_HIGH, &error))
+        fpi_ssm_next_state (ssm);
+      else
+        fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
       return;
 
     case IDENTIFY_NEGOTIATE_CHECK:

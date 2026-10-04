@@ -350,13 +350,37 @@ make_pattern (guint8 *pixels, guint width, guint height)
 }
 
 static guint8 *
-make_frames (const Fte3600MatchProfile *profile)
+make_frames_with_density (const Fte3600MatchProfile *profile, gboolean dense)
 {
   gsize size = (gsize) profile->width * profile->height;
   g_autofree guint8 *original = g_malloc (size);
   guint8 *frames = g_malloc (8 * size);
 
-  make_pattern (original, profile->width, profile->height);
+  if (dense)
+    {
+      /* Dense synthetic texture fills the BRISK feature budget while also
+       * yielding IPA points. Its V3 template exceeds the old BRISK-only cap. */
+      for (guint y = 0; y < profile->height; y++)
+        for (guint x = 0; x < profile->width; x++)
+          {
+            gdouble value = 125 + 11 * sin (0.29 * x + 0.17 * y) +
+                            9 * cos (0.13 * x - 0.23 * y);
+
+            for (guint row = 0; row < (profile->height - 14) / 5; row++)
+              for (guint column = 0; column < (profile->width - 14) / 5; column++)
+                {
+                  const gdouble dx = x - (7.0 + 5 * column);
+                  const gdouble dy = y - (7.0 + 5 * row);
+                  const gdouble sigma = 1.8 + 0.1 * ((column + 3 * row) % 7);
+                  const gdouble amplitude = (column + row) % 2 ? 85 : -82;
+
+                  value += amplitude * exp (-(dx * dx + dy * dy) / (2 * sigma * sigma));
+                }
+            original[y * profile->width + x] = CLAMP (floor (value + 0.5), 1, 254);
+          }
+    }
+  else
+    make_pattern (original, profile->width, profile->height);
   for (guint sample = 0; sample < 8; sample++)
     for (guint y = 0; y < profile->height; y++)
       for (guint x = 0; x < profile->width; x++)
@@ -367,6 +391,12 @@ make_frames (const Fte3600MatchProfile *profile)
             sx >= 0 && sy >= 0 ? original[sy * profile->width + sx] : 125;
         }
   return frames;
+}
+
+static guint8 *
+make_frames (const Fte3600MatchProfile *profile)
+{
+  return make_frames_with_density (profile, FALSE);
 }
 
 static GBytes *
@@ -453,9 +483,10 @@ test_roundtrip (gconstpointer data)
 {
   Fte3600Sensor sensor = GPOINTER_TO_UINT (data) & 0xff;
   gboolean release_retry = !!(GPOINTER_TO_UINT (data) & 0x200);
+  gboolean large_template = !!(GPOINTER_TO_UINT (data) & 0x400);
   const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (sensor);
   FpDevice *device = new_device (sensor);
-  g_autofree guint8 *frames = make_frames (profile);
+  g_autofree guint8 *frames = make_frames_with_density (profile, large_template);
 
   g_autoptr(GBytes) expected = make_wire (profile, frames);
   g_autoptr(FpPrint) print = g_object_ref_sink (fp_print_new (device));
@@ -466,6 +497,16 @@ test_roundtrip (gconstpointer data)
   gboolean match = FALSE;
   gsize actual_size, expected_size;
   gconstpointer actual_bytes, expected_bytes;
+
+  if (large_template)
+    {
+      const guint8 *wire_data = g_bytes_get_data (expected, &expected_size);
+
+      g_assert_cmpuint (wire_data[8] | ((guint) wire_data[9] << 8), ==,
+                        FTE3600_TEMPLATE_WIRE_VERSION_V3);
+      g_assert_cmpuint (expected_size, >, FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE);
+      g_assert_cmpuint (expected_size, <=, FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE);
+    }
 
   g_assert_true (fp_device_has_feature (device, FP_DEVICE_FEATURE_VERIFY));
   g_assert_cmpuint (fp_device_get_nr_enroll_stages (device), ==, 8);
@@ -787,6 +828,10 @@ main (int argc, char **argv)
     }
   g_test_add_data_func ("/fte3600-auth-lifecycle/retry-armed-reset",
                         GUINT_TO_POINTER (FTE3600_SENSOR_FT9361 | 0x100), test_roundtrip);
+#if FTE3600_ENABLE_IPA_AUTH
+  g_test_add_data_func ("/fte3600-auth-lifecycle/large-v3-enroll-verify",
+                        GUINT_TO_POINTER (FTE3600_SENSOR_FT9361 | 0x400), test_roundtrip);
+#endif
   g_test_add_data_func ("/fte3600-auth-lifecycle/release/retry",
                         GUINT_TO_POINTER (FTE3600_SENSOR_FT9369 | 0x200), test_roundtrip);
   for (guint scenario = 0; scenario < 6; scenario++)

@@ -324,7 +324,7 @@ static const struct file_operations fte3600_fops = {
 	.compat_ioctl = compat_ptr_ioctl,
 #endif
 	.poll = fte3600_poll,
-	.llseek = no_llseek,
+	.llseek = NULL,
 };
 
 static ssize_t fte3600_abi_show(struct device *dev,
