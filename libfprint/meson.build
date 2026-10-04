@@ -91,8 +91,10 @@ fte3600_sources = []
 driver_extra_deps = []
 if 'fte3600' in drivers
     subdir('matchers/brisk')
+    subdir('matchers/ipa')
     subdir('drivers/fte3600')
     driver_extra_deps += brisk_core_dep
+    driver_extra_deps += ipa_core_dep
 endif
 
 driver_sources = {

@@ -28,7 +28,7 @@ for fte_auth in false true; do
   meson test -C "$fte_build" --print-errorlogs --no-rebuild \
     fpi-device-cancel fpi-spi-transfer fte3600-context fte3600-driver \
     fte3600-sensor fte3600-firmware fte3600-protocol fte3600-lifecycle \
-    brisk-core fte3600-brisk fte3600-template \
+    brisk-core ipa-core fte3600-brisk fte3600-template \
     fw9369-protocol ft93xx-protocol ft9368-protocol \
     ft9368-backend fw9369-backend ft93xx-backend legacy38-recovery \
     fte3600-special-probe fte3600-family-template fte3600-auth-lifecycle \

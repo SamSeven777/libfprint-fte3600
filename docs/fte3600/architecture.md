@@ -16,10 +16,9 @@ or a vendor matching library.
 | Identification | `drivers/fte3600-discovery.c`, `fte3600-special-probe.{c,h}`, `fte3600-sensor.{c,h}` | Runtime/ROM identity evidence, bounded factory mode negotiation, immutable geometry, protocol and firmware metadata |
 | Protocol execution | `drivers/fte3600-backends.c`, `fte3600-legacy.c`, `fte3600-legacy-recovery.c`, `fte3600-fw9369.c`, `fte3600-ft93xx.c`, `fte3600-ft9368.c`, `fte3600-ft9368-update.c` | Backend routing, initialization, calibration, capture and bounded cleanup |
 | Wire definitions | `drivers/fte3600-protocol.{c,h}`, `fte3600-legacy-recovery-protocol.{c,h}`, `fte3600-fw9369-protocol.{c,h}`, `fte3600-ft93xx-protocol.{c,h}`, `fte3600-ft9368-protocol.{c,h}`, timing headers | Opcodes, registers, framing, sample decoding and pure image transforms; no device access or matcher dependency |
-| Firmware input | `drivers/fte3600-firmware.{c,h}` | Bounded regular-file loading and exact size/SHA-256 validation; no upload authorization |
-| Reusable algorithm | `matchers/brisk/brisk.{c,h}` | Image normalization, features, correspondences and numerical rigid-match evidence |
+| Reusable algorithms | `matchers/brisk/brisk.{c,h}`, `matchers/ipa/ipa.{c,h}` | Standalone image normalization, features, descriptors, correspondences and numerical rigid-match evidence |
 | FTE3600 matching adapter | `drivers/fte3600-match-profile.{c,h}`, `fte3600-brisk.{c,h}`, `fte3600-template.{c,h}` | Sensor image identities, versioned template codec, variable-size mosaics and authentication policy |
-| Build definitions | `drivers/fte3600/meson.build`, `fte3600-build-config.h`, `matchers/brisk/meson.build` | Driver source composition, authentication policy switch, independent core target |
+| Build definitions | `drivers/fte3600/meson.build`, `fte3600-build-config.h`, `matchers/brisk/meson.build`, `matchers/ipa/meson.build` | Driver source composition, authentication policy switch, independent core targets |
 
 Paths in this table are relative to `libfprint/` except `kernel/`. The parent
 Meson files select the driver and register tests. `fte3600-private.h` defines the

@@ -452,6 +452,14 @@ if 'fte3600' in drivers
     )
     test('brisk-core', brisk_core_test, suite: ['unit-tests'], env: envs)
 
+    ipa_core_test = executable('test-ipa-core',
+        sources: 'test-ipa-core.c',
+        dependencies: ipa_core_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+    test('ipa-core', ipa_core_test, suite: ['unit-tests'], env: envs)
+
     fte3600_protocol_test = executable('test-fte3600-protocol',
         sources: ['test-fte3600-protocol.c', '../libfprint/drivers/fte3600-protocol.c'],
         dependencies: gio_dep,
