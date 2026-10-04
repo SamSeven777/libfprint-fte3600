@@ -10,3 +10,5 @@ packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/libfprint/
 firmware/*.bin
+benchmark/
+external_engines/
