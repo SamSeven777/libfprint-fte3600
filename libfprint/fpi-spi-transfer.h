@@ -66,6 +66,7 @@ struct _FpiSpiTransfer
   guint ref_count;
 
   int   spidev_fd;
+  gsize buffer_size;
 
   /* Callbacks */
   gpointer               user_data;
@@ -83,6 +84,9 @@ struct _FpiSpiTransfer
 GType              fpi_spi_transfer_get_type (void) G_GNUC_CONST;
 FpiSpiTransfer     *fpi_spi_transfer_new (FpDevice *device,
                                           int       spidev_fd);
+FpiSpiTransfer     *fpi_spi_transfer_new_with_buffer_size (FpDevice *device,
+                                                           int       spidev_fd,
+                                                           gsize     buffer_size);
 FpiSpiTransfer     *fpi_spi_transfer_ref (FpiSpiTransfer *self);
 void               fpi_spi_transfer_unref (FpiSpiTransfer *self);
 

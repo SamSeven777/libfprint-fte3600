@@ -102,13 +102,21 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
  * Returns: (transfer full): A newly created #FpiSpiTransfer
  */
 FpiSpiTransfer *
-fpi_spi_transfer_new (FpDevice * device, int spidev_fd)
+fpi_spi_transfer_new (FpDevice *device, int spidev_fd)
+{
+  return fpi_spi_transfer_new_with_buffer_size (device, spidev_fd, 0);
+}
+
+/* A nonzero size comes from the transport ABI, not the spidev module. */
+FpiSpiTransfer *
+fpi_spi_transfer_new_with_buffer_size (FpDevice *device, int spidev_fd,
+                                       gsize buffer_size)
 {
   FpiSpiTransfer *self;
 
   g_assert (FP_IS_DEVICE (device));
 
-  if (G_UNLIKELY (block_size == 0))
+  if (buffer_size == 0 && G_UNLIKELY (block_size == 0))
     {
       g_autoptr(GError) error = NULL;
       g_autofree char *contents = NULL;
@@ -139,6 +147,7 @@ fpi_spi_transfer_new (FpDevice * device, int spidev_fd)
 
   self->device = device;
   self->spidev_fd = spidev_fd;
+  self->buffer_size = buffer_size ? buffer_size : block_size;
 
   return self;
 }
@@ -351,10 +360,10 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
 
   if (transfer->buffer_wr)
     {
-      if (skip < transfer->length_wr && len < block_size)
+      if (skip < transfer->length_wr && len < transfer->buffer_size)
         {
           xfer[transfers].tx_buf = (gsize) transfer->buffer_wr + skip;
-          xfer[transfers].len = MIN (block_size, transfer->length_wr - skip);
+          xfer[transfers].len = MIN (transfer->buffer_size, transfer->length_wr - skip);
 
           len += xfer[transfers].len;
           skip += xfer[transfers].len;
@@ -368,10 +377,10 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
 
   if (transfer->buffer_rd)
     {
-      if (skip < transfer->length_rd && len < block_size)
+      if (skip < transfer->length_rd && len < transfer->buffer_size)
         {
           xfer[transfers].rx_buf = (gsize) transfer->buffer_rd + skip;
-          xfer[transfers].len = MIN (block_size, transfer->length_rd - skip);
+          xfer[transfers].len = MIN (transfer->buffer_size, transfer->length_rd - skip);
 
           len += xfer[transfers].len;
           /* skip += xfer[transfers].len; */
@@ -458,16 +467,15 @@ transfer_thread_func (GTask        *task,
           return;
         }
 
-      if ((gsize) transfer->length_wr > block_size)
+      if ((gsize) transfer->length_wr > transfer->buffer_size)
         {
           g_task_return_new_error (task,
                                    G_IO_ERROR,
                                    G_IO_ERROR_MESSAGE_TOO_LARGE,
                                    "Full-duplex SPI transfer length %zd exceeds "
-                                   "spidev block size %" G_GSIZE_FORMAT "; "
-                                                                        "increase the spidev bufsiz module parameter",
+                                   "transport buffer size %" G_GSIZE_FORMAT,
                                    transfer->length_wr,
-                                   block_size);
+                                   transfer->buffer_size);
           return;
         }
 

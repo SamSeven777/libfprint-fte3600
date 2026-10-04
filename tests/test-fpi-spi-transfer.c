@@ -270,6 +270,40 @@ test_full_duplex_too_large (void)
 }
 
 static void
+test_transport_buffer_size (void)
+{
+  const gsize size = 10403;
+  g_autofree guint8 *request = g_malloc0 (size);
+  g_autofree guint8 *response = g_malloc0 (size);
+  g_autofree guint8 *reply = g_malloc0 (size);
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+
+  for (guint attempt = 0; attempt < 2; attempt++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(FpiSpiTransfer) transfer =
+        fpi_spi_transfer_new_with_buffer_size (device, MOCK_SPI_FD,
+                                                attempt == 0 ? 32768 : 8192);
+      mock_ioctl_reset (MOCK_IOCTL_FULL_DUPLEX, request, size, response, size, reply);
+      fpi_spi_transfer_write_full (transfer, request, size, NULL);
+      fpi_spi_transfer_read_full (transfer, response, size, NULL);
+      fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+      if (attempt == 0)
+        {
+          g_assert_true (fpi_spi_transfer_submit_sync (transfer, &error));
+          g_assert_no_error (error);
+          g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+        }
+      else
+        {
+          g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+          g_assert_error (error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE);
+          g_assert_cmpuint (mock_ioctl.call_count, ==, 0);
+        }
+    }
+}
+
+static void
 test_sequential_unchanged (void)
 {
   guint8 request[] = { 0x10, 0xef };
@@ -344,6 +378,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/spi-transfer/full-duplex/unequal-lengths", test_full_duplex_unequal_lengths);
   g_test_add_func ("/spi-transfer/full-duplex/too-large", test_full_duplex_too_large);
   g_test_add_func ("/spi-transfer/sequential/unchanged", test_sequential_unchanged);
+  g_test_add_func ("/spi-transfer/transport/buffer-size", test_transport_buffer_size);
   g_test_add_func ("/spi-transfer/log/sensitive-redaction", test_sensitive_log_redaction);
 
   return g_test_run ();
