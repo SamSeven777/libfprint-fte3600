@@ -394,6 +394,7 @@ if 'fte3600' in drivers
         medion_identify_io_test = executable('test-medion-identify-io',
             sources: ['test-medion-identify-io.c',
                       '../examples/fte3600-medion-identify.c',
+                      '../examples/fte3600-medion-boot.c',
                       '../examples/fte3600-medion-transport.c'],
             dependencies: libfprint_private_dep,
             link_with: libfprint_drivers,
@@ -402,6 +403,15 @@ if 'fte3600' in drivers
             install: false,
         )
         test('medion-identify-io', medion_identify_io_test,
+            suite: ['unit-tests'], env: envs)
+        medion_boot_test = executable('test-medion-boot',
+            sources: ['test-medion-boot.c', '../examples/fte3600-medion-boot.c'],
+            dependencies: libfprint_private_dep,
+            link_with: libfprint_drivers,
+            c_args: common_cflags + fte3600_personal_auth_cflags,
+            install: false,
+        )
+        test('medion-boot', medion_boot_test,
             suite: ['unit-tests'], env: envs)
     endif
 

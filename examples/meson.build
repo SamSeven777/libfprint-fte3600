@@ -34,7 +34,7 @@ if get_option('fte3600_medion_spidev')
     endif
     medion_spidev = executable('fte3600-medion',
         sources: ['fte3600-medion.c', 'fte3600-medion-transport.c',
-                  'fte3600-medion-identify.c'],
+                  'fte3600-medion-identify.c', 'fte3600-medion-boot.c'],
         dependencies: libfprint_private_dep,
         link_with: libfprint_drivers,
         c_args: common_cflags + fte3600_personal_auth_cflags,

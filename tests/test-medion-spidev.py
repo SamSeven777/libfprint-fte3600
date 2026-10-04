@@ -426,7 +426,8 @@ class MedionTests(unittest.TestCase):
                                  "--action", "identify-legacy")])
 
     def test_identify_legacy_rejects_mixed_actions_before_discovery(self):
-        for action in (["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"]):
+        for action in (["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"],
+                       ["--boot", "ft9338"]):
             with self.subTest(action=action), patch.object(MEDION, "discover") as discover:
                 with self.assertRaises(SystemExit) as caught:
                     self.run_action("--identify-legacy", *action)
@@ -436,9 +437,7 @@ class MedionTests(unittest.TestCase):
 
     def test_identify_legacy_has_no_firmware_upload_option(self):
         with patch.object(MEDION, "discover") as discover:
-            with self.assertRaises(SystemExit) as caught:
-                self.run_action("--identify-legacy", "--ft9338-firmware", "unused.bin")
-            self.assertEqual(caught.exception.code, 2)
+            self.assertNotEqual(self.run_action("--identify-legacy", "--firmware", "unused.bin"), 0)
             discover.assert_not_called()
         self.assertEqual(self.machine.log, [])
 
@@ -471,11 +470,115 @@ class MedionTests(unittest.TestCase):
         self.assert_no_binding_writes()
         self.assertFalse(any(item[:2] == ("command", str(m.tool)) for item in m.log))
 
+    def test_boot_passes_each_selected_chip_without_overriding_catalog_path(self):
+        m = self.machine
+        (m.spi / "driver_override").write_text("previous-driver\n")
+        for chip in ("ft9338", "ft9348"):
+            with self.subTest(chip=chip):
+                m.log.clear()
+                self.assertEqual(self.run_action("--boot", chip), 0, self.errors.getvalue())
+                self.assert_restored(override="previous-driver")
+                calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+                self.assertEqual(calls, [("command", str(m.tool), "--device", str(m.dev / "spidev9.0"),
+                                         "--reset-chip", str(m.dev / "gpiochip7"),
+                                         "--irq-chip", str(m.dev / "gpiochip12"),
+                                         "--action", "boot", "--chip", chip)])
+
+    def test_boot_passes_absolute_custom_firmware_for_the_selected_chip(self):
+        m = self.machine
+        firmware = m.root / "synthetic firmware.bin"
+        firmware.write_bytes(b"synthetic payload; catalog validation belongs to the C diagnostic")
+        symlink = m.root / "firmware-link.bin"
+        symlink.symlink_to(firmware)
+        for chip, source in (("ft9338", firmware), ("ft9348", symlink)):
+            with self.subTest(chip=chip):
+                m.log.clear()
+                self.assertEqual(self.run_action("--boot", chip, "--firmware", os.path.relpath(source)),
+                                 0, self.errors.getvalue())
+                self.assert_restored()
+                calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][-6:], ("--action", "boot", "--chip", chip,
+                                                "--firmware", str(source)))
+                self.assertNotIn("--output", calls[0])
+
+    def test_boot_rejects_unknown_chips_and_mixed_actions_before_discovery(self):
+        invalid = [["--boot", chip] for chip in ("ft9361", "unknown", "FT9338")]
+        invalid += [["--boot", "ft9338", *action]
+                    for action in (["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"])]
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), patch.object(MEDION, "discover") as discover:
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_action(*arguments)
+                self.assertEqual(caught.exception.code, 2)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+
+    def test_firmware_requires_boot_before_discovery(self):
+        for action in ([], ["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"]):
+            with self.subTest(action=action), patch.object(MEDION, "discover") as discover:
+                self.assertNotEqual(self.run_action(*action, "--firmware", "unused.bin"), 0)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+
+    def test_custom_firmware_must_exist_and_be_regular_before_discovery(self):
+        root = self.machine.root
+        regular = root / "synthetic.bin"
+        payload = b"synthetic payload; not vendor firmware"
+        regular.write_bytes(payload)
+        symlink = root / "dangling.bin"
+        symlink.symlink_to(root / "missing.bin")
+        fifo = root / "pipe.bin"
+        os.mkfifo(fifo)
+        for path in (root / "missing.bin", root, symlink, fifo, Path("/dev/null")):
+            with self.subTest(path=path), patch.object(MEDION, "discover") as discover:
+                self.assertNotEqual(self.run_action("--boot", "ft9338", "--firmware", str(path)), 0)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+        self.assertEqual(regular.read_bytes(), payload)
+
+    def test_boot_failure_restores_host_without_retrying_another_chip(self):
+        m = self.machine
+        m.tool_error = MEDION.DiagnosticError("synthetic selected firmware or application check failure")
+        for chip in ("ft9338", "ft9348"):
+            with self.subTest(chip=chip):
+                m.log.clear()
+                self.assertNotEqual(self.run_action("--boot", chip), 0)
+                self.assert_restored()
+                calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][-4:], ("--action", "boot", "--chip", chip))
+        self.assertNotIn("[done]", self.output.getvalue())
+
+    def test_boot_interruption_preserves_original_binding_and_service(self):
+        m = self.machine
+        m.loaded()
+        m.bind()
+        m.tool_error = MEDION.Interrupted(signal.SIGTERM)
+        self.assertEqual(self.run_action("--boot", "ft9338"), 128 + signal.SIGTERM)
+        self.assert_restored(binding="spidev")
+        self.assert_no_binding_writes()
+        self.assertNotIn("[done]", self.output.getvalue())
+
+    def test_environment_does_not_choose_a_boot_chip_or_firmware(self):
+        m = self.machine
+        with patch.dict(os.environ, {"FTE3600_FT9338_FIRMWARE": "/unrequested.bin",
+                                     "FTE3600_FIRMWARE": "/unrequested.bin",
+                                     "FTE3600_BOOT_CHIP": "ft9348"}):
+            self.assertEqual(self.run_action("--identify-legacy"), 0, self.errors.getvalue())
+            self.assertEqual(self.run_action("--boot", "ft9338"), 0, self.errors.getvalue())
+        self.assert_restored()
+        calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][-2:], ("--action", "identify-legacy"))
+        self.assertEqual(calls[1][-4:], ("--action", "boot", "--chip", "ft9338"))
+        self.assertTrue(all("--firmware" not in args for args in calls))
+
     def test_execution_requires_root_before_service_changes(self):
         with patch.object(MEDION.os, "geteuid", return_value=1000):
-            for action in ("--probe", "--identify-legacy"):
+            for action in (["--probe"], ["--identify-legacy"], ["--boot", "ft9338"]):
                 with self.subTest(action=action):
-                    self.assertNotEqual(self.run_action(action), 0)
+                    self.assertNotEqual(self.run_action(*action), 0)
         self.assertEqual(self.machine.log, [])
 
 

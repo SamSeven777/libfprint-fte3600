@@ -428,7 +428,7 @@ class Session:
         return errors
 
 
-def execute(resources, tool, action, output=None):
+def execute(resources, tool, action, output=None, chip=None, firmware=None):
     session = Session(resources)
     error = None
     try:
@@ -444,6 +444,13 @@ def execute(resources, tool, action, output=None):
                      "--action", action]
         if output is not None:
             arguments += ["--output", str(output)]
+        if chip is not None:
+            arguments += ["--chip", chip]
+        if firmware is not None:
+            arguments += ["--firmware", str(firmware)]
+        if action == "boot":
+            print(f"[candidate] Explicit {chip.upper()} RAM boot requested; "
+                  "the diagnostic must validate its firmware and application response.", flush=True)
         print(f"[diagnostic] Starting {action}; protocol stages follow", flush=True)
         command(arguments, inherit=True)
     except BaseException as caught:
@@ -469,16 +476,31 @@ def main(argv=None):
     actions.add_argument("--inspect", action="store_true", help="Read-only resource inventory (default)")
     actions.add_argument("--identify-legacy", action="store_true",
                          help="Check FT9338/FT9348 application and ROM identity without firmware upload or capture")
+    actions.add_argument("--boot", choices=("ft9338", "ft9348"),
+                         help="Explicitly boot the selected candidate's verified RAM firmware, without capture")
     actions.add_argument("--probe", action="store_true", help="Run chip identification")
     actions.add_argument("--init", action="store_true", help="Identify and initialize the sensor")
     actions.add_argument("--capture", metavar="OUTPUT", type=Path, help="Capture one frame to a new local file")
     parser.add_argument("--tool", type=Path,
                         default=Path(__file__).resolve().parents[1] / "build-medion/examples/fte3600-medion",
                         help="Path to the separately built fte3600-medion diagnostic")
+    parser.add_argument("--firmware", metavar="PATH", type=Path,
+                        help="Custom firmware file for --boot; otherwise use the selected chip's catalog path")
     args = parser.parse_args(argv)
     try:
-        action = ("identify-legacy" if args.identify_legacy else "capture" if args.capture is not None
+        action = ("boot" if args.boot is not None else "identify-legacy" if args.identify_legacy
+                  else "capture" if args.capture is not None
                   else "init" if args.init else "probe" if args.probe else None)
+        firmware = None
+        if args.firmware is not None:
+            if action != "boot":
+                raise DiagnosticError("--firmware requires --boot ft9338 or --boot ft9348")
+            # The C loader checks the opened regular file and verifies a bounded
+            # snapshot's size and catalog hash before sensor I/O. This pathname
+            # check is only early input validation; symlinks to files are valid.
+            firmware = Path(os.path.abspath(args.firmware))
+            if not stat.S_ISREG(firmware.stat().st_mode):
+                raise DiagnosticError(f"Firmware must be a regular file: {firmware}")
         resources = discover()
         print(f"[resources] ACPI {SPI_ACPI}: {resources.spi.name} on {resources.controller.name}", flush=True)
         print(f"[resources] reset {RESET_ACPI} INT3453: {resources.reset.path}, line 39, active-low", flush=True)
@@ -500,7 +522,7 @@ def main(argv=None):
             if os.path.lexists(output):
                 raise DiagnosticError(f"Capture destination already exists: {output}")
         with exclusive_lock(), signal_cleanup():
-            execute(resources, tool, action, output)
+            execute(resources, tool, action, output, chip=args.boot, firmware=firmware)
         return 0
     except (DiagnosticError, OSError, subprocess.SubprocessError) as error:
         print(f"[error] {error}", file=sys.stderr)

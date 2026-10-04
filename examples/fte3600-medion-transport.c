@@ -293,7 +293,7 @@ configure (FpiDeviceFte3600 *self, GError **error)
            "irq=%s:0 %s\n",
            mode, bits, speed, buffer_size, self->max_transfer,
            data->reset_gpiochip, data->irq_gpiochip,
-           data->skip_irq ? "not_requested (synchronous identification)" : "active_high rising");
+           data->skip_irq ? "not_requested (synchronous diagnostic)" : "active_high rising");
   return TRUE;
 fail:
   close_session (data);

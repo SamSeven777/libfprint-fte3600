@@ -4,7 +4,9 @@ The `medion-spidev` branch provides an experimental, standalone diagnostic path
 for the Medion E3224 wiring under investigation. Its recommended first hardware
 stage, `--identify-legacy`, checks the FT9338 and FT9348 identification paths
 without uploading firmware, initializing a capture backend or acquiring an
-image. Separate stages reuse this repository's general sensor discovery,
+image. The explicit `--boot ft9338` and `--boot ft9348` stages can then test
+the selected candidate's catalogued RAM firmware. Separate stages reuse this
+repository's general sensor discovery,
 initialization and capture state machines. The tool does not
 establish that the Medion sensor works, or that every laptop sold as an E3224
 has the same sensor and wiring.
@@ -118,6 +120,7 @@ failures; a module loaded for the experiment remains loaded.
 | --- | --- | --- |
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
 | `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries and bounded reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
+| `--boot ft9338` or `--boot ft9348` | Whether the explicitly selected firmware starts with its expected runtime parameters | Validate the selected payload, reset, upload to RAM, verify transfer and application status; no capture or IRQ request |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
 | `--init` | Whether that identified chip completes its existing initialization and cleanup | Probe plus chip initialization; eligible recovery may load matching firmware |
 | `--capture OUTPUT` | Whether initialization and a finger-triggered acquisition produce an image | Initialization, capture and cleanup; writes the requested local PGM |
@@ -144,12 +147,78 @@ the reported evidence and stage result together.
 
 This action does not change the normal driver's discovery rules. It does not
 upload firmware, run automatic chip initialization or fall through to capture.
-There is no firmware-upload option or environment-variable opt-in for this
-action. It is mutually exclusive with all other stages.
+This action rejects `--firmware`; no environment variable enables a RAM boot.
+It is mutually exclusive with all other stages.
+
+## Boot the selected candidate's RAM firmware
+
+FT9338 is the first candidate for this experiment. `--boot ft9338` explicitly
+selects its RAM startup sequence; an initial `0x0000` response is allowed and
+successful prior identification is not required. The tool rejects an observed,
+nonempty identity that contradicts the selected profile. A failed FT9338 boot
+does not automatically retry FT9348. `--identify-legacy` remains available when
+only identification is wanted.
+
+Use a local Windows driver DLL or an already extracted raw firmware file as
+input. The installer verifies the selected payload's exact size and SHA-256,
+then writes it to the requested staging directory. These commands do not fetch
+a driver package or install firmware system-wide:
+
+```sh
+sh scripts/install-firmware.sh --chip ft9338 \
+  --input /path/to/ftWbioUmdfDriverV2.dll --destdir "$PWD/medion-firmware"
+sudo python3 scripts/medion-spidev.py --boot ft9338 \
+  --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
+```
+
+For a raw file, replace the installer's `--input` value with its path, such as
+`/path/to/ft9338.bin`. The installer also accepts a local CAB; use
+`sh scripts/install-firmware.sh --help` for input options. No firmware payload
+is distributed in this repository.
+
+FT9348 is a separate, explicit choice, using its own payload and startup
+sequence. Choose these commands only when running that candidate's experiment:
+
+```sh
+sh scripts/install-firmware.sh --chip ft9348 \
+  --input /path/to/ftWbioUmdfDriverV2.dll --destdir "$PWD/medion-firmware"
+sudo python3 scripts/medion-spidev.py --boot ft9348 \
+  --firmware "$PWD/medion-firmware/fte3600/ft9348.bin"
+```
+
+`--firmware PATH` is optional and valid only with `--boot`. Without it, the C
+tool uses `/usr/lib/firmware/fte3600/ft9338.bin` or
+`/usr/lib/firmware/fte3600/ft9348.bin`, according to the selected chip. A custom
+file must also match that chip's catalog entry; its name does not select a
+profile. The launcher passes an absolute path, and the C loader verifies a
+bounded regular-file snapshot before opening or configuring SPI:
+
+| Selected chip | Payload size | SHA-256 |
+| --- | --- | --- |
+| FT9338 | 14184 bytes | `ca4490163a1754639e945da3bd6ecbb4a498138962d611fc825dc129819efc46` |
+| FT9348 | 10312 bytes | `48d658d588c297a5d749c1f4bd6a0f5bd3d6ede59040e1674f95fe9db08eede2` |
+
+Each boot uses its own upload and start protocol. FT9338 additionally reads
+back the complete uploaded payload before starting it. The tool then checks
+application status, geometry, firmware version and AGC version against the
+selected profile. It uses synchronous SPI and reset GPIO without requesting or
+waiting for IRQ; the launcher still validates the fixed GPIO controller
+mappings. This uses the distribution's `spidev` module and needs no custom
+kernel module. It exits after the boot checks without acquiring an image or
+entering an authentication flow.
+
+A successful boot means the selected firmware started and its runtime
+parameters matched. It does not independently identify the underlying silicon
+or demonstrate capture. On failure, the tool releases reset and restores host
+transport settings; the sensor's ROM/application state is unknown, and a
+working application-idle state is not promised. Also check the launcher's
+binding and service restoration result. Neither candidate has a confirmed
+Medion hardware success from these synthetic tests.
+
+## General driver stages
 
 The general stages remain available for follow-up after reviewing the
-identification result; do not choose or upload firmware merely from a board
-name or a candidate chip:
+identification result. Their normal discovery and recovery rules are unchanged:
 
 ```sh
 sudo python3 scripts/medion-spidev.py --probe
@@ -161,8 +230,8 @@ The launcher uses `build-medion/examples/fte3600-medion` by default. Use
 `--tool /absolute/path/to/examples/fte3600-medion` only when using a different
 build directory. Keep any stage's exact failure and determine whether it came
 from host access, identification or sensor initialization. Host-access failures
-must be resolved before another hardware stage; an unidentified chip is not
-authorization to try guessed firmware.
+must be resolved before another hardware stage. Candidate RAM boot requires an
+explicit `--boot` choice; a general-stage failure never selects it automatically.
 
 Inspection needs no root privileges. Operating the sensor requires root. The
 diagnostic requests cancellation after 60 seconds per protocol stage; Ctrl+C

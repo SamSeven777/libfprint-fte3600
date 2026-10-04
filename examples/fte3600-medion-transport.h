@@ -10,7 +10,7 @@ typedef struct
   const gchar *spi_path;
   const gchar *reset_gpiochip;
   const gchar *irq_gpiochip;
-  /* Synchronous identification needs reset and SPI, but never consumes IRQs.
+  /* Synchronous identification/boot need reset and SPI, but never consume IRQs.
    * Leave FALSE for the ordinary probe/init/capture transport. */
   gboolean skip_irq;
 } Fte3600MedionTransportConfig;
