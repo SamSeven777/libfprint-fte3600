@@ -267,16 +267,16 @@ __wrap_g_file_get_contents (const gchar *filename, gchar **contents,
 }
 
 static void
-setup (Fixture *f, gconstpointer unused)
+setup_transport (Fixture *f, gboolean skip_irq)
 {
   const Fte3600MedionTransportConfig config = {
     .spi_path = "/diagnostic/spi",
     .reset_gpiochip = "/diagnostic/reset-chip",
     .irq_gpiochip = "/diagnostic/irq-chip",
+    .skip_irq = skip_irq,
   };
   g_autoptr(GError) error = NULL;
 
-  (void) unused;
   mock = f;
   f->self.spi_fd = -1;
   f->speed = 2000000;
@@ -287,6 +287,20 @@ setup (Fixture *f, gconstpointer unused)
   g_assert_true (fte3600_medion_transport_attach (&f->self, &config, &error));
   g_assert_no_error (error);
   f->self.spi_fd = new_fd (SPI_FD);
+}
+
+static void
+setup (Fixture *f, gconstpointer unused)
+{
+  (void) unused;
+  setup_transport (f, FALSE);
+}
+
+static void
+setup_without_irq (Fixture *f, gconstpointer unused)
+{
+  (void) unused;
+  setup_transport (f, TRUE);
 }
 
 static void
@@ -355,6 +369,51 @@ test_probe_reopen (Fixture *f, gconstpointer unused)
   configured (f);
   g_assert_cmpuint (f->irq_requests, ==, 2);
   g_assert_cmpuint (f->reset_requests, ==, 2);
+}
+
+static void
+test_synchronous_without_irq (Fixture *f, gconstpointer unused)
+{
+  g_autoptr(GError) error = NULL;
+
+  (void) unused;
+  /* Simulate an unavailable interrupt line. Synchronous identification should
+   * not even try that request, while reset and SPI restoration remain real. */
+  f->request_failure = IRQ_CHIP;
+  for (guint session = 0; session < 2; session++)
+    {
+      guint32 events = 99;
+
+      g_assert_true (f->self.transport_ops->configure (&f->self, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (f->irq_requests, ==, 0);
+      g_assert_cmpuint (f->reset_requests, ==, session + 1);
+      g_assert_cmpuint (f->reset_value, ==, 0);
+      g_assert_cmpuint (f->speed, ==, 1000000);
+      g_assert_cmpuint (f->bits, ==, 8);
+      g_assert_cmpint (f->self.transport_ops->irq_fd (&f->self), ==, -1);
+      g_assert_false (f->self.transport_ops->get_events (&f->self, &events, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CLOSED);
+      g_assert_cmpuint (events, ==, 0);
+      g_assert_cmpuint (f->read_calls, ==, 0);
+      g_clear_error (&error);
+      g_assert_true (f->self.transport_ops->set_reset (&f->self, TRUE, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (f->reset_value, ==, 1);
+
+      __wrap_close (f->self.spi_fd);
+      f->self.spi_fd = -1;
+      f->self.transport_ops->release (&f->self);
+      f->self.transport_ops->release (&f->self);
+      g_assert_cmpuint (f->reset_value, ==, 0);
+      g_assert_cmpuint (f->speed, ==, 2000000);
+      g_assert_cmpuint (f->bits, ==, 16);
+      g_assert_cmpuint (f->open_fds, ==, 0);
+      if (session == 0)
+        f->self.spi_fd = new_fd (SPI_FD);
+    }
+  g_assert_true (fte3600_medion_transport_detach (&f->self, &error));
+  g_assert_no_error (error);
 }
 
 static void
@@ -466,6 +525,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add ("/medion-transport/configuration", Fixture, NULL, setup, test_configuration, teardown);
   g_test_add ("/medion-transport/probe-reopen", Fixture, NULL, setup, test_probe_reopen, teardown);
+  g_test_add ("/medion-transport/synchronous-no-irq", Fixture, NULL, setup_without_irq, test_synchronous_without_irq, teardown);
+  g_test_add ("/medion-transport/no-irq-fail-reset", Fixture, GINT_TO_POINTER (RESET_CHIP), setup_without_irq, test_setup_failure, teardown);
   g_test_add ("/medion-transport/smaller-limits", Fixture, NULL, setup, test_smaller_limits, teardown);
   g_test_add ("/medion-transport/fail-spi", Fixture, GINT_TO_POINTER (SPI_FD), setup, test_setup_failure, teardown);
   g_test_add ("/medion-transport/fail-irq", Fixture, GINT_TO_POINTER (IRQ_CHIP), setup, test_setup_failure, teardown);

@@ -1,8 +1,11 @@
 # Medion E3224 spidev diagnostics
 
 The `medion-spidev` branch provides an experimental, standalone diagnostic path
-for the Medion E3224 wiring under investigation. It reuses this repository's
-sensor identification, initialization and capture state machines. It does not
+for the Medion E3224 wiring under investigation. Its recommended first hardware
+stage, `--identify-legacy`, checks the FT9338 and FT9348 identification paths
+without uploading firmware, initializing a capture backend or acquiring an
+image. Separate stages reuse this repository's general sensor discovery,
+initialization and capture state machines. The tool does not
 establish that the Medion sensor works, or that every laptop sold as an E3224
 has the same sensor and wiring.
 
@@ -23,9 +26,9 @@ lists `FTE3600` and `2808:9338`, explicitly obtained from a Windows INF.
 says his laptop has the same reader, but supplies no chip-register response.
 In the audited Windows package 2.0.3.102, `ACPI\FTE3600` selects the SPI install
 section and `USB\VID_2808&PID_9338` selects the USB install section. These are
-separate device matches in one package, not evidence that every FTE3600 SPI
-device contains FT9338 silicon. The diagnostic therefore does not force an
-FT9338 backend based on that issue title or the USB product ID.
+separate device matches in one package. FT9338 is the leading candidate for
+this experiment, with FT9348 as the other identification target. This candidate
+choice does not force a backend or replace a response from the sensor.
 
 Linux Hardware's [published index](https://github.com/linuxhw/TestDays/blob/main/Location/Belgium/README.md)
 contains E3224 probe [`9def2aed31`](https://linux-hardware.org/?probe=9def2aed31).
@@ -114,14 +117,41 @@ failures; a module loaded for the experiment remains loaded.
 | Stage | What it establishes | Sensor operations |
 | --- | --- | --- |
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
+| `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries and bounded reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
 | `--init` | Whether that identified chip completes its existing initialization and cleanup | Probe plus chip initialization; eligible recovery may load matching firmware |
 | `--capture OUTPUT` | Whether initialization and a finger-triggered acquisition produce an image | Initialization, capture and cleanup; writes the requested local PGM |
 
-Run each stage separately, starting with host inspection:
+Start with host inspection, then run the focused identification stage:
 
 ```sh
 python3 scripts/medion-spidev.py --inspect
+sudo python3 scripts/medion-spidev.py --identify-legacy
+```
+
+`--identify-legacy` uses native SPI/GPIO access directly, without first requiring
+the general device initialization (`GInitable`) to identify the chip. It uses
+SPI and reset GPIO synchronously and does not request or wait for the IRQ line;
+the launcher still checks the board's GPIO controller mappings. The later
+probe, initialization and capture stages retain their IRQ setup. It reads
+the application registers `0x14` and `0x15` and can use the documented
+ROM-A8 or boot-B38 OTP identification paths. A prior `0x58/0x58` application
+response is not an entry requirement: a previous all-zero generic probe can
+still be followed by this explicit identification experiment. If all paths
+return only zeroes, or the responses remain ambiguous or unrecognized, the
+result stays unknown; it does not select FT9338 or FT9348 by elimination. Read
+the reported evidence and stage result together.
+
+This action does not change the normal driver's discovery rules. It does not
+upload firmware, run automatic chip initialization or fall through to capture.
+There is no firmware-upload option or environment-variable opt-in for this
+action. It is mutually exclusive with all other stages.
+
+The general stages remain available for follow-up after reviewing the
+identification result; do not choose or upload firmware merely from a board
+name or a candidate chip:
+
+```sh
 sudo python3 scripts/medion-spidev.py --probe
 sudo python3 scripts/medion-spidev.py --init
 sudo python3 scripts/medion-spidev.py --capture "$PWD/medion-capture.pgm"
@@ -129,9 +159,10 @@ sudo python3 scripts/medion-spidev.py --capture "$PWD/medion-capture.pgm"
 
 The launcher uses `build-medion/examples/fte3600-medion` by default. Use
 `--tool /absolute/path/to/examples/fte3600-medion` only when using a different
-build directory. Do not advance after an earlier stage fails: keep its exact
-error and determine whether it came from host access, identification or sensor
-initialization.
+build directory. Keep any stage's exact failure and determine whether it came
+from host access, identification or sensor initialization. Host-access failures
+must be resolved before another hardware stage; an unidentified chip is not
+authorization to try guessed firmware.
 
 Inspection needs no root privileges. Operating the sensor requires root. The
 diagnostic requests cancellation after 60 seconds per protocol stage; Ctrl+C
@@ -143,7 +174,9 @@ interrupt, the diagnostic cannot run its SPI/GPIO cleanup. That outcome is
 reported as a failure; restoration of SPI parameters and reset state is then
 not guaranteed.
 
-`--probe` is **not read-only hardware inspection**. Discovery includes the
+`--identify-legacy` and `--probe` are **not read-only hardware inspection**.
+The focused action can reset the device and enter ROM to obtain OTP evidence.
+General discovery includes the
 bounded wake and ROM negotiation paths documented in
 [dynamic discovery](dynamic-discovery.md) and [special probing](special-probe.md).
 It does not upload firmware. Initialization can use firmware only after the
@@ -170,7 +203,18 @@ when capture is waiting for a finger.
 Keep host-access failures separate from sensor responses. Failure to load the
 distribution module, claim a GPIO line, configure SPI or open a node is not an
 unsupported-chip result. Likewise, successful host inspection does not show
-that the sensor is powered, reset correctly or answering SPI commands.
+that the sensor is powered, reset correctly or answering SPI commands. For
+`--identify-legacy`, distinguish an application register signature from ROM
+family plus OTP evidence. The application signatures `0x58/0x58` and
+`0x60/0x60` correspond to the FT9338 and FT9348 runtime profiles respectively;
+they are runtime geometry signatures, not USB IDs. Without that runtime
+evidence, a boot-B38 OTP classification is reported as an FT9338 candidate
+according to the Windows identification rule, not as confirmation of an
+immutable silicon chip ID. Raw observations can appear before cleanup finishes;
+`IDENTIFY PASS` is emitted only after the C diagnostic restores its transport
+state. Also check the launcher's final restoration result. Identification does
+not establish successful initialization or capture. No Medion hardware
+success is claimed for this new identification stage.
 
 Reports should identify the stage, the confirmed identity and the error, without
 printing fingerprint pixels, feature descriptors or templates. A requested PGM

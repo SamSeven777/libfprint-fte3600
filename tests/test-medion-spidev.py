@@ -414,9 +414,68 @@ class MedionTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"synthetic capture placeholder")
         self.assert_restored()
 
+    def test_identify_legacy_runs_only_the_requested_action_and_restores(self):
+        m = self.machine
+        (m.spi / "driver_override").write_text("previous-driver\n")
+        self.assertEqual(self.run_action("--identify-legacy"), 0, self.errors.getvalue())
+        self.assert_restored(override="previous-driver")
+        calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+        self.assertEqual(calls, [("command", str(m.tool), "--device", str(m.dev / "spidev9.0"),
+                                 "--reset-chip", str(m.dev / "gpiochip7"),
+                                 "--irq-chip", str(m.dev / "gpiochip12"),
+                                 "--action", "identify-legacy")])
+
+    def test_identify_legacy_rejects_mixed_actions_before_discovery(self):
+        for action in (["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"]):
+            with self.subTest(action=action), patch.object(MEDION, "discover") as discover:
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_action("--identify-legacy", *action)
+                self.assertEqual(caught.exception.code, 2)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+
+    def test_identify_legacy_has_no_firmware_upload_option(self):
+        with patch.object(MEDION, "discover") as discover:
+            with self.assertRaises(SystemExit) as caught:
+                self.run_action("--identify-legacy", "--ft9338-firmware", "unused.bin")
+            self.assertEqual(caught.exception.code, 2)
+            discover.assert_not_called()
+        self.assertEqual(self.machine.log, [])
+
+    def test_identify_legacy_unknown_restores_without_automatic_fallback(self):
+        m = self.machine
+        m.tool_error = MEDION.DiagnosticError("synthetic unknown identity: all-zero response")
+        self.assertNotEqual(self.run_action("--identify-legacy"), 0)
+        self.assert_restored()
+        calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-2:], ("--action", "identify-legacy"))
+        self.assertIn("unknown identity: all-zero response", self.errors.getvalue())
+        self.assertNotIn("[done]", self.output.getvalue())
+
+    def test_identify_legacy_interruption_preserves_existing_binding(self):
+        m = self.machine
+        m.loaded()
+        m.bind()
+        m.tool_error = MEDION.Interrupted(signal.SIGINT)
+        self.assertEqual(self.run_action("--identify-legacy"), 128 + signal.SIGINT)
+        self.assert_restored(binding="spidev")
+        self.assert_no_binding_writes()
+        self.assertNotIn("[done]", self.output.getvalue())
+
+    def test_identify_legacy_service_failure_prevents_the_diagnostic(self):
+        m = self.machine
+        m.fail.add("stop")
+        self.assertNotEqual(self.run_action("--identify-legacy"), 0)
+        self.assert_restored()
+        self.assert_no_binding_writes()
+        self.assertFalse(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+
     def test_execution_requires_root_before_service_changes(self):
         with patch.object(MEDION.os, "geteuid", return_value=1000):
-            self.assertNotEqual(self.run_action("--probe"), 0)
+            for action in ("--probe", "--identify-legacy"):
+                with self.subTest(action=action):
+                    self.assertNotEqual(self.run_action(action), 0)
         self.assertEqual(self.machine.log, [])
 
 

@@ -467,6 +467,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--inspect", action="store_true", help="Read-only resource inventory (default)")
+    actions.add_argument("--identify-legacy", action="store_true",
+                         help="Check FT9338/FT9348 application and ROM identity without firmware upload or capture")
     actions.add_argument("--probe", action="store_true", help="Run chip identification")
     actions.add_argument("--init", action="store_true", help="Identify and initialize the sensor")
     actions.add_argument("--capture", metavar="OUTPUT", type=Path, help="Capture one frame to a new local file")
@@ -475,13 +477,14 @@ def main(argv=None):
                         help="Path to the separately built fte3600-medion diagnostic")
     args = parser.parse_args(argv)
     try:
+        action = ("identify-legacy" if args.identify_legacy else "capture" if args.capture is not None
+                  else "init" if args.init else "probe" if args.probe else None)
         resources = discover()
         print(f"[resources] ACPI {SPI_ACPI}: {resources.spi.name} on {resources.controller.name}", flush=True)
         print(f"[resources] reset {RESET_ACPI} INT3453: {resources.reset.path}, line 39, active-low", flush=True)
         print(f"[resources] IRQ {IRQ_ACPI} INT3453: {resources.irq.path}, line 0, rising edge", flush=True)
         current = binding(resources.spi)
         print(f"[resources] Current driver: {current or 'unbound'}", flush=True)
-        action = "capture" if args.capture is not None else "init" if args.init else "probe" if args.probe else None
         if action is None:
             device = spidev_node(resources.spi, required=False)
             print(f"[resources] spidev: {device.path if device else 'not bound; execution will attempt a temporary binding'}")

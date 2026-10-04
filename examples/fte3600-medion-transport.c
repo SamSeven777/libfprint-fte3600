@@ -25,6 +25,7 @@ typedef struct
   gchar *spi_path;
   gchar *reset_gpiochip;
   gchar *irq_gpiochip;
+  gboolean skip_irq;
   gint restore_fd;
   gint reset_fd;
   gint irq_fd;
@@ -275,8 +276,9 @@ configure (FpiDeviceFte3600 *self, GError **error)
                            "SPI configuration readback does not satisfy diagnostic limits");
       goto fail;
     }
-  /* Acquire the input first: an unavailable IRQ must not pulse/reset a chip. */
-  if (!request_line (data->irq_gpiochip, FALSE, &data->irq_fd, error) ||
+  /* Capture needs an IRQ, so acquire its input before changing reset. Explicit
+   * synchronous identification does not need or claim the interrupt line. */
+  if ((!data->skip_irq && !request_line (data->irq_gpiochip, FALSE, &data->irq_fd, error)) ||
       !request_line (data->reset_gpiochip, TRUE, &data->reset_fd, error))
     goto fail;
   self->spi_mode = mode;
@@ -288,9 +290,10 @@ configure (FpiDeviceFte3600 *self, GError **error)
   g_print ("Medion diagnostic transport: mode=0x%08x bits=%u configured_speed_limit_hz=%u "
            "spidev_bufsiz=%" G_GUINT64_FORMAT " max_transfer=%u "
            "reset=%s:39 active_low logical0=physical_high "
-           "irq=%s:0 active_high rising\n",
+           "irq=%s:0 %s\n",
            mode, bits, speed, buffer_size, self->max_transfer,
-           data->reset_gpiochip, data->irq_gpiochip);
+           data->reset_gpiochip, data->irq_gpiochip,
+           data->skip_irq ? "not_requested (synchronous identification)" : "active_high rising");
   return TRUE;
 fail:
   close_session (data);
@@ -423,6 +426,7 @@ fte3600_medion_transport_attach (FpiDeviceFte3600                    *self,
   data->spi_path = g_strdup (config->spi_path);
   data->reset_gpiochip = g_strdup (config->reset_gpiochip);
   data->irq_gpiochip = g_strdup (config->irq_gpiochip);
+  data->skip_irq = config->skip_irq;
   data->restore_fd = data->reset_fd = data->irq_fd = -1;
   self->transport_data = data;
   self->transport_ops = &medion_ops;
