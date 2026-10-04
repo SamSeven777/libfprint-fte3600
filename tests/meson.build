@@ -362,6 +362,9 @@ if 'fte3600' in drivers
     test('fte3600-install-firmware', python3,
         args: files('test-install-firmware.py'),
         suite: ['unit-tests'], env: envs)
+    test('fte3600-setup', python3,
+        args: files('test-setup-fte3600.py'),
+        suite: ['unit-tests'], env: envs)
 
     foreach chip, test_source : {
         'fw9369': 'test-fte3600-fw9369-protocol.c',

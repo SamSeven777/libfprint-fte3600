@@ -152,8 +152,9 @@ are obsolete; preserve settings another device needs.
 
 After boot, verify `fte3600` is the SPI device's driver and that
 `/sys/class/misc/fte3600-*/fte3600_abi` contains `1`. If the fprintd service has a
-device sandbox, generate exact-node permissions; the script prints only and
-never changes the system:
+device sandbox, generate exact-node permissions. With no arguments the script
+only prints configuration; it fails unless a real, correctly bound ABI 1 bridge
+node exists. Its explicit `--install` and `--remove` modes modify the drop-in:
 
 ```sh
 sh scripts/fte3600-device-allow.sh > /tmp/fte3600-bridge.conf

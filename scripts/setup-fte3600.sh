@@ -37,6 +37,28 @@ check_root() {
   fi
 }
 
+module_loaded() {
+  # Read the complete output, even with pipefail enabled.
+  lsmod | grep '^fte3600 ' >/dev/null
+}
+
+relabel_bridge_devices() {
+  local expected_type="${1:-}" node context label_user label_role label_type label_range
+  for node in /dev/fte3600-*; do
+    [ -c "$node" ] || continue
+    if [ -n "$expected_type" ]; then
+      context=$(matchpathcon -n "$node") || return 1
+      IFS=: read -r label_user label_role label_type label_range <<< "$context"
+      if [ "$label_type" != "$expected_type" ]; then
+        log_fail "SELinux expects '$label_type' for $node, not '$expected_type'. Review local file-context overrides."
+        return 1
+      fi
+    fi
+    restorecon -v "$node" || return 1
+    matchpathcon -V "$node" || return 1
+  done
+}
+
 detect_distro() {
   if [ -f /etc/os-release ]; then
     # shellcheck source=/dev/null
@@ -114,7 +136,7 @@ cmd_check() {
 
   # 4. Check Kernel Module & Bridge Device
   log_header "Bridge Module & Device Node"
-  if lsmod | grep -q "^fte3600 "; then
+  if module_loaded; then
     log_ok "Kernel module 'fte3600' is loaded."
   else
     log_warn "Kernel module 'fte3600' is not loaded."
@@ -196,7 +218,11 @@ cmd_install_kernel() {
     cp -f "$KERNEL_SRC/fte3600-policy-test.c" "$DKMS_DEST/"
 
     log_info "Registering DKMS package fte3600/${DKMS_VERSION}..."
-    dkms remove -m fte3600 -v "${DKMS_VERSION}" --all >/dev/null 2>&1 || true
+    local dkms_status
+    dkms_status=$(dkms status -m fte3600 -v "$DKMS_VERSION")
+    if [ -n "$dkms_status" ]; then
+      dkms remove -m fte3600 -v "$DKMS_VERSION" --all
+    fi
     dkms add -m fte3600 -v "${DKMS_VERSION}"
     dkms build -m fte3600 -v "${DKMS_VERSION}"
     dkms install -m fte3600 -v "${DKMS_VERSION}" --force
@@ -212,12 +238,15 @@ cmd_install_kernel() {
   fi
 
   log_info "Attempting to load module..."
-  modprobe fte3600 2>/dev/null || insmod "$KERNEL_SRC/fte3600.ko" 2>/dev/null || true
-  if lsmod | grep -q "^fte3600 "; then
-    log_ok "Kernel module loaded successfully."
-  else
-    log_warn "Module built, but could not be loaded immediately (normal if ACPI device is not present or Secure Boot is active)."
+  if ! modprobe fte3600; then
+    log_fail "Module installation finished, but loading failed. Check the error above and any Secure Boot signing requirements."
+    return 1
   fi
+  if ! "$REPO_DIR/scripts/fte3600-device-allow.sh" >/dev/null; then
+    log_fail "Module installed, but no usable FTE3600 bridge was found. Installation is incomplete."
+    return 1
+  fi
+  log_ok "Kernel bridge is bound and its device node is available."
 }
 
 cmd_install_systemd() {
@@ -240,27 +269,36 @@ cmd_install_selinux() {
     exit 1
   fi
 
-  if ! command -v semodule >/dev/null 2>&1; then
-    log_fail "'semodule' utility not found. Install policycoreutils."
-    exit 1
-  fi
+  local tool
+  for tool in semodule restorecon matchpathcon; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      log_fail "'$tool' utility not found. Install the SELinux policy and labeling tools first."
+      return 1
+    fi
+  done
 
   log_info "Installing SELinux CIL policy ($SELINUX_CIL)..."
   semodule -i "$SELINUX_CIL"
+  relabel_bridge_devices fte3600_device_t
   log_ok "SELinux policy '${SELINUX_POLICY_NAME}' installed successfully."
 }
 
 cmd_install_all() {
   check_root
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log_fail "install-all requires systemd. Use the individual installation commands on other systems."
+    return 1
+  fi
   cmd_install_kernel
   cmd_install_systemd
   cmd_install_selinux
 
   log_header "Restarting fprintd Service"
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart fprintd 2>/dev/null || true
-    log_ok "fprintd service restarted."
+  if ! systemctl restart fprintd.service; then
+    log_fail "fprintd failed to restart; installation is incomplete. Inspect 'systemctl status fprintd.service'."
+    return 1
   fi
+  log_ok "fprintd service restarted."
 
   echo ""
   log_ok "All FTE3600 prerequisites, kernel bridge, systemd, and SELinux patches applied!"
@@ -271,34 +309,105 @@ cmd_uninstall() {
   check_root
   log_header "Uninstalling FTE3600 System Integration"
 
-  # 1. Unload module
-  if lsmod | grep -q "^fte3600 "; then
+  # Check removal prerequisites before stopping the service or deleting files.
+  local dkms_status="" policy_list="" remove_policy=0 selinux_live=0
+  local service_state="not-found" restart_service=0 loaded_modules tool
+  if command -v dkms >/dev/null 2>&1; then
+    dkms_status=$(dkms status -m fte3600 -v "$DKMS_VERSION")
+  elif [ -e "$DKMS_DEST" ]; then
+    log_fail "DKMS sources are present, but dkms is unavailable. Restore dkms before uninstalling."
+    return 1
+  fi
+  if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+    selinux_live=1
+  fi
+  # The module store persists when SELinux (or the module itself) is disabled.
+  # Remove only priority 400, where this helper installs its local policy.
+  if command -v semodule >/dev/null 2>&1; then
+    policy_list=$(semodule --list-modules=full)
+    if printf '%s\n' "$policy_list" | grep -E "^[[:space:]]*400[[:space:]]+${SELINUX_POLICY_NAME}([[:space:]]|$)" >/dev/null; then
+      remove_policy=1
+    fi
+  elif [ "$selinux_live" = 1 ]; then
+    log_fail "semodule is required to inspect and remove the SELinux policy."
+    return 1
+  fi
+  if [ "$remove_policy" = 1 ] && [ "$selinux_live" = 1 ]; then
+    for tool in restorecon matchpathcon; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        log_fail "'$tool' is required to restore device labels after policy removal."
+        return 1
+      fi
+    done
+  fi
+  if ! loaded_modules=$(lsmod); then
+    log_fail "Cannot inspect loaded modules; uninstall has not changed installed files."
+    return 1
+  fi
+
+  # Stop the daemon before attempting to release its module reference. Other
+  # clients can still hold a descriptor; a failed unload must abort deletion.
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state=$(systemctl show --property=LoadState --value fprintd.service)
+    if [ "$service_state" != "not-found" ]; then
+      if systemctl is-active --quiet fprintd.service; then
+        restart_service=1
+      fi
+      systemctl stop fprintd.service
+    fi
+  fi
+
+  # Refresh after stopping fprintd. A failed query is not evidence of absence.
+  if ! loaded_modules=$(lsmod); then
+    log_fail "Cannot inspect loaded modules; installed files have been retained."
+    return 1
+  fi
+  if printf '%s\n' "$loaded_modules" | grep '^fte3600 ' >/dev/null; then
     log_info "Unloading fte3600 kernel module..."
-    rmmod fte3600 2>/dev/null || true
+    if ! rmmod fte3600; then
+      log_fail "Module is still loaded. Close fingerprint clients and retry; installed files have been retained."
+      if [ "$restart_service" = 1 ]; then
+        systemctl start fprintd.service || log_warn "Could not restore the previously active fprintd service."
+      fi
+      return 1
+    fi
+    if ! loaded_modules=$(lsmod); then
+      log_fail "Cannot confirm that the module was unloaded; installed files have been retained."
+      return 1
+    fi
+    if printf '%s\n' "$loaded_modules" | grep '^fte3600 ' >/dev/null; then
+      log_fail "Module is still present after the unload request; installed files have been retained."
+      return 1
+    fi
   fi
 
   # 2. DKMS removal
-  if command -v dkms >/dev/null 2>&1; then
+  if [ -n "$dkms_status" ]; then
     log_info "Removing DKMS module..."
-    dkms remove -m fte3600 -v "${DKMS_VERSION}" --all >/dev/null 2>&1 || true
-    rm -rf "$DKMS_DEST"
+    dkms remove -m fte3600 -v "$DKMS_VERSION" --all
   fi
+  rm -rf "$DKMS_DEST"
   rm -f "/lib/modules/$(uname -r)/extra/fte3600.ko"
   depmod -a
 
   # 3. systemd removal
   log_info "Removing systemd drop-in override..."
-  "$REPO_DIR/scripts/fte3600-device-allow.sh" --remove || true
+  "$REPO_DIR/scripts/fte3600-device-allow.sh" --remove
 
   # 4. SELinux removal
-  if command -v semodule >/dev/null 2>&1 && semodule -l 2>/dev/null | grep -q "^${SELINUX_POLICY_NAME}\b"; then
+  if [ "$remove_policy" = 1 ]; then
     log_info "Removing SELinux module '${SELINUX_POLICY_NAME}'..."
-    semodule -r "${SELINUX_POLICY_NAME}" 2>/dev/null || true
+    if [ "$selinux_live" = 1 ]; then
+      semodule -X 400 -r "$SELINUX_POLICY_NAME"
+      relabel_bridge_devices
+    else
+      semodule -n -X 400 -r "$SELINUX_POLICY_NAME"
+    fi
   fi
 
-  # 5. Restart fprintd
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart fprintd 2>/dev/null || true
+  # Restore a previously active daemon; do not start one that was stopped.
+  if [ "$restart_service" = 1 ]; then
+    systemctl start fprintd.service
   fi
 
   log_ok "Uninstall and cleanup completed."

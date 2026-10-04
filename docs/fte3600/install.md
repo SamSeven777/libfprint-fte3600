@@ -212,6 +212,7 @@ meson test -C build-fte3600 --print-errorlogs \
 
 # Local synthetic installer tests; no downloads or system installation
 python3 tests/test-install-firmware.py
+python3 tests/test-setup-fte3600.py
 
 # Install library
 sudo meson install -C build-fte3600
@@ -232,24 +233,54 @@ The repository provides an automated script to inspect system prerequisites, ins
 # 1. Run prerequisite health check (no root required)
 ./scripts/setup-fte3600.sh check
 
-# 2. Automated end-to-end installation (DKMS + systemd + SELinux)
+# 2. Install the bridge and service integration (DKMS + systemd + SELinux)
 sudo ./scripts/setup-fte3600.sh install-all
 
 # 3. Check live status
 sudo ./scripts/setup-fte3600.sh status
 ```
 
+Before upgrading an old spidev installation, follow the binding migration in
+[dynamic discovery](dynamic-discovery.md#build-and-migrate), then reboot. The
+helper does not remove old override rules or take a device away from another
+driver. If a bridge module was already loaded when its files were updated,
+reboot to activate the newly installed module; restarting fprintd cannot replace
+the running kernel module.
+
+`install-all` stops with a nonzero exit status if module loading, bridge
+validation, permission setup, SELinux labeling or the fprintd restart fails.
+A usable bridge requires ABI 1, binding to the `fte3600` driver and a real
+character device. An ACPI entry alone is insufficient. Failed installation may
+leave completed earlier steps in place; retain the rollback records above.
+Successful setup does not establish chip identity or successful capture.
+
+On SELinux systems, the helper installs a dedicated `fte3600_device_t` type,
+relabels existing bridge nodes and checks their labels. It does not grant
+fprintd access to the generic device types. A conflicting local file-context
+override is an error and must be resolved before continuing.
+
 To cleanly uninstall the kernel module, systemd drop-in, and SELinux policy:
 ```sh
 sudo ./scripts/setup-fte3600.sh uninstall
 ```
+
+Uninstall stops fprintd before unloading the bridge. If another client still
+holds the device, it fails and keeps installed files; close the client and
+retry. Other cleanup failures also return nonzero rather than reporting
+completion. The helper removes its SELinux module at the default local priority
+400, including when disabled, and restores labels on remaining nodes when
+SELinux is running. A previously active fprintd service is started again after
+successful removal; a previously stopped service remains stopped.
 
 ### Manual Configuration
 
 Build/install the kernel bridge, migrate old spidev override rules and configure
 exact-node fprintd access using [dynamic discovery](dynamic-discovery.md).
 There is no spidev bufsiz requirement and no runtime access to `/dev/gpiochip*`.
-For SELinux systems (Fedora/RHEL), install `config/selinux/fte3600-bridge.cil` using `sudo semodule -i config/selinux/fte3600-bridge.cil`.
+For SELinux systems (Fedora/RHEL), run
+`sudo ./scripts/setup-fte3600.sh install-selinux` to install
+`config/selinux/fte3600-bridge.cil` and apply/verify labels on existing nodes.
+Installing the policy with `semodule` alone does not relabel existing devices.
 Do not install the old GPIO-class SELinux policy for this transport.
 
 ACPI must expose one SPI connection, one single-pin reset GpioIo and one

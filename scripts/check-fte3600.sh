@@ -32,5 +32,5 @@ for fte_auth in false true; do
     fw9369-protocol ft93xx-protocol ft9368-protocol \
     ft9368-backend fw9369-backend ft93xx-backend legacy38-recovery \
     fte3600-special-probe fte3600-family-template fte3600-auth-lifecycle \
-    fte3600-install-firmware
+    fte3600-install-firmware fte3600-setup
 done
