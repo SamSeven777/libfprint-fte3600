@@ -31,6 +31,7 @@
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
 #include "drivers/fte3600-template.h"
+#include "drivers/fte3600-ipa.h"
 #include "fte3600-test-image.h"
 #endif
 
@@ -1455,6 +1456,10 @@ test_enroll_verify_images (gconstpointer fixture)
   for (guint i = 0; i < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; i++)
     {
       Fte3600BriskFeatureSet features;
+      const Fte3600IpaFeatureSet *p_ipa = NULL;
+#if FTE3600_ENABLE_IPA_AUTH
+      Fte3600IpaFeatureSet ipa_features;
+#endif
       guint8 *frame = frames + i * image_size;
       const FpiBriskImage view = { frame, image_size, profile->width, profile->height, profile->width };
 
@@ -1471,7 +1476,12 @@ test_enroll_verify_images (gconstpointer fixture)
         }
       g_assert_cmpint (fpi_fte3600_brisk_extract_for_profile (profile, &view,
                                                               &features), ==, FTE3600_BRISK_OK);
-      g_assert_cmpint (fpi_fte3600_template_add_features (expected, &features, NULL), ==,
+#if FTE3600_ENABLE_IPA_AUTH
+      if (profile->sensor == FTE3600_SENSOR_FT9361 &&
+          fpi_fte3600_ipa_extract (view.data, view.length, &ipa_features) == FTE3600_IPA_OK)
+        p_ipa = &ipa_features;
+#endif
+      g_assert_cmpint (fpi_fte3600_template_add_dual_features (expected, &features, p_ipa, NULL), ==,
                        i + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ? FTE3600_TEMPLATE_OK :
                        FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }

@@ -466,7 +466,8 @@ test_malformed_headers_and_lengths (void)
                    FTE3600_TEMPLATE_OK);
   original = g_bytes_get_data (wire, &original_size);
 
-  assert_header_mutation (wire, 8, 3, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
+  assert_header_mutation (wire, 8, 3, FTE3600_TEMPLATE_INVALID_WIRE);
+  assert_header_mutation (wire, 8, 4, FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
   assert_header_mutation (wire, 10, 38, FTE3600_TEMPLATE_INVALID_WIRE);
   /* Both old raw and potentially double-normalized templates must be rejected. */
   assert_header_mutation (wire, 24, 1,
@@ -765,6 +766,412 @@ test_rounding_mode_isolation (void)
 }
 
 static void
+make_fingerprint_pattern (guint8 *image)
+{
+  static const struct
+  {
+    gdouble x;
+    gdouble y;
+    gdouble sigma;
+    gdouble amplitude;
+  } spots[] = {
+    { 17, 18, 1.5,  58 }, { 29, 17, 2.2, -54 },
+    { 43, 19, 3.1,  61 }, { 51, 29, 1.8, -48 },
+    { 18, 32, 2.7, -61 }, { 32, 31, 1.4,  52 },
+    { 43, 39, 2.4, -57 }, { 17, 47, 1.9,  55 },
+    { 31, 49, 3.2,  63 }, { 49, 52, 1.5, -53 },
+    { 20, 63, 2.3, -58 }, { 36, 63, 1.7,  57 },
+    { 48, 66, 2.8,  50 },
+  };
+
+  for (guint y = 0; y < FTE3600_IPA_HEIGHT; y++)
+    {
+      for (guint x = 0; x < FTE3600_IPA_WIDTH; x++)
+        {
+          gdouble value = 126.0 + 15.0 * sin (0.29 * x + 0.17 * y) +
+                          10.0 * cos (0.13 * x - 0.23 * y);
+
+          for (guint i = 0; i < G_N_ELEMENTS (spots); i++)
+            {
+              gdouble dx = x - spots[i].x;
+              gdouble dy = y - spots[i].y;
+              value += spots[i].amplitude *
+                       exp (-(dx * dx + dy * dy) /
+                            (2.0 * spots[i].sigma * spots[i].sigma));
+            }
+          value = CLAMP (value, 0.0, 255.0);
+          image[y * FTE3600_IPA_WIDTH + x] = (guint8) floor (value + 0.5);
+        }
+    }
+}
+
+static void
+test_dual_enrollment_tied_peaks (void)
+{
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600BriskFeatureSet brisk;
+  Fte3600IpaFeatureSet ipa;
+  guint physical_count;
+
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+
+  make_fingerprint_pattern (image);
+  for (guint y = 0; y < 20; y++)
+    for (guint x = 0; x < FTE3600_IPA_WIDTH; x++)
+      image[y * FTE3600_IPA_WIDTH + x] = (guint8) floor (
+        128.0 + 70.0 * cos ((x - 31.5) * G_PI / 3.0) *
+        cos ((y - 39.5) * G_PI / 2.0) + 0.5);
+
+  g_assert_cmpint (fpi_fte3600_brisk_extract (image, sizeof (image), &brisk),
+                   ==, FTE3600_BRISK_OK);
+  g_assert_true (fpi_fte3600_brisk_validate_feature_set (&brisk, &physical_count));
+  g_assert_cmpuint (physical_count, >=, FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa),
+                   ==, FTE3600_IPA_OK);
+  g_assert_cmpint (fpi_fte3600_template_add_dual_features (templ, &brisk, &ipa, NULL),
+                   ==, FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+}
+
+static void
+test_dual_engine_fusion (void)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(Fte3600Template) decoded = NULL;
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet ipa_ref = { 0 };
+  Fte3600BriskFeatureSet brisk_match = { 0 };
+  const guint8 *wire_data;
+  gsize wire_size = 0;
+
+  make_fingerprint_pattern (image);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa_ref),
+                   ==, FTE3600_IPA_OK);
+  g_assert_cmpuint (ipa_ref.n_minutiae, >=, FTE3600_IPA_POLICY_MIN_INLIERS);
+
+  for (guint sample = 0;
+       sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet features;
+      make_feature_set (&features, sample, FALSE);
+      if (sample == 0)
+        make_feature_set (&brisk_match, sample, FALSE);
+      g_assert_cmpint (
+        fpi_fte3600_template_add_dual_features (templ, &features, &ipa_ref, NULL),
+        ==,
+        sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+        FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+    }
+
+  g_assert_true (fpi_fte3600_template_is_ready (templ));
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+
+  wire_data = g_bytes_get_data (wire, &wire_size);
+  g_assert_cmpuint (read_u16 (&wire_data[8]), ==, FTE3600_TEMPLATE_WIRE_VERSION_V3);
+  g_assert_cmpuint (read_u32 (&wire_data[32]), ==, 0x01); /* Dual engine flag */
+  g_assert_cmpuint (read_u16 (&wire_data[46]), ==, FTE3600_TEMPLATE_FUSION_POLICY_VERSION);
+
+#if FTE3600_ENABLE_IPA_AUTH
+  Fte3600IpaFeatureSet ipa_probe = ipa_ref;
+  Fte3600BriskFeatureSet brisk_nomatch = { 0 };
+  Fte3600TemplateCompareResult result;
+
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (fpi_fte3600_template_is_ready (decoded));
+
+  brisk_nomatch.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  brisk_nomatch.n_features = TEST_FEATURES;
+  for (guint i = 0; i < TEST_FEATURES; i++)
+    {
+      brisk_nomatch.features[i].x = 5.0f + (gfloat) (i % 3) * 15.0f;
+      brisk_nomatch.features[i].y = 5.0f + (gfloat) (i / 3) * 18.0f;
+      brisk_nomatch.features[i].orientation = 0.0f;
+      memset (brisk_nomatch.features[i].descriptor, 0xaa ^ (guint8) i,
+              FTE3600_BRISK_DESCRIPTOR_BYTES);
+    }
+
+  /* 1. Dual Match: BRISK passes, IPA passes -> Auth Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_match, &ipa_probe,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.brisk_accepted);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 2. BRISK only (IPA NULL): BRISK passes -> Auth Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_match, NULL,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 3. IPA only (BRISK fails): IPA passes -> Auth Accepted (OR strategy) */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_nomatch, &ipa_probe,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* 4. Neither passes: BRISK fails, IPA NULL -> Auth Rejected */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     decoded, &brisk_nomatch, NULL,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+#else
+#if !FTE3600_ENABLE_PERSONAL_AUTH
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_NOT_CALIBRATED);
+#endif
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (fpi_fte3600_template_is_ready (decoded));
+#endif
+}
+
+#if FTE3600_ENABLE_IPA_AUTH
+static void
+test_mono_engine_modes (void)
+{
+  g_autoptr(Fte3600Template) templ = fpi_fte3600_template_new ();
+  g_autoptr(GBytes) wire = NULL;
+  g_autoptr(Fte3600Template) decoded = NULL;
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet ipa_ref = { 0 };
+  Fte3600BriskFeatureSet brisk_match = { 0 };
+  Fte3600BriskFeatureSet brisk_nomatch = { 0 };
+  Fte3600TemplateCompareResult result;
+
+  make_fingerprint_pattern (image);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa_ref),
+                   ==, FTE3600_IPA_OK);
+
+  for (guint sample = 0;
+       sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet features;
+      make_feature_set (&features, sample, FALSE);
+      if (sample == 0)
+        make_feature_set (&brisk_match, sample, FALSE);
+      (void) fpi_fte3600_template_add_dual_features (templ, &features, &ipa_ref, NULL);
+    }
+
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+
+  brisk_nomatch.extractor_schema_version = FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION;
+  brisk_nomatch.n_features = TEST_FEATURES;
+  for (guint i = 0; i < TEST_FEATURES; i++)
+    {
+      brisk_nomatch.features[i].x = 5.0f + (gfloat) (i % 3) * 15.0f;
+      brisk_nomatch.features[i].y = 5.0f + (gfloat) (i / 3) * 18.0f;
+      brisk_nomatch.features[i].orientation = 0.0f;
+      memset (brisk_nomatch.features[i].descriptor, 0xaa ^ (guint8) i,
+              FTE3600_BRISK_DESCRIPTOR_BYTES);
+    }
+
+  /* 1. Test Mono-Engine BRISK-ONLY Mode */
+  /* Case A: BRISK match -> Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_features (
+                     decoded, &brisk_match,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (result.engine_mode, ==, FTE3600_ENGINE_MODE_BRISK_ONLY);
+  g_assert_true (result.brisk_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* Case B: IPA matches, but BRISK fails -> REJECTED in BRISK-only mode */
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     decoded, &brisk_nomatch, &ipa_ref,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     FTE3600_ENGINE_MODE_BRISK_ONLY, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.brisk_accepted);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+
+  /* 2. Test Mono-Engine 2D-IPA-ONLY Mode */
+  /* Case A: IPA match -> Accepted */
+  g_assert_cmpint (fpi_fte3600_template_compare_ipa_features (
+                     decoded, &ipa_ref,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpint (result.engine_mode, ==, FTE3600_ENGINE_MODE_IPA_ONLY);
+  g_assert_true (result.ipa_accepted);
+  g_assert_true (result.authentication_accepted);
+
+  /* Case B: BRISK passes, but IPA fails/nomatch -> REJECTED in IPA-only mode */
+  Fte3600IpaFeatureSet ipa_nomatch = { 0 };
+  ipa_nomatch.extractor_schema_version = FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION;
+  ipa_nomatch.n_minutiae = 5;
+  for (guint i = 0; i < 5; i++)
+    {
+      ipa_nomatch.minutiae[i].x = 10.0f + (gfloat) i * 8.0f;
+      ipa_nomatch.minutiae[i].y = 15.0f;
+      ipa_nomatch.minutiae[i].theta = 0.0f;
+      ipa_nomatch.minutiae[i].desc[0] = 1.0f;
+    }
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     decoded, &brisk_match, &ipa_nomatch,
+                     FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+                     FTE3600_ENGINE_MODE_IPA_ONLY, &result), ==, FTE3600_TEMPLATE_OK);
+  g_assert_false (result.ipa_accepted);
+  g_assert_false (result.authentication_accepted);
+}
+#endif
+
+static Fte3600Template *
+make_ipa_gallery (guint ipa_mask, gboolean maximum)
+{
+  Fte3600Template *templ = fpi_fte3600_template_new ();
+  Fte3600IpaFeatureSet ipa = { 0 };
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+
+  if (maximum)
+    {
+      ipa.extractor_schema_version = FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION;
+      ipa.n_minutiae = FTE3600_IPA_MAX_MINUTIAE;
+      for (guint i = 0; i < ipa.n_minutiae; i++)
+        {
+          ipa.minutiae[i].x = 3.0f + 7.0f * (i % 8);
+          ipa.minutiae[i].y = 4.0f + 12.0f * (i / 8);
+          ipa.minutiae[i].desc[i % FTE3600_IPA_DESC_DIM] = 1.0f;
+        }
+    }
+  else
+    {
+      make_fingerprint_pattern (image);
+      g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa), ==, FTE3600_IPA_OK);
+    }
+  for (guint sample = 0; sample < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; sample++)
+    {
+      Fte3600BriskFeatureSet brisk;
+      make_feature_set_n (&brisk, sample,
+                          maximum ? FTE3600_BRISK_MAX_FEATURES : TEST_FEATURES, FALSE);
+      g_assert_cmpint (fpi_fte3600_template_add_dual_features (
+                         templ, &brisk, (ipa_mask & (1u << sample)) ? &ipa : NULL, NULL),
+                       ==, sample + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ?
+                       FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
+    }
+  return templ;
+}
+
+static void
+test_mixed_ipa_roundtrip (void)
+{
+  static const guint masks[] = { 0, 1, 0x80, 0x55, 0xff };
+
+  for (guint i = 0; i < G_N_ELEMENTS (masks); i++)
+    {
+      g_autoptr(Fte3600Template) templ = make_ipa_gallery (masks[i], FALSE);
+      g_autoptr(Fte3600Template) decoded = NULL;
+      g_autoptr(GBytes) wire = NULL;
+      g_autoptr(GBytes) roundtrip = NULL;
+      g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+      const guint8 *data = g_bytes_get_data (wire, NULL);
+      g_assert_cmpuint (read_u16 (&data[8]), ==, masks[i] ?
+                        FTE3600_TEMPLATE_WIRE_VERSION_V3 : FTE3600_TEMPLATE_WIRE_VERSION);
+      g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                       ==, FTE3600_TEMPLATE_OK);
+      g_assert_cmpint (fpi_fte3600_template_encode (decoded, &roundtrip), ==, FTE3600_TEMPLATE_OK);
+      g_assert_true (g_bytes_equal (wire, roundtrip));
+    }
+  g_autoptr(Fte3600Template) maximum = make_ipa_gallery (0xff, TRUE);
+  g_autoptr(Fte3600Template) decoded = NULL;
+  g_autoptr(GBytes) wire = NULL;
+  g_assert_cmpint (fpi_fte3600_template_encode (maximum, &wire), ==, FTE3600_TEMPLATE_OK);
+  g_assert_cmpuint (g_bytes_get_size (wire), ==, FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE);
+  g_assert_cmpint (fpi_fte3600_template_decode (wire, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &decoded),
+                   ==, FTE3600_TEMPLATE_OK);
+}
+
+static void
+test_ipa_version_isolation (void)
+{
+  g_autoptr(Fte3600Template) templ = make_ipa_gallery (0xff, FALSE);
+  g_autoptr(GBytes) wire = NULL;
+
+  g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
+  assert_header_mutation (wire, 8, 4,
+                          FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA);
+  assert_header_mutation (wire, 8, 2,
+                          FTE3600_TEMPLATE_INVALID_WIRE);
+  assert_header_mutation (wire, 40, 2,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 40, FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION + 1,
+                          FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 40, 1, FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR);
+  assert_header_mutation (wire, 42, FTE3600_IPA_DIAGNOSTIC_POLICY_VERSION + 1,
+                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 42, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 44, !FTE3600_IPA_AUTHENTICATION_POLICY_VERSION,
+                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 44, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 46, FTE3600_TEMPLATE_FUSION_POLICY_VERSION + 1,
+                          FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+  assert_header_mutation (wire, 46, 1, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+
+  /* A complete pre-mosaic compatibility tuple is rejected for both load
+   * purposes; rewriting a header is not an allowed migration. */
+  guint8 *data;
+  g_autoptr(GBytes) legacy = mutable_copy (wire, &data, NULL);
+  write_u16 (&data[26], 2);
+  write_u16 (&data[28], FTE3600_ENABLE_PERSONAL_AUTH ? 3 : 0);
+  write_u16 (&data[46], 1);
+  for (guint purpose = FTE3600_TEMPLATE_LOAD_DIAGNOSTIC;
+       purpose <= FTE3600_TEMPLATE_LOAD_AUTHENTICATION; purpose++)
+    {
+      g_autoptr(Fte3600Template) decoded = NULL;
+      g_assert_cmpint (fpi_fte3600_template_decode (legacy, purpose, &decoded),
+                       ==, FTE3600_TEMPLATE_UNSUPPORTED_POLICY);
+      g_assert_null (decoded);
+    }
+}
+
+static void
+test_mode_gates_and_query_fallback (void)
+{
+  g_autoptr(Fte3600Template) templ = make_ipa_gallery (0xff, FALSE);
+  Fte3600TemplateCompareResult result;
+  Fte3600IpaFeatureSet ipa;
+  Fte3600BriskFeatureSet brisk;
+  Fte3600EngineMode mode;
+  guint8 image[FTE3600_IPA_IMAGE_SIZE];
+
+  make_fingerprint_pattern (image);
+  make_feature_set (&brisk, 0, FALSE);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (image, sizeof (image), &ipa), ==, FTE3600_IPA_OK);
+  g_assert_true (fpi_fte3600_engine_mode_parse (NULL, &mode));
+  g_assert_cmpint (mode, ==, FTE3600_ENABLE_IPA_AUTH ?
+                   FTE3600_ENGINE_MODE_DUAL_FUSION : FTE3600_ENGINE_MODE_BRISK_ONLY);
+  g_assert_false (fpi_fte3600_engine_mode_parse ("unknown", &mode));
+
+  /* A valid IPA extraction can be used even when BRISK returned no query. */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.best_ipa.diagnostic_policy_passed);
+  g_assert_false (result.authentication_accepted);
+  g_assert_cmpuint (result.n_compared, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+  g_assert_cmpuint (result.best_subtemplate, ==, FTE3600_TEMPLATE_SUBTEMPLATE_NONE);
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &result),
+                   ==, FTE3600_ENABLE_IPA_AUTH ? FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NOT_CALIBRATED);
+  g_assert_cmpint (result.authentication_accepted, ==, FTE3600_ENABLE_IPA_AUTH);
+
+  brisk.n_features = 10; /* Valid but insufficient for the BRISK template gate. */
+  g_assert_cmpint (fpi_fte3600_template_compare_dual_features (
+                     templ, &brisk, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, &result),
+                   ==, FTE3600_TEMPLATE_OK);
+  g_assert_true (result.best_ipa.diagnostic_policy_passed);
+  g_assert_cmpint (fpi_fte3600_template_compare_with_mode (
+                     templ, NULL, &ipa, FTE3600_TEMPLATE_LOAD_DIAGNOSTIC, (Fte3600EngineMode) 99, &result),
+                   ==, FTE3600_TEMPLATE_INVALID_WIRE);
+}
+
+static void
 test_template_mosaicking (void)
 {
   g_autoptr(Fte3600Template) templ = make_ready_template (FALSE);
@@ -1032,6 +1439,20 @@ main (int   argc,
                    test_incomplete_and_arguments);
   g_test_add_func ("/fte3600-template/rounding-mode-isolation",
                    test_rounding_mode_isolation);
+  g_test_add_func ("/fte3600-template/dual-enrollment-tied-peaks",
+                   test_dual_enrollment_tied_peaks);
+  g_test_add_func ("/fte3600-template/dual-engine-fusion",
+                   test_dual_engine_fusion);
+#if FTE3600_ENABLE_IPA_AUTH
+  g_test_add_func ("/fte3600-template/mono-engine-modes",
+                   test_mono_engine_modes);
+#endif
+  g_test_add_func ("/fte3600-template/mixed-ipa-roundtrip",
+                   test_mixed_ipa_roundtrip);
+  g_test_add_func ("/fte3600-template/ipa-version-isolation",
+                   test_ipa_version_isolation);
+  g_test_add_func ("/fte3600-template/mode-gates-and-query-fallback",
+                   test_mode_gates_and_query_fallback);
   g_test_add_func ("/fte3600-template/mosaicking",
                    test_template_mosaicking);
   g_test_add_func ("/fte3600-template/boundary-straddling-probe",

@@ -11,6 +11,7 @@ for fte_auth in false true; do
   fte_args=(
     -Ddrivers=fte3600
     -Dfte3600_personal_auth="$fte_auth"
+    -Dfte3600_ipa_auth="$fte_auth"
     -Dgtk-examples=false
     -Ddoc=false
     -Dintrospection=false

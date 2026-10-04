@@ -579,8 +579,9 @@ if 'fte3600' in drivers
             '../libfprint/drivers/fte3600-template.c',
             '../libfprint/drivers/fte3600-brisk.c',
             '../libfprint/drivers/fte3600-match-profile.c',
+            '../libfprint/drivers/fte3600-ipa.c',
         ],
-        dependencies: brisk_core_dep,
+        dependencies: [brisk_core_dep, ipa_core_dep],
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )
@@ -597,8 +598,9 @@ if 'fte3600' in drivers
             '../libfprint/drivers/fte3600-brisk.c',
             '../libfprint/drivers/fte3600-match-profile.c',
             '../libfprint/drivers/fte3600-sensor.c',
+            '../libfprint/drivers/fte3600-ipa.c',
         ],
-        dependencies: brisk_core_dep,
+        dependencies: [brisk_core_dep, ipa_core_dep],
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )

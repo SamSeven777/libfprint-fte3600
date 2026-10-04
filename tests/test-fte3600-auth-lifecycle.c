@@ -16,6 +16,7 @@
 #include "drivers/fte3600-private.h"
 #include "drivers/fte3600-match-profile.h"
 #include "drivers/fte3600-template.h"
+#include "drivers/fte3600-ipa.h"
 
 #define MOCK_FD 9017
 #define MOCK_PATH "/mock/fte3600-auth"
@@ -380,12 +381,21 @@ make_wire_version (const Fte3600MatchProfile *profile, const guint8 *frames,
   for (guint sample = 0; sample < 8; sample++)
     {
       Fte3600BriskFeatureSet features;
+      const Fte3600IpaFeatureSet *p_ipa = NULL;
+#if FTE3600_ENABLE_IPA_AUTH
+      Fte3600IpaFeatureSet ipa_features;
+#endif
       FpiBriskImage image = { frames + sample * size, size,
                               profile->width, profile->height, profile->width };
 
       g_assert_cmpint (fpi_fte3600_brisk_extract_for_profile (profile, &image, &features),
                        ==, FTE3600_BRISK_OK);
-      g_assert_cmpint (fpi_fte3600_template_add_features (templ, &features, NULL), ==,
+#if FTE3600_ENABLE_IPA_AUTH
+      if (!legacy && profile->sensor == FTE3600_SENSOR_FT9361 &&
+          fpi_fte3600_ipa_extract (image.data, image.length, &ipa_features) == FTE3600_IPA_OK)
+        p_ipa = &ipa_features;
+#endif
+      g_assert_cmpint (fpi_fte3600_template_add_dual_features (templ, &features, p_ipa, NULL), ==,
                        sample == 7 ? FTE3600_TEMPLATE_OK : FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
   g_assert_cmpint (fpi_fte3600_template_encode (templ, &wire), ==, FTE3600_TEMPLATE_OK);
