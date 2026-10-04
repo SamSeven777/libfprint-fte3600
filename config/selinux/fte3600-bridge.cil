@@ -1,0 +1,11 @@
+; SPDX-FileCopyrightText: 2026 FTE3600 Linux contributors
+; SPDX-License-Identifier: LGPL-2.1-or-later
+
+; Optional local SELinux policy module for distributions with SELinux (Fedora, RHEL, CentOS, openSUSE).
+; Allows the fprintd daemon (domain fprintd_t) to access the FTE3600 ACPI resource bridge character device.
+;
+; Install:  sudo semodule -i config/selinux/fte3600-bridge.cil
+; Remove:   sudo semodule -r fte3600-bridge
+
+(allow fprintd_t device_t (chr_file (getattr open read write ioctl map lock)))
+(allow fprintd_t misc_device_t (chr_file (getattr open read write ioctl map lock)))

@@ -72,11 +72,9 @@ package() {
   DESTDIR="$pkgdir" meson install -C "$srcdir/build"
 
   install -Dm644 "$srcdir/libfprint/kernel/fte3600/dkms.conf" "$pkgdir/usr/src/fte3600-0.1/dkms.conf"
-  for file in fte3600.c fte3600-policy.h Makefile; do
-    install -Dm644 "$srcdir/libfprint/kernel/fte3600/$file" "$pkgdir/usr/src/fte3600-0.1/kernel/fte3600/$file"
+  for file in fte3600.c fte3600-policy.h fte3600-bridge.h Makefile; do
+    install -Dm644 "$srcdir/libfprint/kernel/fte3600/$file" "$pkgdir/usr/src/fte3600-0.1/$file"
   done
-  install -Dm644 "$srcdir/libfprint/libfprint/drivers/fte3600-bridge.h" \
-    "$pkgdir/usr/src/fte3600-0.1/libfprint/drivers/fte3600-bridge.h"
   install -Dm755 "$srcdir/libfprint/scripts/fte3600-device-allow.sh" "$pkgdir/usr/bin/fte3600-device-allow"
 
   # Firmware is supplied separately by the device owner. Never silently

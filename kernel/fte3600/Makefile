@@ -15,5 +15,5 @@ clean:
 check: fte3600-policy-test
 	./fte3600-policy-test
 
-fte3600-policy-test: fte3600-policy-test.c fte3600-policy.h ../../libfprint/drivers/fte3600-bridge.h
+fte3600-policy-test: fte3600-policy-test.c fte3600-policy.h fte3600-bridge.h
 	$(HOSTCC) -std=c11 -Wall -Wextra -Werror -O2 -o $@ $<

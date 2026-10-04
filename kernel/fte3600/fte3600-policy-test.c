@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #include "fte3600-policy.h"
-#include "../../libfprint/drivers/fte3600-bridge.h"
+#include "fte3600-bridge.h"
 
 /* Adding capabilities consumes a previously zeroed reserved slot without
  * changing ABI 1's ioctl number or the 32/64-bit wire layout. */

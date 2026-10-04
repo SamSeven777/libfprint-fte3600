@@ -224,9 +224,32 @@ sudo meson install -C build-fte3600
 
 ## 4. System Configuration
 
+### Automated Setup Helper (Recommended)
+
+The repository provides an automated script to inspect system prerequisites, install the kernel bridge (DKMS), configure systemd sandboxing, and apply SELinux policies:
+
+```sh
+# 1. Run prerequisite health check (no root required)
+./scripts/setup-fte3600.sh check
+
+# 2. Automated end-to-end installation (DKMS + systemd + SELinux)
+sudo ./scripts/setup-fte3600.sh install-all
+
+# 3. Check live status
+sudo ./scripts/setup-fte3600.sh status
+```
+
+To cleanly uninstall the kernel module, systemd drop-in, and SELinux policy:
+```sh
+sudo ./scripts/setup-fte3600.sh uninstall
+```
+
+### Manual Configuration
+
 Build/install the kernel bridge, migrate old spidev override rules and configure
 exact-node fprintd access using [dynamic discovery](dynamic-discovery.md).
 There is no spidev bufsiz requirement and no runtime access to `/dev/gpiochip*`.
+For SELinux systems (Fedora/RHEL), install `config/selinux/fte3600-bridge.cil` using `sudo semodule -i config/selinux/fte3600-bridge.cil`.
 Do not install the old GPIO-class SELinux policy for this transport.
 
 ACPI must expose one SPI connection, one single-pin reset GpioIo and one

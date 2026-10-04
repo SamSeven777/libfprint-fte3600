@@ -17,7 +17,7 @@
 #include <linux/spi/spidev.h>
 #include <linux/uaccess.h>
 
-#include "../../libfprint/drivers/fte3600-bridge.h"
+#include "fte3600-bridge.h"
 #include "fte3600-policy.h"
 
 struct fte3600 {
