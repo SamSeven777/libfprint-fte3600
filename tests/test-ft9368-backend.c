@@ -33,6 +33,20 @@ static struct
   guint         fail_transaction;
   guint         fail_clear;
   guint         fail_clear_number;
+  guint         wake_checks;
+  guint         unready_wakes;
+  guint         info_reads;
+  guint         inject_info_read;
+  guint16       injected_id;
+  guint         identity_transaction;
+  gboolean      injected_unhealthy;
+  gboolean      short_info;
+  gint64        wake_time;
+  gboolean      zero_wake;
+  gboolean      wrong_info;
+  gboolean      fail_wakecheck;
+  gboolean      short_wakecheck;
+  gboolean      cancel_wakecheck;
   gboolean      reset_asserted;
   gboolean      updating;
   gboolean      erased;
@@ -256,10 +270,34 @@ emulate_transfer (FpiSpiTransfer *transfer)
   payload = be16 (tx + 2);
   g_assert_cmpuint (length, ==, payload ? payload + 7 : 4);
   if (command == 0xff00)
-    return;
+    {
+      mock.wake_time = g_get_monotonic_time ();
+      return;
+    }
   if (command == 0x9180)
     {
+      if (payload == 4)
+        {
+          g_assert_cmpint (g_get_monotonic_time () - mock.wake_time, >=, 10000);
+          mock.wake_checks++;
+          if (mock.unready_wakes)
+            {
+              memset (rx + 7, 0x55, 4);
+              mock.unready_wakes--;
+            }
+          else if (!mock.zero_wake)
+            {
+              rx[7] = 1;
+              rx[8] = 2;
+            }
+          if (mock.cancel_wakecheck)
+            g_cancellable_cancel (mock.cancellable);
+          return;
+        }
       g_assert_cmpuint (payload, ==, 32);
+      mock.info_reads++;
+      if (mock.wrong_info)
+        return;
       rx[7 + 19] = 0x93;
       rx[7 + 20] = 0x68;
       rx[7 + 21] = mock.wrong_version ? 0x12 : 0x13;
@@ -267,6 +305,13 @@ emulate_transfer (FpiSpiTransfer *transfer)
       rx[7 + 24] = 80;
       if (mock.finger)
         rx[7 + 1] = rx[7 + 2] = 0x11;
+      if (mock.info_reads == mock.inject_info_read)
+        {
+          put_status (rx + 7 + 19, mock.injected_id);
+          if (mock.injected_unhealthy)
+            rx[7 + 2] = 0x22;
+          mock.identity_transaction = mock.transactions;
+        }
       return;
     }
   if (command == 0xf680)
@@ -378,6 +423,11 @@ complete_transfer (gpointer user_data)
   mock.transactions++;
   if (pending->cancellable)
     g_cancellable_set_error_if_cancelled (pending->cancellable, &error);
+  if (!error && be16 (transfer->buffer_wr) == 0x9180 &&
+      be16 (transfer->buffer_wr + 2) == 4 && (mock.fail_wakecheck || mock.short_wakecheck))
+    error = g_error_new_literal (G_IO_ERROR,
+                                 mock.short_wakecheck ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_FAILED,
+                                 "Injected wake-check failure");
   if (!error && (mock.transactions == mock.fail_transaction ||
                  ((mock.fail_clear || (mock.fail_clear_number && mock.clears + 1 == mock.fail_clear_number)) && transfer->length_wr == 13 &&
                   be16 (transfer->buffer_wr) == 0x9080)))
@@ -386,7 +436,13 @@ complete_transfer (gpointer user_data)
       error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected SPI failure");
     }
   if (!error)
-    emulate_transfer (transfer);
+    {
+      emulate_transfer (transfer);
+      if (mock.short_info && be16 (transfer->buffer_wr) == 0x9180 &&
+          be16 (transfer->buffer_wr + 2) == 32)
+        error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT,
+                                     "Injected short INFO with untrusted identity bytes");
+    }
   pending->callback (transfer, transfer->device, pending->user_data, error);
   fpi_spi_transfer_unref (transfer);
   g_clear_object (&pending->cancellable);
@@ -566,6 +622,161 @@ test_cleanup_fault (void)
 }
 
 static void
+test_identity_loss (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  if (scenario != 0)
+    {
+      run_ssm (self->backend->create_init (self));
+      g_assert_no_error (mock.error);
+    }
+  mock.injected_id = 0x9365;
+  if (scenario == 0)
+    {
+      mock.inject_info_read = mock.info_reads + 1;
+      run_ssm (self->backend->create_init (self));
+    }
+  else if (scenario <= 5)
+    {
+      /* Capture wake, pre-IRQ check, IRQ check, image wake and first cleanup
+       * INFO must all stop at the first positively conflicting response. */
+      mock.inject_info_read = mock.info_reads + scenario;
+      run_ssm (self->backend->create_capture (self));
+    }
+  else
+    {
+      /* Both early cleanup reads, not just its final health check. */
+      mock.inject_info_read = mock.info_reads + scenario - 5;
+      run_ssm (self->backend->create_reset (self));
+    }
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_assert_true (self->session_failed);
+  g_assert_false (self->idle_verified);
+  g_assert_false (self->armed);
+  g_assert_null (self->captured_image);
+  g_assert_cmpuint (mock.identity_transaction, >, 0);
+  g_assert_cmpuint (mock.transactions, ==, mock.identity_transaction);
+  /* Even an accidental direct retry of a backend action cannot write to the
+  * conflicting chip. The public driver also rejects this failed session. */
+  run_ssm (self->backend->create_capture (self));
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  run_ssm (self->backend->create_reset (self));
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  run_ssm (self->backend->create_init (self));
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_assert_cmpuint (mock.transactions, ==, mock.identity_transaction);
+  teardown (self);
+}
+
+static void
+test_ambiguous_cleanup_info (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  mock.inject_info_read = 1;
+  mock.injected_id = scenario == 0 ? 0 : scenario == 1 ? 0xffff : 0x9368;
+  mock.injected_unhealthy = scenario == 2;
+  run_ssm (self->backend->create_reset (self));
+  g_assert_no_error (mock.error);
+  g_assert_false (self->session_failed);
+  g_assert_true (self->idle_verified);
+  g_assert_cmpuint (mock.info_reads, ==, 3);
+  g_assert_cmpuint (mock.clears, ==, 1);
+  teardown (self);
+}
+
+static void
+test_wake_readiness (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  switch (scenario)
+    {
+    case 0: mock.unready_wakes = 2;
+      break;
+
+    case 1: mock.unready_wakes = 100;
+      break;
+
+    case 2: mock.zero_wake = TRUE;
+      break;
+
+    case 3: mock.zero_wake = mock.wrong_info = TRUE;
+      break;
+
+    case 4: mock.fail_wakecheck = TRUE;
+      break;
+
+    case 5: mock.short_wakecheck = TRUE;
+      break;
+
+    case 6: mock.cancel_wakecheck = TRUE;
+      break;
+
+    default: g_assert_not_reached ();
+    }
+  run_ssm (self->backend->create_init (self));
+  g_assert_cmpuint (mock.loads, ==, 0);
+  if (scenario == 0 || scenario == 2)
+    {
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (mock.wake_checks, ==, scenario == 0 ? 3 : 1);
+      g_assert_cmpuint (mock.info_reads, >=, 1);
+      /* Both capture wake sites reuse the readiness check. */
+      guint checks = mock.wake_checks;
+      mock.unready_wakes = 1;
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (mock.wake_checks - checks, ==, 3);
+      g_assert_cmpuint (mock.images, ==, 1);
+    }
+  else
+    {
+      g_assert_nonnull (mock.error);
+      g_assert_false (self->idle_verified);
+      g_assert_cmpuint (mock.images, ==, 0);
+      if (scenario == 1)
+        {
+          g_assert_cmpuint (mock.wake_checks, ==, 3);
+          g_assert_cmpuint (mock.info_reads, ==, 0);
+        }
+      if (scenario >= 4)
+        {
+          g_assert_error (mock.error, G_IO_ERROR,
+                          (scenario == 4 ? G_IO_ERROR_FAILED :
+                           scenario == 5 ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_CANCELLED));
+          g_assert_cmpuint (mock.info_reads, ==, 0);
+        }
+    }
+  teardown (self);
+}
+
+static void
+test_wake_predicate (void)
+{
+  guint8 bytes[4] = { 0 };
+
+  g_assert_false (fpi_fte3600_ft9368_wake_ready (NULL, 4));
+  g_assert_false (fpi_fte3600_ft9368_wake_ready (bytes, 3));
+  g_assert_true (fpi_fte3600_ft9368_wake_ready (bytes, 4));
+  for (guint value = 1; value <= 255; value++)
+    {
+      memset (bytes, value, sizeof bytes);
+      g_assert_false (fpi_fte3600_ft9368_wake_ready (bytes, 4));
+      for (guint i = 0; i < 4; i++)
+        {
+          bytes[i] = 0;
+          g_assert_true (fpi_fte3600_ft9368_wake_ready (bytes, 4));
+          bytes[i] = value;
+        }
+    }
+}
+
+static void
 test_update (gconstpointer scenario)
 {
   FpiDeviceFte3600 *self = setup (TRUE);
@@ -605,9 +816,23 @@ test_update (gconstpointer scenario)
     case 10: mock.cancel_reset = TRUE;
       break;
 
+    case 11:
+      /* The parent init first confirms FT9368, then update verification sees
+       * another chip. It must not proceed to START or permit runtime cleanup. */
+      mock.inject_info_read = 2;
+      mock.injected_id = 0x9365;
+      break;
+
+    case 12:
+      mock.inject_info_read = 1;
+      mock.injected_id = 0x9365;
+      mock.short_info = TRUE;
+      break;
+
     default: g_assert_not_reached ();
     }
-  run_ssm (fpi_fte3600_ft9368_update_new (self));
+  run_ssm (which == 11 ? self->backend->create_init (self) :
+           fpi_fte3600_ft9368_update_new (self));
   if (which == 0 || which == 2)
     {
       g_assert_no_error (mock.error);
@@ -622,6 +847,19 @@ test_update (gconstpointer scenario)
     g_assert_false (mock.erased);
   if (which == 1 || which == 10)
     g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_cmpint (self->session_failed, ==, which == 11);
+  if (which == 11)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (mock.identity_transaction, >, 0);
+      g_assert_cmpuint (mock.transactions, ==, mock.identity_transaction);
+      run_ssm (self->backend->create_reset (self));
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (mock.transactions, ==, mock.identity_transaction);
+      g_assert_false (self->idle_verified);
+    }
+  if (which == 12)
+    g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
   g_assert_cmpuint (mock.resets, ==, 6);
   g_assert_cmpuint (mock.loads, ==, 2);
   teardown (self);
@@ -661,6 +899,22 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/ft9368-backend/warm-capture", test_warm);
   g_test_add_func ("/ft9368-backend/cleanup-failure", test_cleanup_fault);
+  g_test_add_func ("/ft9368-backend/wake-predicate", test_wake_predicate);
+  for (guint i = 0; i < 9; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/ft9368-backend/identity-loss/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_identity_loss);
+    }
+  for (guint i = 0; i < 3; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/ft9368-backend/ambiguous-cleanup-info/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_ambiguous_cleanup_info);
+    }
+  for (guint i = 0; i < 7; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/ft9368-backend/wake/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_wake_readiness);
+    }
   for (guint i = 0; i < 5; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/ft9368-backend/capture-fault/%u", i);
@@ -672,7 +926,7 @@ main (int argc, char **argv)
           g_test_add_data_func (name, GUINT_TO_POINTER (i), test_update_gate);
         }
     }
-  for (guint i = 0; i < 11; i++)
+  for (guint i = 0; i < 13; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/ft9368-backend/update/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_update);

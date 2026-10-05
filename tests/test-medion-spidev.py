@@ -363,6 +363,33 @@ class MedionTests(unittest.TestCase):
         self.assertEqual(self.machine.log, [])
         self.assertEqual(MEDION.binding(self.machine.spi), "fte3600")
 
+    def test_platform_glue_is_rejected_even_when_spi_uses_spidev(self):
+        m = self.machine
+        m.bind()
+        driver = m.sys / "bus/platform/drivers/fte3600-glue"
+        driver.mkdir(parents=True)
+        m.link(m.spi / "fte3600-glue.0/driver", driver)
+        self.assertNotEqual(self.run_action("--identify-legacy"), 0)
+        self.assertIn("ACPI glue still owns", self.errors.getvalue())
+        self.assertEqual(m.log, [])
+        self.assert_restored(binding="spidev")
+
+    def test_glue_autoloaded_during_bind_prevents_diagnostic(self):
+        m = self.machine
+        original_bind = m.bind
+
+        def bind_with_glue():
+            original_bind()
+            driver = m.sys / "bus/platform/drivers/fte3600-glue"
+            driver.mkdir(parents=True)
+            m.link(m.spi / "fte3600-glue.0/driver", driver)
+
+        with patch.object(m, "bind", side_effect=bind_with_glue):
+            self.assertNotEqual(self.run_action("--identify-legacy"), 0)
+        self.assertIn("ACPI glue still owns", self.errors.getvalue())
+        self.assertFalse(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+        self.assert_restored()
+
     def test_modprobe_failure_restores_service(self):
         self.machine.fail.add("modprobe")
         self.assertNotEqual(self.run_action("--probe"), 0)

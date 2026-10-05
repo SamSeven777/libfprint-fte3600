@@ -2,8 +2,10 @@ post_install() {
   systemctl daemon-reload
   udevadm control --reload
   printf '%s\n' \
-    'FTE3600: install headers for your running kernel so DKMS can build the bridge.' \
-    'Review docs/fte3600/dynamic-discovery.md for spidev migration and exact-node fprintd access.'
+    'FTE3600 experimental: install matching kernel headers for DKMS 0.2 GPIO glue.' \
+    'Review docs/fte3600/acpi-spidev.md before migrating the old bridge.' \
+    'spidev needs bufsiz >= 32768; reboot rather than unloading a shared module.' \
+    'Generate exact companion-node fprintd permissions only after both nodes are present.'
 }
 
 post_upgrade() {

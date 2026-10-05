@@ -11,24 +11,27 @@
 #include "fte3600-protocol.h"
 #include "fte3600-sensor.h"
 #include "fte3600-firmware.h"
-#include "fte3600-bridge.h"
+#include "fte3600-resources.h"
 #include "drivers_api.h"
 
 typedef struct _Fte3600Backend Fte3600Backend;
+#define FTE3600_TRANSPORT_CAP_CS_POLARITY (1U << 0)
 G_DECLARE_FINAL_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FPI,
                       DEVICE_FTE3600, FpDevice);
 
-/* Internal transport seam for the standalone Medion experiment. Normal device
- * enumeration leaves this NULL and continues to require the kernel bridge.
- * release must be idempotent; probe and open each configure a fresh session.
- * The caller owns transport_data for the complete device object lifetime. */
+/* Internal seam used only by the standalone diagnostic executable. Normal
+ * enumeration leaves this NULL and requires the ACPI reset/UIO companions.
+ * open owns the descriptors and fills spi_fd/reset_fd/irq_fd; close releases
+ * all of them even on error and is idempotent. check also runs in SPI workers,
+ * so its session data must remain immutable until all transfers have ended.
+ * The caller owns transport_data through the device's complete lifetime. */
 typedef struct
 {
-  gboolean (*configure) (FpiDeviceFte3600 *self, GError **error);
+  gboolean (*open) (FpiDeviceFte3600 *self, GError **error);
+  gboolean (*close) (FpiDeviceFte3600 *self, GError **error);
+  gboolean (*check) (FpiDeviceFte3600 *self, GError **error);
   gboolean (*set_reset) (FpiDeviceFte3600 *self, gboolean asserted, GError **error);
   gboolean (*get_events) (FpiDeviceFte3600 *self, guint32 *events, GError **error);
-  gint     (*irq_fd) (FpiDeviceFte3600 *self);
-  void     (*release) (FpiDeviceFte3600 *self);
 } Fte3600TransportOps;
 
 struct _FpiDeviceFte3600
@@ -36,8 +39,15 @@ struct _FpiDeviceFte3600
   FpDevice                       parent;
 
   gint                           spi_fd;
+  gint                           reset_fd;
+  gint                           irq_fd;
   const Fte3600TransportOps      *transport_ops;
   gpointer                       transport_data;
+  gboolean                       spi_configured;
+  gboolean                       spi_configuration_invalid;
+  guint32                        original_speed;
+  guint8                         original_bits;
+  Fte3600Resources               resources;
   gboolean                       capturing;
   gboolean                       armed;
   gboolean                       idle_verified;
@@ -52,7 +62,7 @@ struct _FpiDeviceFte3600
 
   guint32                        max_transfer;
   guint32                        spi_mode;
-  guint32                        bridge_capabilities;
+  guint32                        transport_capabilities;
   const Fte3600SensorDescriptor *sensor;
   const Fte3600Backend          *backend;
   gpointer                       backend_data;
@@ -68,6 +78,7 @@ struct _FpiDeviceFte3600
   guint16                        family;
   guint8                         discovery_rx[64];
   GSource                       *irq_source;
+  GSource                       *irq_guard_source;
   FpiSsm                        *irq_wait_ssm;
   gint64                         arm_deadline;
   guint                          arm_attempts;
@@ -106,7 +117,15 @@ struct _Fte3600Backend
    * interrupt is not evidence of release. NULL preserves capture behavior for
    * protocols whose release indication has not yet been established. */
   FpiSsm *(*create_wait_release) (FpiDeviceFte3600 *self);
+  /* Reusable awake idle after an action, including cancellation. */
   FpiSsm *(*create_reset) (FpiDeviceFte3600 *self);
+  /* Optional final-close quiesce. Runs even after verified awake idle, with
+   * transport/IRQ/reset ownership still held. Completion only establishes
+   * that the documented shutdown sequence finished, not an invented sleep
+   * status. Clear idle_verified; the core always releases resources, including
+   * on failure. Backends without this hook retain their verified idle cleanup.
+   */
+  FpiSsm *(*create_shutdown) (FpiDeviceFte3600 *self);
 };
 
 const Fte3600Backend *fpi_fte3600_backend_for_sensor (Fte3600Sensor sensor);
@@ -153,8 +172,12 @@ void fpi_fte3600_set_hardware_reset (FpiSsm           *ssm,
                                      gboolean          asserted);
 gboolean fpi_fte3600_fail_if_cancelled (FpiSsm   *ssm,
                                         FpDevice *dev);
-gboolean fpi_fte3600_configure_spi (FpiDeviceFte3600 *self,
-                                    GError          **error);
+gboolean fpi_fte3600_transport_open (FpiDeviceFte3600 *self,
+                                     GError          **error);
+gboolean fpi_fte3600_transport_close (FpiDeviceFte3600 *self,
+                                      GError          **error);
+gboolean fpi_fte3600_transport_check (FpDevice *device,
+                                      GError  **error);
 gboolean fpi_fte3600_set_cs_polarity (FpiDeviceFte3600 *self,
                                       gboolean          active_high,
                                       GError          **error);

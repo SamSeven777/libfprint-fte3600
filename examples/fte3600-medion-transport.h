@@ -25,9 +25,10 @@ gboolean fte3600_medion_transport_attach (FpiDeviceFte3600                  *sel
                                         const Fte3600MedionTransportConfig *config,
                                         GError                           **error);
 
-/* Call after the core has closed its SPI fd and before unref. Releases the
+/* Call after transport_close and before unref. Releases the
  * saved configuration and reports the first error from any resource cleanup.
- * The transport release callback itself is idempotent and retains this error.
+ * The close callback is idempotent, reports and retains this error. The adapter
+ * owns the SPI fd and requests; callers must not close those descriptors.
  */
 gboolean fte3600_medion_transport_detach (FpiDeviceFte3600 *self,
                                         GError          **error);

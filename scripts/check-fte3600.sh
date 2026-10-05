@@ -10,6 +10,7 @@ for fte_auth in false true; do
   fte_build="$fte_repo/build-fte3600-ci-$fte_auth"
   fte_args=(
     -Ddrivers=fte3600
+    -Dfte3600_medion_spidev=true
     -Dfte3600_personal_auth="$fte_auth"
     -Dfte3600_ipa_auth="$fte_auth"
     -Dgtk-examples=false
@@ -33,5 +34,7 @@ for fte_auth in false true; do
     fw9369-protocol ft93xx-protocol ft9368-protocol \
     ft9368-backend fw9369-backend ft93xx-backend legacy38-recovery \
     fte3600-special-probe fte3600-family-template fte3600-auth-lifecycle \
-    fte3600-install-firmware fte3600-setup
+    fte3600-install-firmware fte3600-setup fte3600-pair fte3600-resources \
+    medion-spidev-help medion-spidev-launcher medion-transport \
+    medion-identify medion-identify-io medion-boot
 done

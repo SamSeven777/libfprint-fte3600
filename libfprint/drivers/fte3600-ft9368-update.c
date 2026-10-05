@@ -19,6 +19,7 @@ typedef struct
   gboolean touched;
   gboolean erase_started;
   gboolean cleanup;
+  gboolean rx_valid;
 } Update;
 
 typedef struct
@@ -64,6 +65,16 @@ update_error (FpiSsm *ssm, const gchar *message)
 }
 
 static void
+update_exchange_done (FpiSpiTransfer *transfer, FpDevice *dev,
+                      gpointer user_data, GError *error)
+{
+  Update *data = user_data;
+
+  data->rx_valid = error == NULL;
+  fpi_ssm_spi_transfer_cb (transfer, dev, NULL, error);
+}
+
+static void
 update_exchange (FpiSsm *ssm, Update *data, const guint8 *frame, gsize length)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
@@ -74,6 +85,7 @@ update_exchange (FpiSsm *ssm, Update *data, const guint8 *frame, gsize length)
       update_error (ssm, "FT9368 update packet exceeds the verified transport limit");
       return;
     }
+  data->rx_valid = FALSE;
   memset (data->rx, 0, sizeof data->rx);
   transfer = fpi_spi_transfer_new_with_buffer_size (FP_DEVICE (self), self->spi_fd,
                                                     self->max_transfer);
@@ -85,7 +97,11 @@ update_exchange (FpiSsm *ssm, Update *data, const guint8 *frame, gsize length)
   /* Once flash erasure starts, interruption must not leave an otherwise
    * successful programming sequence incomplete. The parent reports a pending
    * cancellation after this bounded update and verification has finished. */
-  fpi_fte3600_submit_transfer (ssm, transfer, !data->erase_started && !data->cleanup);
+  transfer->ssm = ssm;
+  fpi_spi_transfer_submit (transfer,
+                           !data->erase_started && !data->cleanup ?
+                           fpi_device_get_cancellable (FP_DEVICE (self)) : NULL,
+                           update_exchange_done, data);
 }
 
 static void
@@ -511,7 +527,19 @@ update_handler (FpiSsm *ssm, FpDevice *dev)
     case UPDATE_VERIFY_CHECK:
       {
         Fte3600Ft9368Info info;
-        if (!fpi_fte3600_ft9368_parse_info (data->rx + FTE3600_FT9368_HEADER,
+        const guint8 *info_data = data->rx + FTE3600_FT9368_HEADER;
+        guint16 id = ((guint16) info_data[19] << 8) | info_data[20];
+
+        /* A partial or failed response cannot establish a different chip.
+         * A complete positive conflict must also stop the parent's cleanup. */
+        if (data->rx_valid && id != 0 && id != 0xffff && id != 0x9368)
+          {
+            self->session_failed = TRUE;
+            self->idle_verified = FALSE;
+            self->armed = FALSE;
+          }
+        if (!data->rx_valid ||
+            !fpi_fte3600_ft9368_parse_info (info_data,
                                             FTE3600_FT9368_INFO_SIZE, &info) ||
             info.version != FTE3600_FT9368_PROGRAMMED_VERSION)
           update_error (ssm, "FT9368 application did not confirm identity and version after update");

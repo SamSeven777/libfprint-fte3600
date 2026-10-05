@@ -1,5 +1,12 @@
 # Dynamic ACPI and sensor discovery
 
+The transport ABI and installation sections below are a historical record of
+the former main-branch custom SPI bridge. In the current transport, stock spidev, one reset GPIO
+and an IRQ-only UIO device replace it; both GpioInt and ordinary ACPI interrupts
+are supported. Follow the [current transport and installation contract](acpi-spidev.md),
+not the old bridge migration commands below. The chip-identity rules remain
+applicable. Process-exit CS restoration is a limitation of the new transport.
+
 This change removes the DMI model/controller/pin table. It independently
 implements resource discovery and chip-specific runtime/ROM identity protocols.
 It does not reproduce the Windows fallback that assumes a chip after failed

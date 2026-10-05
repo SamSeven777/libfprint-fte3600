@@ -109,6 +109,8 @@ identify_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
                            "Invalid Medion diagnostic transaction length");
       return FALSE;
     }
+  if (!fpi_fte3600_transport_check (FP_DEVICE (io->device), error))
+    return FALSE;
   if (!rx)
     rx = discard = g_malloc0 (length);
   else
@@ -134,7 +136,7 @@ identify_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
                    "Medion diagnostic SPI transfer returned %d of %zu bytes", result, length);
       return FALSE;
     }
-  return TRUE;
+  return fpi_fte3600_transport_check (FP_DEVICE (io->device), error);
 }
 
 static gboolean
@@ -142,7 +144,9 @@ identify_reset (gpointer user_data, gboolean asserted, GError **error)
 {
   IdentifyIo *io = user_data;
 
-  return io->device->transport_ops->set_reset (io->device, asserted, error);
+  return fpi_fte3600_transport_check (FP_DEVICE (io->device), error) &&
+         io->device->transport_ops->set_reset (io->device, asserted, error) &&
+         fpi_fte3600_transport_check (FP_DEVICE (io->device), error);
 }
 
 static gboolean
@@ -173,7 +177,7 @@ identify_report (gpointer user_data, const gchar *message)
 }
 
 static gboolean
-run_legacy_diagnostic (FpiDeviceFte3600 *self, const gchar *path,
+run_legacy_diagnostic (FpiDeviceFte3600 *self,
                        GCancellable *cancellable, Fte3600Sensor boot_sensor,
                        GBytes *firmware, Fte3600Identity *identity, GError **error)
 {
@@ -191,37 +195,24 @@ run_legacy_diagnostic (FpiDeviceFte3600 *self, const gchar *path,
     .report = identify_report,
   };
   gboolean result = FALSE;
+  g_autoptr(GError) cleanup = NULL;
 
   if (identify_cancelled (&native, error))
     return FALSE;
-  self->spi_fd = open (path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-  if (self->spi_fd < 0)
-    {
-      gint saved_errno = errno;
-
-      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                   "Cannot open Medion spidev: %s", g_strerror (saved_errno));
-      return FALSE;
-    }
-  if (self->transport_ops->configure (self, error))
+  if (fpi_fte3600_transport_open (self, error))
     {
       io.max_transfer = self->max_transfer;
       result = firmware ? fte3600_medion_boot (&io, boot_sensor, firmware, identity, error) :
                           fte3600_medion_identify_legacy (&io, identity, error);
     }
-  self->transport_ops->release (self);
-  if (close (self->spi_fd) < 0)
+  if (!fpi_fte3600_transport_close (self, &cleanup))
     {
-      gint saved_errno = errno;
-
-      if (!*error)
-        g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                     "Cannot close Medion spidev: %s", g_strerror (saved_errno));
+      if (!error || !*error)
+        g_propagate_error (error, g_steal_pointer (&cleanup));
       else
-        g_printerr ("RESTORE FAIL: closing Medion spidev: %s\n", g_strerror (saved_errno));
+        g_printerr ("RESTORE FAIL: %s\n", cleanup->message);
       result = FALSE;
     }
-  self->spi_fd = -1;
   /* detach below reports any latched GPIO/SPI parameter restoration failure.
    * Diagnostic results never populate the general driver's identity state. */
   return result;
@@ -395,7 +386,7 @@ main (int argc, char **argv)
         g_print ("IDENTIFY START: dedicated Medion FT9338/FT9348 investigation.\n"
                  "Application and ROM/OTP queries; no firmware upload or capture.\n");
       timeout_source = g_timeout_add_seconds (timeout, cancel_operation, cancellable);
-      if (!run_legacy_diagnostic (self, device_path, cancellable, boot_sensor,
+      if (!run_legacy_diagnostic (self, cancellable, boot_sensor,
                                   firmware, &identity, &error))
         goto out;
       g_clear_handle_id (&timeout_source, g_source_remove);
@@ -409,7 +400,7 @@ main (int argc, char **argv)
       goto out;
     }
   stage = "PROBE";
-  g_print ("PROBE START: fixed low-CS mode 0; Windows-derived identity probes.\n"
+  g_print ("PROBE START: existing CS unchanged, mode 0; Windows-derived identity probes.\n"
            "Wake/ROM negotiation may change sensor state. No firmware upload in this stage.\n");
   timeout_source = g_timeout_add_seconds (timeout, cancel_operation, cancellable);
   g_async_initable_init_async (G_ASYNC_INITABLE (self), G_PRIORITY_DEFAULT,

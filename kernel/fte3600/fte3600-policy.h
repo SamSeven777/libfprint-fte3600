@@ -8,17 +8,22 @@
 #else
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
+typedef uint64_t u64;
 #endif
-#include <linux/spi/spidev.h>
 
-/* Only resource roles are retained. Controller names and pin numbers remain
- * in ACPI and are resolved by gpiolib, never by this policy.
- */
+#define FTE3600_GLUE_ABI 2
+#define FTE3600_NGPIO 1
+#define FTE3600_LEASE_COUNT 2
+#define FTE3600_RESET 0
+#define FTE3600_IRQ 1
+
 enum fte3600_resource_kind {
 	FTE3600_RESOURCE_OTHER,
 	FTE3600_RESOURCE_SPI,
 	FTE3600_RESOURCE_RESET,
 	FTE3600_RESOURCE_IRQ,
+	FTE3600_RESOURCE_IRQ_ACPI,
 	FTE3600_RESOURCE_INVALID_GPIO,
 };
 
@@ -30,75 +35,31 @@ enum fte3600_reset_bias {
 	FTE3600_RESET_BIAS_UNKNOWN,
 };
 
-/* ABI values are logical assertions, not the Windows raw pin values.
- * An active-low descriptor maps DEASSERTED to physical H, ASSERTED to L.
+/* Only resource roles are retained; controller names and pin numbers are
+ * resolved by ACPI/gpiolib, never by a board or pin-number table.
  */
-enum fte3600_reset_state {
-	FTE3600_RESET_DEASSERTED = 0,
-	FTE3600_RESET_ASSERTED = 1,
-};
-
-/* The caller serializes access and supplies setup only while the controller
- * is available. A mode value alone cannot prove hardware state after an error.
- */
-struct fte3600_cs_state {
-	unsigned int original_cs;
-	bool configuration_invalid;
-};
-
-/* Start a session only after any previous restoration has succeeded. */
-static inline void
-fte3600_cs_begin(struct fte3600_cs_state *cs, unsigned int mode)
-{
-	cs->original_cs = mode & SPI_CS_HIGH;
-}
-
-static inline int
-fte3600_cs_set(struct fte3600_cs_state *cs, unsigned int *mode, bool high,
-	       int (*setup)(void *), void *context)
-{
-	unsigned int old_mode = *mode;
-	int ret;
-
-	if (cs->configuration_invalid)
-		return -EHOSTDOWN;
-	*mode = (old_mode & ~SPI_CS_HIGH) | (high ? SPI_CS_HIGH : 0);
-	ret = setup(context);
-	if (ret) {
-		*mode = old_mode;
-		/* A failed rollback must block further sensor transactions. */
-		cs->configuration_invalid = setup(context) != 0;
-	}
-	return ret;
-}
-
-static inline int
-fte3600_cs_restore(struct fte3600_cs_state *cs, unsigned int *mode,
-		   int (*setup)(void *), void *context)
-{
-	int ret;
-
-	if ((*mode & SPI_CS_HIGH) == cs->original_cs &&
-	    !cs->configuration_invalid)
-		return 0;
-	*mode = (*mode & ~SPI_CS_HIGH) | cs->original_cs;
-	ret = setup(context);
-	/* Keep the saved target on failure. Even with matching software bits,
-	 * the next restoration must program the controller again.
-	 */
-	cs->configuration_invalid = ret != 0;
-	return ret;
-}
-
 struct fte3600_resources {
 	unsigned int gpio_index;
 	unsigned int reset_index;
+	unsigned int irq_index;
 	unsigned int resets;
 	unsigned int interrupts;
 	unsigned int spi;
+	unsigned int mode;
+	unsigned int speed_hz;
 	enum fte3600_reset_bias reset_bias;
+	bool irq_active_low;
+	bool irq_is_gpio;
+	bool cs_control;
 	bool invalid;
 };
+
+/* GPIO CS is controller-owned: stock spidev masks/forces its CS_HIGH bit. */
+static inline bool
+fte3600_cs_control_supported(bool gpio_cs, bool controller_cs_high)
+{
+	return !gpio_cs && controller_cs_high;
+}
 
 static inline bool
 fte3600_reset_bias_valid(enum fte3600_reset_bias bias)
@@ -109,19 +70,18 @@ fte3600_reset_bias_valid(enum fte3600_reset_bias bias)
 }
 
 static inline bool
-fte3600_reset_reference_valid(bool same_device, unsigned int nargs,
-			      unsigned long long resource,
-			      unsigned long long pin,
-			      unsigned long long active_low,
-			      unsigned int reset_index)
+fte3600_gpio_reference_valid(bool same_device, unsigned int nargs,
+		unsigned long long resource, unsigned long long pin,
+		unsigned long long active_low, unsigned int expected_resource,
+		bool expected_active_low)
 {
-	return same_device && nargs == 3 && resource == reset_index &&
-	       pin == 0 && active_low == 1;
+	return same_device && nargs == 3 && resource == expected_resource &&
+	       pin == 0 && active_low == expected_active_low;
 }
 
 static inline void
 fte3600_resource_add(struct fte3600_resources *r,
-		     enum fte3600_resource_kind kind, bool valid)
+		    enum fte3600_resource_kind kind, bool valid)
 {
 	if (!valid)
 		r->invalid = true;
@@ -136,8 +96,13 @@ fte3600_resource_add(struct fte3600_resources *r,
 		r->resets++;
 		break;
 	case FTE3600_RESOURCE_IRQ:
+		r->irq_index = r->gpio_index;
 		r->interrupts++;
+		r->irq_is_gpio = true;
 		break;
+	case FTE3600_RESOURCE_IRQ_ACPI:
+		r->interrupts++;
+		return; /* An Interrupt resource is not a GPIO lookup index. */
 	case FTE3600_RESOURCE_INVALID_GPIO:
 		r->invalid = true;
 		break;
@@ -152,30 +117,76 @@ fte3600_resources_valid(const struct fte3600_resources *r)
 	       r->interrupts == 1;
 }
 
-static inline int
-fte3600_check_transfer(const struct spi_ioc_transfer *xfer,
-		       unsigned int limit)
+/* The reset GPIO request owns a cooperative userspace session; the second
+ * lease belongs to the UIO IRQ open, not to a second GPIO. Stock spidev does
+ * not consult this state: clients must check generation before AND after I/O.
+ * Every callback using the state is serialized by the driver's mutex.
+ */
+struct fte3600_lease {
+	u64 generation;
+	u64 acquired[FTE3600_LEASE_COUNT];
+	unsigned int requested;
+	bool suspended;
+	bool online;
+};
+
+static inline int fte3600_lease_check(const struct fte3600_lease *s,
+				    unsigned int line)
 {
-	if (!xfer->len || xfer->len > limit)
-		return -EMSGSIZE;
-	if ((!xfer->tx_buf && !xfer->rx_buf) || xfer->speed_hz ||
-	    xfer->bits_per_word || xfer->delay_usecs || xfer->cs_change ||
-	    xfer->tx_nbits || xfer->rx_nbits || xfer->word_delay_usecs ||
-	    xfer->pad)
+	if (line >= FTE3600_LEASE_COUNT)
 		return -EINVAL;
+	if (!s->online)
+		return -ENODEV;
+	if (s->suspended || !(s->requested & (1U << line)) ||
+	    s->acquired[line] != s->generation)
+		return -EHOSTDOWN;
+	if (line == FTE3600_IRQ &&
+	    (!(s->requested & (1U << FTE3600_RESET)) ||
+	     s->acquired[FTE3600_RESET] != s->generation))
+		return -EHOSTDOWN;
 	return 0;
 }
 
-static inline int
-fte3600_transfer_result(int status, unsigned int actual,
-			unsigned int requested)
+static inline int fte3600_lease_request(struct fte3600_lease *s,
+				      unsigned int line)
 {
-	if (status)
-		return status;
-	/* A truncated command or image is not a successful transaction. */
-	if (actual != requested)
-		return -EIO;
-	return requested;
+	if (line >= FTE3600_LEASE_COUNT)
+		return -EINVAL;
+	if (!s->online)
+		return -ENODEV;
+	if (s->suspended)
+		return -EHOSTDOWN;
+	if ((s->requested & (1U << line)) ||
+	    (line == FTE3600_RESET && s->requested))
+		return -EBUSY;
+	if (line == FTE3600_IRQ && fte3600_lease_check(s, FTE3600_RESET))
+		return -EHOSTDOWN;
+	s->requested |= 1U << line;
+	s->acquired[line] = s->generation;
+	return 0;
+}
+
+static inline void fte3600_lease_free(struct fte3600_lease *s,
+				    unsigned int line)
+{
+	/* A surviving UIO fd must observe reset-first shutdown as session loss.
+	 * Do not advance an already stale generation again during PM cleanup.
+	 */
+	if (line == FTE3600_RESET &&
+	    (s->requested & (1U << FTE3600_RESET)) &&
+	    (s->requested & (1U << FTE3600_IRQ)) &&
+	    s->acquired[FTE3600_RESET] == s->generation)
+		s->generation++;
+	if (line < FTE3600_LEASE_COUNT)
+		s->requested &= ~(1U << line);
+}
+
+static inline void fte3600_lease_suspend(struct fte3600_lease *s)
+{
+	if (!s->suspended) {
+		s->suspended = true;
+		s->generation++;
+	}
 }
 
 #endif

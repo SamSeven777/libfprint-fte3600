@@ -2,6 +2,7 @@
 fte3600_sources = files(
     '../fte3600.c',
     '../fte3600-transport.c',
+    '../fte3600-resources.c',
     '../fte3600-discovery.c',
     '../fte3600-special-probe.c',
     '../fte3600-sensor.c',

@@ -71,7 +71,8 @@
 
 static const FpIdEntry fte3600_id_table[] = {
   {
-    .udev_types = FPI_DEVICE_UDEV_SUBTYPE_FTE3600,
+    .udev_types = FPI_DEVICE_UDEV_SUBTYPE_FTE3600 | FPI_DEVICE_UDEV_SUBTYPE_GPIO |
+                  FPI_DEVICE_UDEV_SUBTYPE_UIO,
     .spi_acpi_id = "FTE3600",
   },
   { .udev_types = 0 },

@@ -16,15 +16,22 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
+#include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include <glib-unix.h>
 #include <glib/gstdio.h>
-#include "drivers/fte3600-bridge.h"
+#include "drivers/fte3600-private.h"
 
 #include "drivers/fte3600.h"
-#include "drivers/fte3600-private.h"
 #include "drivers/fte3600-ft93xx-protocol.h"
+
+static gboolean use_separate_irq_transport;
+static gboolean separate_close_failure;
+static guint transport_opens, transport_event_reads, transport_checks;
 
 #ifndef FTE3600_ENABLE_PERSONAL_AUTH
 #define FTE3600_ENABLE_PERSONAL_AUTH 0
@@ -36,25 +43,47 @@
 #include "fte3600-test-image.h"
 #endif
 
-static gboolean use_separate_irq_transport;
-static guint transport_configures;
-static guint transport_event_reads;
-
 /* Declarations also check wrapper signatures against the platform headers. */
 #define WRAPPED(name) __typeof__ (name) __wrap_ ## name
 WRAPPED (open);
 WRAPPED (close);
 WRAPPED (ioctl);
+WRAPPED (fstat);
+WRAPPED (fstat64);
+WRAPPED (read);
+WRAPPED (flock);
+WRAPPED (fpi_fte3600_resources_resolve);
+WRAPPED (fpi_fte3600_resources_check);
+WRAPPED (fpi_fte3600_resources_buffer_size);
+WRAPPED (fpi_fte3600_transport_open);
+WRAPPED (fpi_fte3600_transport_close);
 WRAPPED (g_file_get_contents);
 WRAPPED (g_unix_fd_source_new);
 #undef WRAPPED
 
 __typeof__ (g_unix_fd_source_new) __real_g_unix_fd_source_new;
 __typeof__ (close) __real_close;
+__typeof__ (fstat) __real_fstat;
+__typeof__ (fstat64) __real_fstat64;
+__typeof__ (read) __real_read;
+__typeof__ (fpi_fte3600_transport_open) __real_fpi_fte3600_transport_open;
+__typeof__ (fpi_fte3600_transport_close) __real_fpi_fte3600_transport_close;
 __typeof__ (g_file_get_contents) __real_g_file_get_contents;
 int __wrap_open64 (const char *path,
                    int         flags,
                    ...);
+int __wrap___open_2 (const char *path,
+                     int         flags);
+int __wrap___open64_2 (const char *path,
+                       int         flags);
+ssize_t __real___read_chk (int    fd,
+                           void  *buffer,
+                           size_t count,
+                           size_t buffer_length);
+ssize_t __wrap___read_chk (int    fd,
+                           void  *buffer,
+                           size_t count,
+                           size_t buffer_length);
 
 typedef enum {
   DELIVER_FINGER,
@@ -139,6 +168,8 @@ typedef struct
 {
   gboolean original_high;
   gboolean required_high;
+  gboolean gpio_cs;
+  gboolean fixed_cs;
 } CsFixture;
 
 static const CsFixture *cs_fixture;
@@ -154,6 +185,7 @@ static struct
   guint32          original_spi_mode;
   guint32          last_closed_spi_mode;
   guint            cs_changes;
+  guint            spi_mode_writes;
   guint            selected_geometry_reads;
   guint            wrong_cs_transfers;
   guint            special_reads;
@@ -198,6 +230,23 @@ static struct
   gint             firmware_fd;
   gboolean         otp_enabled;
   gint             spi_fd;
+  gint             gpio_fd;
+  gint             reset_fd;
+  gint             event_fd;
+  gint             irq_path_fd;
+  guint32          irq_counter;
+  guint            irq_read_fault;
+  gboolean         closing_transport;
+  gboolean         configuring_transport;
+  guint32          speed;
+  guint8           bits;
+  guint            transport_failure;
+  gboolean         transport_failure_fired;
+  gboolean         fail_restore;
+  gboolean         restore_failed;
+  guint            fail_cs_writes;
+  guint64          epoch;
+  gboolean         suspended;
   gint             irq_pipe[2];
   guint            opens;
   guint            closes;
@@ -272,7 +321,44 @@ __wrap_open (const char *path, int flags, ...)
       errno = ENOENT;
       return -1;
     }
+  if (g_str_equal (path, "/mock/fte3600-gpio"))
+    {
+      g_assert_cmpint (flags, ==, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      if (sensor.transport_failure == 1)
+        {
+          errno = EACCES;
+          return -1;
+        }
+      sensor.gpio_fd = dup (sensor.irq_pipe[0]);
+      return sensor.gpio_fd;
+    }
+  if (g_str_equal (path, "/mock/fte3600-irq"))
+    {
+      if (flags & O_PATH)
+        {
+          g_assert_cmpint (flags, ==, O_PATH | O_CLOEXEC | O_NOFOLLOW);
+          if (sensor.transport_failure == 9)
+            {
+              errno = EACCES;
+              return -1;
+            }
+          sensor.irq_path_fd = dup (sensor.irq_pipe[0]);
+          return sensor.irq_path_fd;
+        }
+      g_assert_cmpint (flags, ==, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+      g_assert_cmpint (sensor.reset_fd, >=, 0);
+      g_assert_cmpint (sensor.event_fd, ==, -1);
+      if (sensor.transport_failure == 6)
+        {
+          errno = EBUSY;
+          return -1;
+        }
+      sensor.event_fd = dup (sensor.irq_pipe[0]);
+      g_assert_cmpint (fcntl (sensor.event_fd, F_SETFL, O_NONBLOCK), ==, 0);
+      return sensor.event_fd;
+    }
   g_assert_cmpstr (path, ==, "/mock/fte3600-spi");
+  g_assert_cmpint (flags, ==, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
   if (sensor.fail_claim)
     {
       errno = EBUSY;
@@ -283,13 +369,24 @@ __wrap_open (const char *path, int flags, ...)
   g_assert_cmpint (sensor.spi_fd, ==, -1);
   sensor.spi_fd = dup (sensor.irq_pipe[0]);
   g_assert_cmpint (sensor.spi_fd, >=, 0);
-  sensor.original_spi_mode = sensor.spi_mode;
   sensor.opens++;
   return sensor.spi_fd;
 }
 
 int
 __wrap_open64 (const char *path, int flags, ...)
+{
+  return __wrap_open (path, flags);
+}
+
+int
+__wrap___open_2 (const char *path, int flags)
+{
+  return __wrap_open (path, flags);
+}
+
+int
+__wrap___open64_2 (const char *path, int flags)
 {
   return __wrap_open (path, flags);
 }
@@ -302,18 +399,186 @@ __wrap_close (int fd)
       sensor.firmware_fd = -1;
       return __real_close (fd);
     }
+  if (fd == sensor.gpio_fd || fd == sensor.reset_fd || fd == sensor.event_fd || fd == sensor.irq_path_fd)
+    {
+      if (fd == sensor.gpio_fd)
+        {
+          sensor.gpio_fd = -1;
+        }
+      else if (fd == sensor.reset_fd)
+        {
+          g_assert_cmpint (sensor.event_fd, ==, -1);
+          sensor.reset_fd = -1;
+        }
+      else if (fd == sensor.irq_path_fd)
+        {
+          sensor.irq_path_fd = -1;
+        }
+      else
+        {
+          sensor.event_fd = -1;
+        }
+      return __real_close (fd);
+    }
   g_assert_cmpint (fd, ==, sensor.spi_fd);
-  /* The last bridge close releases reset and restores only the CS bit saved
-   * at successful open, including after successful enumeration. */
-  sensor.last_closed_spi_mode = sensor.spi_mode;
-  sensor.spi_mode = (sensor.spi_mode & ~SPI_CS_HIGH) |
-                    (sensor.original_spi_mode & SPI_CS_HIGH);
+  /* Stock spidev close does not restore mode: production cleanup must do so. */
+  if (!sensor.restore_failed)
+    g_assert_cmpuint (sensor.spi_mode, ==, sensor.original_spi_mode);
   sensor.reset_asserted = FALSE;
   sensor.claimed = FALSE;
   sensor.releases++;
   sensor.spi_fd = -1;
   sensor.closes++;
   return __real_close (fd);
+}
+
+int
+__wrap_fstat (int fd, struct stat *st)
+{
+  if (fd != sensor.spi_fd && fd != sensor.gpio_fd && fd != sensor.irq_path_fd && fd != sensor.event_fd)
+    return __real_fstat (fd, st);
+  memset (st, 0, sizeof (*st));
+  st->st_mode = S_IFCHR | 0600;
+  if (sensor.transport_failure == 3)
+    st->st_mode = S_IFREG | 0600;
+  st->st_rdev = makedev (fd == sensor.spi_fd ? 153 : fd == sensor.gpio_fd ? 254 : 247,
+                         sensor.transport_failure == 10 && fd == sensor.event_fd ? 1 : 0);
+  return 0;
+}
+
+int
+__wrap_fstat64 (int fd, struct stat64 *st)
+{
+  if (fd != sensor.spi_fd && fd != sensor.gpio_fd && fd != sensor.irq_path_fd && fd != sensor.event_fd)
+    return __real_fstat64 (fd, st);
+  memset (st, 0, sizeof (*st));
+  st->st_mode = S_IFCHR | 0600;
+  if (sensor.transport_failure == 3)
+    st->st_mode = S_IFREG | 0600;
+  st->st_rdev = makedev (fd == sensor.spi_fd ? 153 : fd == sensor.gpio_fd ? 254 : 247,
+                         sensor.transport_failure == 10 && fd == sensor.event_fd ? 1 : 0);
+  return 0;
+}
+
+int
+__wrap_flock (int fd, int operation)
+{
+  g_assert_cmpint (fd, ==, sensor.spi_fd);
+  g_assert_cmpint (operation, ==, LOCK_EX | LOCK_NB);
+  if (sensor.transport_failure == 2)
+    {
+      errno = EWOULDBLOCK;
+      return -1;
+    }
+  return 0;
+}
+
+ssize_t
+__wrap_read (int fd, void *buffer, size_t size)
+{
+  if (fd == sensor.event_fd)
+    {
+      guint32 *counter = buffer;
+      gchar byte;
+      ssize_t result;
+
+      g_assert_cmpuint (size, ==, sizeof (*counter));
+      result = __real_read (fd, &byte, 1);
+      if (result != 1)
+        return result;
+      if (sensor.irq_read_fault == 1)
+        return 3; /* A malformed short UIO counter must not wake the backend. */
+      if (sensor.irq_read_fault == 2)
+        sensor.epoch++; /* PM can notify UIO while invalidating the session. */
+      *counter = sensor.irq_counter;
+      return sizeof (*counter);
+    }
+  return __real_read (fd, buffer, size);
+}
+
+ssize_t
+__wrap___read_chk (int fd, void *buffer, size_t count, size_t buffer_length)
+{
+  /* Fortify can select this entry point in sanitizer builds. Keep its size
+   * validation, and preserve the genuine checked read for non-mock fds. */
+  g_assert_cmpuint (count, <=, buffer_length);
+  if (fd == sensor.event_fd)
+    return __wrap_read (fd, buffer, count);
+  return __real___read_chk (fd, buffer, count, buffer_length);
+}
+
+gboolean
+__wrap_fpi_fte3600_resources_resolve (const gchar *root, dev_t spi, dev_t gpio, dev_t irq,
+                                      Fte3600Resources *resources, GError **error)
+{
+  g_assert_cmpstr (root, ==, "/sys");
+  g_assert_cmpuint (spi, ==, makedev (153, 0));
+  g_assert_cmpuint (gpio, ==, makedev (254, 0));
+  g_assert_cmpuint (irq, ==, makedev (247, 0));
+  g_assert_cmpint (sensor.event_fd, ==, -1);
+  if (sensor.bad_abi || sensor.bad_mode || sensor.fail_config)
+    {
+      g_set_error_literal (error, G_IO_ERROR,
+                           sensor.fail_config ? G_IO_ERROR_FAILED : G_IO_ERROR_NOT_SUPPORTED,
+                           "Injected ACPI resource validation failure");
+      return FALSE;
+    }
+  *resources = (Fte3600Resources){
+    .glue_path = g_strdup ("/mock/glue"), .generation = sensor.epoch,
+    .acpi_mode = sensor.original_spi_mode, .acpi_speed_hz = 1000000,
+    .cs_control = !cs_fixture || !(cs_fixture->gpio_cs || cs_fixture->fixed_cs),
+  };
+  return TRUE;
+}
+
+gboolean
+__wrap_fpi_fte3600_resources_check (const Fte3600Resources *resources, GError **error)
+{
+  g_assert_cmpstr (resources->glue_path, ==, "/mock/glue");
+  if (resources->generation != sensor.epoch || sensor.suspended)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE,
+                           "Injected stale ACPI session");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+gboolean
+__wrap_fpi_fte3600_resources_buffer_size (const gchar *root, guint32 *size, GError **error)
+{
+  g_assert_cmpstr (root, ==, "/sys");
+  *size = sensor.buffer_size;
+  return TRUE;
+}
+
+gboolean
+__wrap_fpi_fte3600_transport_open (FpiDeviceFte3600 *self, GError **error)
+{
+  gboolean success;
+
+  sensor.configuring_transport = TRUE;
+  success = __real_fpi_fte3600_transport_open (self, error);
+  sensor.configuring_transport = FALSE;
+  /* Retain single-polarity protocol fixtures alongside full stock-spidev
+   * transport tests. This changes only the discovery capability boundary. */
+  if (success && !((probe_fixture && probe_fixture->cs_control) ||
+                   (legacy_wake_fixture && legacy_wake_fixture->cs_control) || cs_fixture))
+    self->transport_capabilities = 0;
+  return success;
+}
+
+gboolean
+__wrap_fpi_fte3600_transport_close (FpiDeviceFte3600 *self, GError **error)
+{
+  gboolean success;
+
+  if (self->spi_fd >= 0)
+    sensor.last_closed_spi_mode = sensor.spi_mode; /* State before actual restoration. */
+  sensor.closing_transport = TRUE;
+  success = __real_fpi_fte3600_transport_close (self, error);
+  sensor.closing_transport = FALSE;
+  return success;
 }
 
 gboolean
@@ -386,7 +651,7 @@ deliver_irq (gpointer unused)
 GSource *
 __wrap_g_unix_fd_source_new (gint fd, GIOCondition condition)
 {
-  g_assert_cmpint (fd, ==, use_separate_irq_transport ? sensor.irq_pipe[0] : sensor.spi_fd);
+  g_assert_cmpint (fd, ==, sensor.event_fd);
   if (sensor.armed && sensor.irq_source == 0)
     sensor.irq_source = g_idle_add (deliver_irq, NULL);
   return __real_g_unix_fd_source_new (fd, condition);
@@ -545,58 +810,132 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   va_list args;
   int result;
 
-  g_assert_cmpint (fd, ==, sensor.spi_fd);
   sensor.ioctl_count++;
   va_start (args, operation);
   gpointer argument = va_arg (args, gpointer);
   va_end (args);
-  if (operation == FTE3600_IOC_GET_INFO)
+  if (operation == GPIO_GET_CHIPINFO_IOCTL)
     {
-      struct fte3600_bridge_info *info = argument;
-      if (sensor.fail_config)
+      struct gpiochip_info *info = argument;
+      g_assert_cmpint (fd, ==, sensor.gpio_fd);
+      *info = (struct gpiochip_info){ .lines = sensor.transport_failure == 4 ? 2 : 1 };
+      return 0;
+    }
+  if (operation == GPIO_V2_GET_LINE_IOCTL)
+    {
+      struct gpio_v2_line_request *request = argument;
+      g_assert_cmpint (fd, ==, sensor.gpio_fd);
+      g_assert_cmpuint (request->num_lines, ==, 1);
+      g_assert_cmpuint (request->offsets[0], ==, 0);
+      if (sensor.transport_failure == 5)
         {
+          errno = EBUSY;
+          return -1;
+        }
+      g_assert_cmpuint (request->config.flags, ==, GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_ACTIVE_LOW);
+      g_assert_cmpuint (request->config.attrs[0].attr.values, ==, 0);
+      request->fd = dup (sensor.irq_pipe[0]);
+      sensor.reset_fd = request->fd;
+      return 0;
+    }
+  if (operation == GPIO_V2_LINE_SET_VALUES_IOCTL)
+    {
+      struct gpio_v2_line_values *value = argument;
+      g_assert_cmpint (fd, ==, sensor.reset_fd);
+      g_assert_cmpuint (value->mask, ==, 1);
+      if (sensor.closing_transport)
+        {
+          g_assert_cmpuint (value->bits, ==, 0);
+          sensor.reset_asserted = FALSE;
+          return 0;
+        }
+      return set_reset (value->bits);
+    }
+  g_assert_cmpint (fd, ==, sensor.spi_fd);
+  if (operation == SPI_IOC_RD_MODE32)
+    {
+      if (sensor.transport_failure == 8 && !sensor.transport_failure_fired)
+        {
+          sensor.transport_failure_fired = TRUE;
+          *(guint32 *) argument = SPI_MODE_3;
+          return 0;
+        }
+      /* Linux 6.8 spidev masks CS_HIGH for controller GPIO descriptors. */
+      *(guint32 *) argument = cs_fixture && cs_fixture->gpio_cs ?
+                              sensor.spi_mode & ~SPI_CS_HIGH : sensor.spi_mode;
+      return 0;
+    }
+  if (operation == SPI_IOC_WR_MODE32)
+    {
+      guint32 mode = *(guint32 *) argument;
+
+      sensor.spi_mode_writes++;
+      /* Reproduce stock spidev WR_MODE32, not an ideal symmetric ioctl. */
+      if (cs_fixture && cs_fixture->gpio_cs)
+        mode |= SPI_CS_HIGH;
+      if (sensor.transport_failure == 7 && !sensor.transport_failure_fired)
+        {
+          sensor.transport_failure_fired = TRUE;
           errno = EIO;
           return -1;
         }
-      *info = (struct fte3600_bridge_info){
-        .abi_version = sensor.bad_abi ? 999 : FTE3600_BRIDGE_ABI,
-        .max_transfer = sensor.buffer_size,
-        .speed_hz = FTE3600_SPI_SPEED_HZ,
-        .bits_per_word = 8,
-        .mode = sensor.bad_mode ? SPI_MODE_3 : sensor.spi_mode,
-        .capabilities = ((probe_fixture && probe_fixture->cs_control) ||
-                         (legacy_wake_fixture && legacy_wake_fixture->cs_control) ||
-                         cs_fixture) ? FTE3600_BRIDGE_CAP_CS_POLARITY : 0,
-      };
-      return 0;
-    }
-  if (operation == FTE3600_IOC_SET_RESET)
-    return set_reset (*(guint32 *) argument);
-  if (operation == FTE3600_IOC_SET_CS_POLARITY)
-    {
-      g_assert_true ((probe_fixture && probe_fixture->cs_control) ||
-                     (legacy_wake_fixture && legacy_wake_fixture->cs_control) ||
-                     cs_fixture);
-      g_assert_cmpuint (*(guint32 *) argument, <=, 1);
-      sensor.cs_changes++;
-      if (probe_fixture && probe_fixture->fail_cs)
+      if (sensor.fail_restore && sensor.closing_transport)
         {
+          sensor.fail_restore = FALSE;
+          sensor.restore_failed = TRUE;
           errno = EIO;
           return -1;
         }
-      sensor.spi_mode = (sensor.spi_mode & ~SPI_CS_HIGH) |
-                        (*(guint32 *) argument ? SPI_CS_HIGH : 0);
+      if (sensor.fail_cs_writes)
+        {
+          /* Model a controller which changed state before reporting error. */
+          sensor.spi_mode = SPI_CS_HIGH;
+          sensor.fail_cs_writes--;
+          errno = sensor.fail_cs_writes ? EIO : EBUSY;
+          return -1;
+        }
+      if (!sensor.configuring_transport && !sensor.closing_transport)
+        {
+          if (mode != sensor.spi_mode)
+            sensor.cs_changes++;
+          if (probe_fixture && probe_fixture->fail_cs && mode != sensor.spi_mode)
+            {
+              errno = EIO;
+              return -1;
+            }
+        }
+      sensor.spi_mode = mode;
       return 0;
     }
-  if (operation == FTE3600_IOC_GET_EVENTS)
+  if (operation == SPI_IOC_RD_BITS_PER_WORD)
     {
-      struct pollfd event = { .fd = fd, .events = POLLIN };
-      char byte;
-      *(guint32 *) argument = 0;
-      if (poll (&event, 1, 0) > 0)
+      *(guint8 *) argument = sensor.bits;
+      return 0;
+    }
+  if (operation == SPI_IOC_WR_BITS_PER_WORD)
+    {
+      sensor.bits = *(guint8 *) argument;
+      if (sensor.transport_failure == 11 && !sensor.transport_failure_fired)
         {
-          g_assert_cmpint (read (fd, &byte, 1), ==, 1);
-          *(guint32 *) argument = 1;
+          sensor.transport_failure_fired = TRUE;
+          errno = EIO;
+          return -1;
+        }
+      return 0;
+    }
+  if (operation == SPI_IOC_RD_MAX_SPEED_HZ)
+    {
+      *(guint32 *) argument = sensor.speed;
+      return 0;
+    }
+  if (operation == SPI_IOC_WR_MAX_SPEED_HZ)
+    {
+      sensor.speed = *(guint32 *) argument;
+      if (sensor.transport_failure == 12 && !sensor.transport_failure_fired)
+        {
+          sensor.transport_failure_fired = TRUE;
+          errno = EIO;
+          return -1;
         }
       return 0;
     }
@@ -915,30 +1254,36 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   return result;
 }
 
-typedef struct
-{
-  gboolean complete;
-  GError  *error;
-} DeviceInit;
-
-/* Exercise the real driver's transport seam with an IRQ descriptor distinct
- * from the SPI descriptor. The separate adapter's syscall tests validate GPIO
- * flags and resource ownership; this test covers actual probe/init/capture. */
+/* Model a standalone descriptor owner without ACPI glue metadata. The real
+ * core still installs its worker/IRQ guards and propagates close errors. */
 static gboolean
-separate_configure (FpiDeviceFte3600 *self, GError **error)
+separate_open (FpiDeviceFte3600 *self, GError **error)
 {
-  (void) error;
-  transport_configures++;
+  transport_opens++;
+  self->spi_fd = __wrap_open ("/mock/fte3600-spi", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (self->spi_fd, >=, 0);
+  self->reset_fd = sensor.reset_fd = dup (sensor.irq_pipe[0]);
+  self->irq_fd = sensor.event_fd = dup (sensor.irq_pipe[0]);
+  g_assert_cmpint (fcntl (self->irq_fd, F_SETFL, O_NONBLOCK), ==, 0);
   self->max_transfer = sensor.buffer_size;
-  self->spi_mode = SPI_MODE_0;
-  self->bridge_capabilities = 0;
+  self->spi_mode = sensor.spi_mode;
+  self->transport_capabilities = 0;
+  return TRUE;
+}
+
+static gboolean
+separate_check (FpiDeviceFte3600 *self, GError **error)
+{
+  transport_checks++;
+  g_assert_cmpint (self->spi_fd, >=, 0);
+  g_assert_cmpint (self->irq_fd, !=, self->spi_fd);
+  g_assert_null (self->resources.glue_path);
   return TRUE;
 }
 
 static gboolean
 separate_reset (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
 {
-  (void) self;
   if (set_reset (asserted) == 0)
     return TRUE;
   g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Synthetic reset failure");
@@ -948,32 +1293,52 @@ separate_reset (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
 static gboolean
 separate_events (FpiDeviceFte3600 *self, guint32 *events, GError **error)
 {
-  (void) error;
+  guint32 counter;
+  ssize_t result;
+
   transport_event_reads++;
-  return __wrap_ioctl (self->spi_fd, FTE3600_IOC_GET_EVENTS, events) == 0;
+  *events = 0;
+  result = __wrap_read (self->irq_fd, &counter, sizeof counter);
+  if (result < 0 && errno == EAGAIN)
+    return TRUE;
+  g_assert_cmpint (result, ==, sizeof counter);
+  *events = 1;
+  return TRUE;
 }
 
-static gint
-separate_irq_fd (FpiDeviceFte3600 *self)
+static gboolean
+separate_close (FpiDeviceFte3600 *self, GError **error)
 {
-  g_assert_cmpint (self->spi_fd, !=, sensor.irq_pipe[0]);
-  return sensor.irq_pipe[0];
-}
+  gboolean was_open = self->spi_fd >= 0;
+  gint *fds[] = { &self->irq_fd, &self->reset_fd, &self->spi_fd };
 
-static void
-separate_release (FpiDeviceFte3600 *self)
-{
-  (void) self;
-  sensor.reset_asserted = FALSE;
+  for (guint i = 0; i < G_N_ELEMENTS (fds); i++)
+    if (*fds[i] >= 0)
+      {
+        __wrap_close (*fds[i]);
+        *fds[i] = -1;
+      }
+  if (was_open && separate_close_failure)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Synthetic standalone close failure");
+      return FALSE;
+    }
+  return TRUE;
 }
 
 static const Fte3600TransportOps separate_ops = {
-  .configure = separate_configure,
+  .open = separate_open,
+  .close = separate_close,
+  .check = separate_check,
   .set_reset = separate_reset,
   .get_events = separate_events,
-  .irq_fd = separate_irq_fd,
-  .release = separate_release,
 };
+
+typedef struct
+{
+  gboolean complete;
+  GError  *error;
+} DeviceInit;
 
 static void
 init_complete (GObject *object, GAsyncResult *result, gpointer data)
@@ -1001,9 +1366,17 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   sensor.model = &models[model];
   sensor.buffer_size = buffer_size;
   sensor.spi_mode = cs_fixture && cs_fixture->original_high ? SPI_CS_HIGH : SPI_MODE_0;
+  sensor.original_spi_mode = sensor.spi_mode;
+  sensor.epoch = 7;
   sensor.rom_family = 0x95a8;
   sensor.otp = sensor.model->otp;
   sensor.spi_fd = -1;
+  sensor.gpio_fd = -1;
+  sensor.reset_fd = -1;
+  sensor.event_fd = -1;
+  sensor.irq_path_fd = -1;
+  sensor.speed = 1000000;
+  sensor.bits = 8;
   sensor.firmware_fd = -1;
   sensor.inactive = wake_fixture;
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
@@ -1028,7 +1401,9 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   g_assert_cmpint (pipe (sensor.irq_pipe), ==, 0);
   sensor.cancellable = g_cancellable_new ();
   device = g_object_new (fpi_device_fte3600_get_type (),
-                         "fpi-udev-data-spidev", "/mock/fte3600-spi", NULL);
+                         "fpi-udev-data-spidev", "/mock/fte3600-spi",
+                         "fpi-udev-data-gpio", "/mock/fte3600-gpio",
+                         "fpi-udev-data-uio", "/mock/fte3600-irq", NULL);
   if (use_separate_irq_transport)
     FPI_DEVICE_FTE3600 (device)->transport_ops = &separate_ops;
   g_async_initable_init_async (G_ASYNC_INITABLE (device), G_PRIORITY_DEFAULT,
@@ -1044,14 +1419,14 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
 static FpDevice *
 new_device_checked (GError **error)
 {
-  return new_device_for_model_checked (0, FTE3600_BRIDGE_MAX_TRANSFER, error);
+  return new_device_for_model_checked (0, 32768U, error);
 }
 
 static FpDevice *
 new_device_for_model (guint model)
 {
   g_autoptr(GError) error = NULL;
-  FpDevice *device = new_device_for_model_checked (model, FTE3600_BRIDGE_MAX_TRANSFER, &error);
+  FpDevice *device = new_device_for_model_checked (model, 32768U, &error);
 
   g_assert_no_error (error);
   return device;
@@ -1110,7 +1485,7 @@ test_sleeping_legacy_discovery (gconstpointer data)
                             fixture->fault == LEGACY_WAKE_EXHAUSTED ? 12 : 2 * fixture->ready_attempt;
 
   legacy_wake_fixture = fixture;
-  device = new_device_for_model_checked (fixture->model, FTE3600_BRIDGE_MAX_TRANSFER, &error);
+  device = new_device_for_model_checked (fixture->model, 32768U, &error);
   switch (fixture->fault)
     {
     case LEGACY_WAKE_OK:
@@ -1182,7 +1557,7 @@ test_boot38_cold_enumeration (void)
   FpDevice *device;
 
   boot38_fixture = TRUE;
-  device = new_device_for_model_checked (3, FTE3600_BRIDGE_MAX_TRANSFER, &error);
+  device = new_device_for_model_checked (3, 32768U, &error);
   g_assert_no_error (error);
   g_assert_nonnull (strstr (fp_device_get_name (device), "FT9536"));
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -1208,7 +1583,7 @@ test_special_discovery (gconstpointer data)
   FpDevice *device;
 
   probe_fixture = fixture;
-  device = new_device_for_model_checked (0, fixture->limit ? fixture->limit : FTE3600_BRIDGE_MAX_TRANSFER, &error);
+  device = new_device_for_model_checked (0, fixture->limit ? fixture->limit : 32768U, &error);
   if (fixture->success)
     {
       g_assert_no_error (error);
@@ -1416,6 +1791,76 @@ test_cs_restore_reopen (gconstpointer data)
   g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
+}
+
+static void
+test_controller_managed_cs (gconstpointer data)
+{
+  const CsFixture *fixture = data;
+  const guint failures[] = { 8, 11, 12 };
+  guint32 original_mode = fixture->original_high ? SPI_CS_HIGH : SPI_MODE_0;
+  FpDevice *device;
+
+  cs_fixture = fixture;
+  wake_fixture = TRUE;
+  device = new_device ();
+  g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+  g_assert_cmpuint (sensor.awake_id_reads, ==, 4);
+  g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
+  g_assert_cmpuint (sensor.spi_mode_writes, ==, 0);
+  /* A mode read mismatch, a changed word length before ioctl failure and a
+   * changed speed before failure must all close without ever writing MODE. */
+  for (guint i = 0; i < G_N_ELEMENTS (failures); i++)
+    {
+      g_autoptr(GError) error = NULL;
+      guint transactions = sensor.spi_transactions;
+
+      sensor.bits = 16;
+      sensor.speed = 500000;
+      sensor.transport_failure = failures[i];
+      sensor.transport_failure_fired = FALSE;
+      g_assert_false (fp_device_open_sync (device, NULL, &error));
+      g_assert_nonnull (error);
+      g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
+      g_assert_cmpuint (sensor.spi_mode_writes, ==, 0);
+      g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
+      g_assert_cmpuint (sensor.bits, ==, 16);
+      g_assert_cmpuint (sensor.speed, ==, 500000);
+      g_assert_cmpint (sensor.spi_fd, ==, -1);
+      g_assert_cmpint (sensor.reset_fd, ==, -1);
+      g_assert_cmpint (sensor.event_fd, ==, -1);
+    }
+  sensor.transport_failure = 0;
+  for (guint round = 0; round < 2; round++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(FpImage) image = NULL;
+      FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+      sensor.inactive = TRUE;
+      sensor.inactive_wake_commands = 0;
+      open_device (device);
+      g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+      g_assert_cmpuint (self->transport_capabilities, ==, 0);
+      g_assert_false (fpi_fte3600_set_cs_polarity (
+                        self, !(self->spi_mode & SPI_CS_HIGH), &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+      g_clear_error (&error);
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
+      g_assert_cmpuint (sensor.spi_mode_writes, ==, 0);
+      g_assert_cmpuint (sensor.bits, ==, 16);
+      g_assert_cmpuint (sensor.speed, ==, 500000);
+    }
+  g_assert_cmpuint (sensor.wrong_cs_transfers, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  finish_device (device);
+  wake_fixture = FALSE;
 }
 
 static void
@@ -1647,7 +2092,10 @@ test_cleanup_invalidates_session (gconstpointer data)
   g_assert_true (fp_device_close_sync (device, NULL, &error));
   g_assert_no_error (error);
   g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
-  g_assert_cmpuint (sensor.ioctl_count, ==, ioctls);
+  /* Close performs resource restoration, but no unverified sensor protocol. */
+  g_assert_cmpuint (sensor.ioctl_count, >, ioctls);
+  g_assert_cmpuint (sensor.spi_mode, ==, sensor.original_spi_mode);
+  g_assert_false (sensor.reset_asserted);
 
   open_device (device);
   image = fp_device_capture_sync (device, TRUE, NULL, &error);
@@ -1739,7 +2187,7 @@ test_bridge_reject (gconstpointer data)
   FpDevice *device = new_device ();
 
   sensor.bad_abi = scenario == 0;
-  sensor.buffer_size = scenario == 1 ? 4096 : FTE3600_BRIDGE_MAX_TRANSFER;
+  sensor.buffer_size = scenario == 1 ? 4096 : 32768U;
   sensor.bad_mode = scenario == 2;
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
@@ -2150,14 +2598,240 @@ test_open_error (gconstpointer data)
 }
 
 static void
+test_transport_acquisition_failure (gconstpointer data)
+{
+  FpDevice *device = new_device ();
+  guint transactions = sensor.spi_transactions;
+
+  g_autoptr(GError) error = NULL;
+
+  sensor.transport_failure = GPOINTER_TO_UINT (data);
+  g_assert_false (fp_device_open_sync (device, NULL, &error));
+  g_assert_nonnull (error);
+  g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
+  g_assert_cmpint (sensor.spi_fd, ==, -1);
+  g_assert_cmpint (sensor.gpio_fd, ==, -1);
+  g_assert_cmpint (sensor.irq_path_fd, ==, -1);
+  g_assert_cmpint (sensor.reset_fd, ==, -1);
+  g_assert_cmpint (sensor.event_fd, ==, -1);
+  g_assert_false (sensor.claimed);
+  g_assert_false (sensor.reset_asserted);
+  g_clear_error (&error);
+  sensor.transport_failure = 0;
+  open_device (device);
+  finish_device (device);
+}
+
+static void
+test_transport_restore_failure (void)
+{
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+  g_autoptr(GError) error = NULL;
+
+  sensor.bits = 16;
+  sensor.speed = 2000000;
+  open_device (device);
+  g_assert_cmpuint (sensor.bits, ==, 8);
+  g_assert_cmpuint (sensor.speed, ==, 1000000);
+  self->transport_capabilities = FTE3600_TRANSPORT_CAP_CS_POLARITY;
+  g_assert_true (fpi_fte3600_set_cs_polarity (self, TRUE, &error));
+  g_assert_no_error (error);
+  sensor.fail_restore = TRUE;
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_cmpint (sensor.spi_fd, ==, -1);
+  g_assert_cmpint (sensor.reset_fd, ==, -1);
+  g_assert_cmpint (sensor.event_fd, ==, -1);
+  g_assert_cmpuint (sensor.spi_mode, ==, SPI_CS_HIGH);
+  g_assert_cmpuint (sensor.bits, ==, 16);
+  g_assert_cmpuint (sensor.speed, ==, 2000000);
+  g_assert_false (sensor.reset_asserted);
+  g_clear_error (&error);
+  /* A close failure can leave stock spidev in the trial state. The next
+   * session must recover the immutable ACPI baseline before sensor I/O. */
+  sensor.restore_failed = FALSE;
+  open_device (device);
+  g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+  finish_device (device);
+}
+
+static void
+test_transport_cs_rollback (gconstpointer data)
+{
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+  FpiSpiTransfer *transfer;
+  guint transactions;
+  gboolean failed_rollback = GPOINTER_TO_UINT (data);
+
+  g_autoptr(GError) error = NULL;
+
+  open_device (device);
+  self->transport_capabilities = FTE3600_TRANSPORT_CAP_CS_POLARITY;
+  sensor.fail_cs_writes = failed_rollback ? 2 : 1;
+  g_assert_false (fpi_fte3600_set_cs_polarity (self, TRUE, &error));
+  g_assert_error (error, G_IO_ERROR, (failed_rollback ? G_IO_ERROR_FAILED : G_IO_ERROR_BUSY));
+  g_clear_error (&error);
+  g_assert_cmpint (self->spi_configuration_invalid, ==, failed_rollback);
+  if (failed_rollback)
+    {
+      transactions = sensor.spi_transactions;
+      transfer = fpi_spi_transfer_new_with_buffer_size (device, self->spi_fd, self->max_transfer);
+      fpi_spi_transfer_write (transfer, 1);
+      fpi_spi_transfer_read (transfer, 1);
+      fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+      g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+      fpi_spi_transfer_unref (transfer);
+      g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
+      g_clear_error (&error);
+      g_assert_false (fpi_fte3600_set_cs_polarity (self, FALSE, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+      g_clear_error (&error);
+    }
+  else
+    {
+      g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+    }
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_false (self->spi_configuration_invalid);
+  open_device (device);
+  finish_device (device);
+}
+
+static gboolean
+expire_irq_session (gpointer unused)
+{
+  sensor.epoch++;
+  return G_SOURCE_REMOVE;
+}
+
+static void
+epoch_wait_handler (FpiSsm *ssm, FpDevice *device)
+{
+  g_assert_cmpint (fpi_ssm_get_cur_state (ssm), ==, 0);
+  fpi_fte3600_wait_for_irq (ssm);
+}
+
+static void
+epoch_wait_done (FpiSsm *ssm, FpDevice *device, GError *error)
+{
+  gboolean *done = fpi_ssm_get_data (ssm);
+
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+  g_clear_error (&error);
+  *done = TRUE;
+}
+
+static void
+test_transport_irq_epoch (void)
+{
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+  FpiSsm *ssm;
+  gboolean done = FALSE;
+  guint transactions;
+
+  g_autoptr(GError) error = NULL;
+
+  open_device (device);
+  transactions = sensor.spi_transactions;
+  ssm = fpi_ssm_new (device, epoch_wait_handler, 2);
+  fpi_ssm_set_data (ssm, &done, NULL);
+  fpi_ssm_start (ssm, epoch_wait_done);
+  g_timeout_add (10, expire_irq_session, NULL);
+  while (!done)
+    g_main_context_iteration (NULL, TRUE);
+  g_assert_null (self->irq_source);
+  g_assert_null (self->irq_guard_source);
+  g_assert_null (self->irq_wait_ssm);
+  g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+  g_assert_cmpint (sensor.spi_fd, ==, -1);
+  g_clear_error (&error);
+  open_device (device);
+  finish_device (device);
+}
+
+static void
+test_transport_uio_counter (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+  g_autoptr(GError) error = NULL;
+  guint transactions;
+
+  open_device (device);
+  transactions = sensor.spi_transactions;
+  sensor.irq_read_fault = scenario > 1 ? scenario - 1 : 0;
+  sensor.irq_counter = scenario == 0 ? 0 : 12345;
+  g_assert_cmpint (write (sensor.irq_pipe[1], "x", 1), ==, 1);
+  if (scenario < 2)
+    {
+      g_assert_true (fpi_fte3600_drain_irq_events (self, &error));
+      g_assert_no_error (error);
+    }
+  else
+    {
+      g_assert_false (fpi_fte3600_drain_irq_events (self, &error));
+      g_assert_error (error, G_IO_ERROR, (scenario == 2 ? G_IO_ERROR_INVALID_DATA : G_IO_ERROR_BROKEN_PIPE));
+      g_clear_error (&error);
+    }
+  g_assert_cmpuint (sensor.spi_transactions, ==, transactions);
+  if (scenario == 3)
+    {
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+      g_clear_error (&error);
+      sensor.irq_read_fault = 0;
+      open_device (device);
+    }
+  finish_device (device);
+}
+
+static void
 test_separate_irq_transport (void)
 {
   use_separate_irq_transport = TRUE;
-  transport_configures = transport_event_reads = 0;
+  transport_opens = transport_event_reads = transport_checks = 0;
   test_family_warm_capture (GUINT_TO_POINTER (2)); /* FT9338: 88 x 88. */
   test_family_cancel_and_reuse (GUINT_TO_POINTER (2));
-  g_assert_cmpuint (transport_configures, >=, 4);
+  g_assert_cmpuint (transport_opens, >=, 4);
   g_assert_cmpuint (transport_event_reads, >, 0);
+  g_assert_cmpuint (transport_checks, >, transport_opens);
+  use_separate_irq_transport = FALSE;
+}
+
+static void
+test_separate_close_failure (gconstpointer data)
+{
+  gboolean probe_failure = GPOINTER_TO_INT (data);
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  use_separate_irq_transport = TRUE;
+  separate_close_failure = probe_failure;
+  device = new_device_for_model_checked (2, 32768U, &error);
+  if (!probe_failure)
+    {
+      g_assert_no_error (error);
+      open_device (device);
+      separate_close_failure = TRUE;
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+    }
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_cmpstr (error->message, ==, "Synthetic standalone close failure");
+  g_assert_cmpint (sensor.spi_fd, ==, -1);
+  g_assert_cmpint (sensor.reset_fd, ==, -1);
+  g_assert_cmpint (sensor.event_fd, ==, -1);
+  separate_close_failure = FALSE;
+  finish_device (device);
   use_separate_irq_transport = FALSE;
 }
 
@@ -2169,6 +2843,11 @@ main (int argc, char **argv)
   static const CsFixture polarities[] = {
     { .original_high = FALSE, .required_high = TRUE },
     { .original_high = TRUE, .required_high = FALSE },
+  };
+  static const CsFixture fixed_polarities[] = {
+    { .gpio_cs = TRUE },
+    { .original_high = TRUE, .required_high = TRUE, .gpio_cs = TRUE },
+    { .fixed_cs = TRUE },
   };
   static const LegacyWakeFixture sleeping[] = {
     { .name = "FT9361-original", .model = 0, .ready_attempt = 1 },
@@ -2216,6 +2895,29 @@ main (int argc, char **argv)
 
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fte3600-lifecycle/transport/separate-irq", test_separate_irq_transport);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/separate-probe-close-error",
+                        GINT_TO_POINTER (TRUE), test_separate_close_failure);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/separate-close-error",
+                        GINT_TO_POINTER (FALSE), test_separate_close_failure);
+  for (guint i = 0; i < 4; i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/transport/uio-counter/%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_transport_uio_counter);
+    }
+  for (guint i = 0; i < G_N_ELEMENTS (fixed_polarities); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/transport/fixed-cs-%u", i);
+      g_test_add_data_func (path, &fixed_polarities[i], test_controller_managed_cs);
+    }
+  for (guint i = 1; i <= 10; i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/transport/acquire-failure-%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_transport_acquisition_failure);
+    }
+  g_test_add_func ("/fte3600-lifecycle/transport/restore-failure-reopen", test_transport_restore_failure);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/cs-rollback", GUINT_TO_POINTER (0), test_transport_cs_rollback);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/cs-rollback-failure", GUINT_TO_POINTER (1), test_transport_cs_rollback);
+  g_test_add_func ("/fte3600-lifecycle/transport/irq-epoch", test_transport_irq_epoch);
   for (guint i = 0; i < G_N_ELEMENTS (sleeping); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/sleeping/%s", sleeping[i].name);

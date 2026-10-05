@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <linux/gpio.h>
 #include <linux/spi/spidev.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -30,6 +31,7 @@ typedef struct
   gint reset_fd;
   gint irq_fd;
   guint32 original_speed;
+  guint32 configured_speed;
   guint8 original_bits;
   gboolean restore_parameters;
   gboolean configured;
@@ -78,6 +80,12 @@ set_reset_value (MedionTransport *data, gboolean asserted, GError **error)
 static void
 close_session (MedionTransport *data)
 {
+  if (data->irq_fd >= 0)
+    {
+      if (close (data->irq_fd) < 0)
+        save_cleanup_error (data, "Cannot close Medion IRQ request");
+      data->irq_fd = -1;
+    }
   if (data->reset_fd >= 0)
     {
       g_autoptr(GError) error = NULL;
@@ -88,22 +96,26 @@ close_session (MedionTransport *data)
         save_cleanup_error (data, "Cannot close Medion reset request");
       data->reset_fd = -1;
     }
-  if (data->irq_fd >= 0)
-    {
-      if (close (data->irq_fd) < 0)
-        save_cleanup_error (data, "Cannot close Medion IRQ request");
-      data->irq_fd = -1;
-    }
   if (data->restore_fd >= 0)
     {
       /* The core may already have closed spi_fd. Only this owned duplicate
        * is used here. CS/CPOL/CPHA were never changed by this adapter. */
       if (data->restore_parameters)
         {
+          guint8 bits;
+          guint32 speed;
+
           if (ioctl (data->restore_fd, SPI_IOC_WR_BITS_PER_WORD, &data->original_bits) < 0)
             save_cleanup_error (data, "Cannot restore SPI word size");
           if (ioctl (data->restore_fd, SPI_IOC_WR_MAX_SPEED_HZ, &data->original_speed) < 0)
             save_cleanup_error (data, "Cannot restore SPI speed");
+          if (ioctl (data->restore_fd, SPI_IOC_RD_BITS_PER_WORD, &bits) < 0 ||
+              ioctl (data->restore_fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed) < 0)
+            save_cleanup_error (data, "Cannot verify restored SPI parameters");
+          else if ((bits != data->original_bits || speed != data->original_speed) &&
+                   !data->cleanup_error)
+            data->cleanup_error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                       "Medion SPI parameters were not restored");
         }
       if (close (data->restore_fd) < 0)
         save_cleanup_error (data, "Cannot close SPI restoration descriptor");
@@ -127,7 +139,7 @@ request_line (const gchar *path, gboolean reset, gint *line_fd, GError **error)
   gint chip_fd;
   gboolean result = FALSE;
 
-  chip_fd = open (path, O_RDONLY | O_CLOEXEC);
+  chip_fd = open (path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (chip_fd < 0)
     return system_error (error, "Cannot open validated GPIO controller");
   if (fstat (chip_fd, &st) < 0)
@@ -254,7 +266,7 @@ configure (FpiDeviceFte3600 *self, GError **error)
   if (mode != SPI_MODE_0 || !data->original_speed)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                           "Medion diagnostic requires existing MODE0, active-low CS and a nonzero SPI speed; no polarity change was attempted");
+                           "Medion diagnostic requires existing MODE0 without a reported CS_HIGH flag and a nonzero SPI speed; CS polarity is never changed");
       goto fail;
     }
   speed = MIN (data->original_speed, FTE3600_SPI_SPEED_HZ);
@@ -282,11 +294,14 @@ configure (FpiDeviceFte3600 *self, GError **error)
       !request_line (data->reset_gpiochip, TRUE, &data->reset_fd, error))
     goto fail;
   self->spi_mode = mode;
-  self->bridge_capabilities = 0; /* Fixed CS; no alternate-polarity discovery. */
-  self->max_transfer = MIN (buffer_size, FTE3600_BRIDGE_MAX_TRANSFER);
+  self->transport_capabilities = 0; /* Fixed CS; no alternate-polarity discovery. */
+  self->max_transfer = MIN (buffer_size, 32768U);
   /* This is a spidev buffer bound, not a query of the controller's maximum.
    * Existing full-duplex transfers stay unsplit and propagate EMSGSIZE. */
   data->configured = TRUE;
+  data->configured_speed = speed;
+  self->reset_fd = data->reset_fd;
+  self->irq_fd = data->irq_fd;
   g_print ("Medion diagnostic transport: mode=0x%08x bits=%u configured_speed_limit_hz=%u "
            "spidev_bufsiz=%" G_GUINT64_FORMAT " max_transfer=%u "
            "reset=%s:39 active_low logical0=physical_high "
@@ -297,6 +312,100 @@ configure (FpiDeviceFte3600 *self, GError **error)
   return TRUE;
 fail:
   close_session (data);
+  return FALSE;
+}
+
+static gboolean
+check (FpiDeviceFte3600 *self, GError **error)
+{
+  MedionTransport *data = self->transport_data;
+  guint32 mode, speed;
+  guint8 bits;
+
+  if (self->spi_configuration_invalid)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE,
+                           "Medion SPI session was invalidated; close and reopen");
+      return FALSE;
+    }
+  if (!data || !data->configured || self->spi_fd < 0 || data->reset_fd < 0)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CLOSED,
+                           "Medion diagnostic transport is not configured");
+      return FALSE;
+    }
+  if (data->cleanup_error)
+    {
+      g_propagate_error (error, g_error_copy (data->cleanup_error));
+      return FALSE;
+    }
+  /* There is no ACPI glue generation in this standalone route. Check the
+   * actual spidev settings at every SPI/IRQ guard boundary instead; this does
+   * not promise that a system suspend preserved the sensor's state. */
+  if (ioctl (self->spi_fd, SPI_IOC_RD_MODE32, &mode) < 0 ||
+      ioctl (self->spi_fd, SPI_IOC_RD_BITS_PER_WORD, &bits) < 0 ||
+      ioctl (self->spi_fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed) < 0)
+    {
+      self->spi_configuration_invalid = TRUE;
+      return system_error (error, "Cannot verify Medion SPI session");
+    }
+  if (mode != SPI_MODE_0 || bits != 8 || speed != data->configured_speed)
+    {
+      self->spi_configuration_invalid = TRUE;
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE,
+                           "Medion SPI configuration changed; end the diagnostic and reopen");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
+close_transport (FpiDeviceFte3600 *self, GError **error)
+{
+  MedionTransport *data = self->transport_data;
+
+  if (!data)
+    return TRUE;
+  close_session (data);
+  if (self->spi_fd >= 0 && close (self->spi_fd) < 0)
+    save_cleanup_error (data, "Cannot close Medion spidev");
+  self->spi_fd = self->reset_fd = self->irq_fd = -1;
+  self->transport_capabilities = 0;
+  self->spi_configuration_invalid = FALSE;
+  if (data->cleanup_error)
+    {
+      g_propagate_error (error, g_error_copy (data->cleanup_error));
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
+open_transport (FpiDeviceFte3600 *self, GError **error)
+{
+  MedionTransport *data = self->transport_data;
+
+  if (!data || self->spi_fd >= 0)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                           "Medion diagnostic transport is missing or already open");
+      return FALSE;
+    }
+  if (data->cleanup_error)
+    {
+      g_propagate_error (error, g_error_copy (data->cleanup_error));
+      return FALSE;
+    }
+  self->spi_fd = open (data->spi_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  if (self->spi_fd < 0)
+    return system_error (error, "Cannot open Medion spidev");
+  if (flock (self->spi_fd, LOCK_EX | LOCK_NB) < 0)
+    system_error (error, "Cannot exclusively lock Medion spidev");
+  else if (configure (self, error))
+    return TRUE;
+
+  g_autoptr(GError) cleanup = NULL;
+  close_transport (self, &cleanup);
   return FALSE;
 }
 
@@ -375,29 +484,12 @@ get_events (FpiDeviceFte3600 *self, guint32 *events, GError **error)
   return FALSE;
 }
 
-static gint
-irq_fd (FpiDeviceFte3600 *self)
-{
-  MedionTransport *data = self->transport_data;
-
-  return data && data->configured ? data->irq_fd : -1;
-}
-
-static void
-release (FpiDeviceFte3600 *self)
-{
-  MedionTransport *data = self->transport_data;
-
-  if (data)
-    close_session (data);
-}
-
 static const Fte3600TransportOps medion_ops = {
-  .configure = configure,
+  .open = open_transport,
+  .close = close_transport,
+  .check = check,
   .set_reset = set_reset,
   .get_events = get_events,
-  .irq_fd = irq_fd,
-  .release = release,
 };
 
 gboolean

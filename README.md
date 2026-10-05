@@ -4,7 +4,12 @@
 for Tuxman2's E3224 wiring. It tests identification, initialization and capture
 with the distribution's SPI/GPIO interfaces, without installing a custom kernel
 module or system libfprint. Use that guide for this experiment; the installation
-instructions below describe the regular bridge-based driver.
+instructions below describe the regular ACPI glue-based driver.
+
+**The regular transport uses stock spidev, an ACPI reset GPIO and an IRQ-only
+UIO companion.** Follow the [installation and migration guide](docs/fte3600/acpi-spidev.md)
+when upgrading from the earlier custom SPI bridge. This is still experimental
+downstream support; the glue is not included in the upstream kernel.
 
 This downstream libfprint fork implements runtime-selected SPI capture for
 FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 (silicon ID 9362) and
@@ -18,8 +23,8 @@ current open. An unidentified blank FT9338 is not guessed from an absent reply.
 New paths have software test coverage, not hardware
 qualification or population-accuracy certification.
 
-The transport now uses a small Linux ACPI resource bridge instead of a DMI
-model/pin whitelist. Reset and IRQ may reside on different controllers.
+The transport uses a small Linux ACPI reset/IRQ glue module instead of a DMI
+model/pin whitelist. SPI data goes through stock spidev. Reset and IRQ may reside on different controllers.
 Chip identity comes from repeated runtime/word-register responses or a
 ROM-family/OTP probe. Discovery can negotiate SPI chip-select polarity when
 ACPI describes it incorrectly, without a machine table. Eight catalogued chips
@@ -65,7 +70,8 @@ a vendor matching library. The sensor firmware remains proprietary and is not
 bundled. Protocol knowledge includes Windows transport/binary analysis and
 hardware experiments; no exclusive bus-capture provenance claim is made.
 
-The `upstream-submission` branch excludes downstream installation/packaging
-tools. The separate 2D-IPA matcher branch is an experiment, not the matcher
-shipped on this branch. CI configuration and local tests do not replace
-hardware or biometric evaluation.
+See [upstream preparation](docs/fte3600/upstream-preparation.md) for the kernel,
+libfprint and matcher review boundaries and remaining hardware evidence.
+The optional 2D-IPA policy is a separate build choice from BRISK; neither
+policy is qualified by synthetic tests alone. CI configuration and local tests
+do not replace hardware or biometric evaluation.

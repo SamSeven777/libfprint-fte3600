@@ -8,6 +8,7 @@
 #include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include <stdarg.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -28,6 +29,8 @@ typedef struct
   gint request_failure;
   gboolean bits_failure;
   gboolean restore_failure;
+  gboolean ignore_restore;
+  gboolean lock_busy;
   guint32 next_event;
   guint queued_events;
   gboolean truncated_event;
@@ -43,6 +46,7 @@ int __wrap_stat64 (const char *path, struct stat64 *st);
 int __wrap_fcntl64 (int fd, int cmd, ...);
 int __wrap_ioctl (int fd, unsigned long cmd, ...);
 int __wrap_close (int fd);
+int __wrap_flock (int fd, int operation);
 ssize_t __wrap_read (int fd, void *buf, size_t size);
 ssize_t __wrap___read_chk (int fd, void *buf, size_t size, size_t capacity);
 gboolean __wrap_g_file_get_contents (const gchar *filename, gchar **contents,
@@ -68,10 +72,30 @@ int
 __wrap_open64 (const char *path, int flags, ...)
 {
   g_assert_true ((flags & O_CLOEXEC) != 0);
+  g_assert_true ((flags & O_NOFOLLOW) != 0);
+  if (g_str_equal (path, "/diagnostic/spi"))
+    {
+      g_assert_true ((flags & O_NOFOLLOW) != 0);
+      return new_fd (SPI_FD);
+    }
   if (g_str_equal (path, "/diagnostic/reset-chip"))
     return new_fd (RESET_CHIP);
   g_assert_cmpstr (path, ==, "/diagnostic/irq-chip");
   return new_fd (IRQ_CHIP);
+}
+
+int
+__wrap_flock (int fd, int operation)
+{
+  check_fd (fd);
+  g_assert_cmpint (fd, ==, SPI_FD);
+  g_assert_cmpint (operation, ==, LOCK_EX | LOCK_NB);
+  if (mock->lock_busy)
+    {
+      errno = EWOULDBLOCK;
+      return -1;
+    }
+  return 0;
 }
 
 int
@@ -132,6 +156,8 @@ __wrap_ioctl (int fd, unsigned long cmd, ...)
           *(guint32 *) value = mock->speed;
           return 0;
         case SPI_IOC_WR_BITS_PER_WORD:
+          if (mock->ignore_restore && fd == RESTORE_FD)
+            return 0;
           if (mock->bits_failure && fd == SPI_FD)
             {
               errno = EIO;
@@ -140,6 +166,8 @@ __wrap_ioctl (int fd, unsigned long cmd, ...)
           mock->bits = *(guint8 *) value;
           return 0;
         case SPI_IOC_WR_MAX_SPEED_HZ:
+          if (mock->ignore_restore && fd == RESTORE_FD)
+            return 0;
           if (mock->restore_failure && fd == RESTORE_FD)
             {
               errno = EIO;
@@ -278,7 +306,7 @@ setup_transport (Fixture *f, gboolean skip_irq)
   g_autoptr(GError) error = NULL;
 
   mock = f;
-  f->self.spi_fd = -1;
+  f->self.spi_fd = f->self.reset_fd = f->self.irq_fd = -1;
   f->speed = 2000000;
   f->bits = 16;
   f->bufsiz = "65536\n";
@@ -286,7 +314,6 @@ setup_transport (Fixture *f, gboolean skip_irq)
   f->next_event = 1;
   g_assert_true (fte3600_medion_transport_attach (&f->self, &config, &error));
   g_assert_no_error (error);
-  f->self.spi_fd = new_fd (SPI_FD);
 }
 
 static void
@@ -309,9 +336,9 @@ teardown (Fixture *f, gconstpointer unused)
   g_autoptr(GError) error = NULL;
 
   (void) unused;
-  if (f->self.spi_fd >= 0)
-    __wrap_close (f->self.spi_fd);
-  f->self.spi_fd = -1;
+  if (f->self.transport_ops)
+    f->self.transport_ops->close (&f->self, &error);
+  g_clear_error (&error);
   fte3600_medion_transport_detach (&f->self, &error);
   g_assert_cmpuint (f->open_fds, ==, 0);
   mock = NULL;
@@ -322,10 +349,10 @@ configured (Fixture *f)
 {
   g_autoptr(GError) error = NULL;
 
-  g_assert_true (f->self.transport_ops->configure (&f->self, &error));
+  g_assert_true (f->self.transport_ops->open (&f->self, &error));
   g_assert_no_error (error);
-  g_assert_cmpint (f->self.transport_ops->irq_fd (&f->self), ==, IRQ_LINE);
-  g_assert_cmpuint (f->self.bridge_capabilities, ==, 0);
+  g_assert_cmpint (f->self.irq_fd, ==, IRQ_LINE);
+  g_assert_cmpuint (f->self.transport_capabilities, ==, 0);
 }
 
 static void
@@ -356,16 +383,16 @@ test_configuration (Fixture *f, gconstpointer unused)
 static void
 test_probe_reopen (Fixture *f, gconstpointer unused)
 {
+  g_autoptr(GError) error = NULL;
+
   (void) unused;
   configured (f);
-  __wrap_close (f->self.spi_fd);
-  f->self.spi_fd = -1;
-  f->self.transport_ops->release (&f->self);
-  f->self.transport_ops->release (&f->self);
+  g_assert_true (f->self.transport_ops->close (&f->self, &error));
+  g_assert_true (f->self.transport_ops->close (&f->self, &error));
+  g_assert_no_error (error);
   g_assert_cmpuint (f->open_fds, ==, 0);
   g_assert_cmpuint (f->speed, ==, 2000000);
   g_assert_cmpuint (f->bits, ==, 16);
-  f->self.spi_fd = new_fd (SPI_FD);
   configured (f);
   g_assert_cmpuint (f->irq_requests, ==, 2);
   g_assert_cmpuint (f->reset_requests, ==, 2);
@@ -384,14 +411,14 @@ test_synchronous_without_irq (Fixture *f, gconstpointer unused)
     {
       guint32 events = 99;
 
-      g_assert_true (f->self.transport_ops->configure (&f->self, &error));
+      g_assert_true (f->self.transport_ops->open (&f->self, &error));
       g_assert_no_error (error);
       g_assert_cmpuint (f->irq_requests, ==, 0);
       g_assert_cmpuint (f->reset_requests, ==, session + 1);
       g_assert_cmpuint (f->reset_value, ==, 0);
       g_assert_cmpuint (f->speed, ==, 1000000);
       g_assert_cmpuint (f->bits, ==, 8);
-      g_assert_cmpint (f->self.transport_ops->irq_fd (&f->self), ==, -1);
+      g_assert_cmpint (f->self.irq_fd, ==, -1);
       g_assert_false (f->self.transport_ops->get_events (&f->self, &events, &error));
       g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CLOSED);
       g_assert_cmpuint (events, ==, 0);
@@ -401,16 +428,13 @@ test_synchronous_without_irq (Fixture *f, gconstpointer unused)
       g_assert_no_error (error);
       g_assert_cmpuint (f->reset_value, ==, 1);
 
-      __wrap_close (f->self.spi_fd);
-      f->self.spi_fd = -1;
-      f->self.transport_ops->release (&f->self);
-      f->self.transport_ops->release (&f->self);
+      g_assert_true (f->self.transport_ops->close (&f->self, &error));
+      g_assert_true (f->self.transport_ops->close (&f->self, &error));
+      g_assert_no_error (error);
       g_assert_cmpuint (f->reset_value, ==, 0);
       g_assert_cmpuint (f->speed, ==, 2000000);
       g_assert_cmpuint (f->bits, ==, 16);
       g_assert_cmpuint (f->open_fds, ==, 0);
-      if (session == 0)
-        f->self.spi_fd = new_fd (SPI_FD);
     }
   g_assert_true (fte3600_medion_transport_detach (&f->self, &error));
   g_assert_no_error (error);
@@ -435,9 +459,9 @@ test_setup_failure (Fixture *f, gconstpointer failure)
   f->request_failure = GPOINTER_TO_INT (failure);
   if (f->request_failure == SPI_FD)
     f->bits_failure = TRUE;
-  g_assert_false (f->self.transport_ops->configure (&f->self, &error));
+  g_assert_false (f->self.transport_ops->open (&f->self, &error));
   g_assert_nonnull (error);
-  g_assert_cmpuint (f->open_fds, ==, G_GUINT64_CONSTANT (1) << SPI_FD);
+  g_assert_cmpuint (f->open_fds, ==, 0);
   g_assert_cmpuint (f->speed, ==, 2000000);
   g_assert_cmpuint (f->bits, ==, 16);
   if (f->request_failure != RESET_CHIP)
@@ -450,7 +474,7 @@ test_bad_mode (Fixture *f, gconstpointer mode)
   g_autoptr(GError) error = NULL;
 
   f->mode = GPOINTER_TO_UINT (mode);
-  g_assert_false (f->self.transport_ops->configure (&f->self, &error));
+  g_assert_false (f->self.transport_ops->open (&f->self, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
   g_assert_cmpuint (f->irq_requests, ==, 0);
   g_assert_cmpuint (f->reset_requests, ==, 0);
@@ -499,20 +523,70 @@ test_bad_events (Fixture *f, gconstpointer reason)
 }
 
 static void
+test_guard (Fixture *f, gconstpointer reason)
+{
+  g_autoptr(GError) error = NULL;
+
+  configured (f);
+  g_assert_true (f->self.transport_ops->check (&f->self, &error));
+  switch (GPOINTER_TO_INT (reason))
+    {
+    case 0: f->mode = SPI_MODE_1; break;
+    case 1: f->bits = 16; break;
+    case 2: f->speed = 2000000; break;
+    case 3:
+      g_assert_true (f->self.transport_ops->close (&f->self, &error));
+      break;
+    default: g_assert_not_reached ();
+    }
+  g_assert_false (f->self.transport_ops->check (&f->self, &error));
+  g_assert_error (error, G_IO_ERROR,
+                  (GPOINTER_TO_INT (reason) == 3 ? G_IO_ERROR_CLOSED : G_IO_ERROR_BROKEN_PIPE));
+  if (GPOINTER_TO_INT (reason) != 3)
+    {
+      g_clear_error (&error);
+      f->mode = SPI_MODE_0;
+      f->bits = 8;
+      f->speed = 1000000;
+      /* Restoring the visible settings does not restore a lost session. */
+      g_assert_false (f->self.transport_ops->check (&f->self, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+      g_clear_error (&error);
+      g_assert_true (f->self.transport_ops->close (&f->self, &error));
+      configured (f);
+      g_assert_true (f->self.transport_ops->check (&f->self, &error));
+      g_assert_no_error (error);
+    }
+}
+
+static void
+test_lock_busy (Fixture *f, gconstpointer unused)
+{
+  g_autoptr(GError) error = NULL;
+
+  f->lock_busy = TRUE;
+  g_assert_false (f->self.transport_ops->open (&f->self, &error));
+  g_assert_error (error, G_IO_ERROR, g_io_error_from_errno (EWOULDBLOCK));
+  g_assert_cmpuint (f->open_fds, ==, 0);
+  g_assert_cmpuint (f->reset_requests, ==, 0);
+  g_assert_cmpuint (f->irq_requests, ==, 0);
+}
+
+static void
 test_cleanup_error (Fixture *f, gconstpointer unused)
 {
   g_autoptr(GError) error = NULL;
 
-  (void) unused;
   configured (f);
-  f->restore_failure = TRUE;
-  f->self.transport_ops->release (&f->self);
-  f->self.transport_ops->release (&f->self);
-  g_assert_false (f->self.transport_ops->configure (&f->self, &error));
+  f->restore_failure = GPOINTER_TO_INT (unused) == 0;
+  f->ignore_restore = GPOINTER_TO_INT (unused) == 1;
+  g_assert_false (f->self.transport_ops->close (&f->self, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
   g_clear_error (&error);
-  __wrap_close (f->self.spi_fd);
-  f->self.spi_fd = -1;
+  g_assert_cmpuint (f->open_fds, ==, 0);
+  g_assert_false (f->self.transport_ops->open (&f->self, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_clear_error (&error);
   g_assert_false (fte3600_medion_transport_detach (&f->self, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
   g_assert_null (f->self.transport_ops);
@@ -540,5 +614,12 @@ main (int argc, char **argv)
   g_test_add ("/medion-transport/event-budget", Fixture, GINT_TO_POINTER (4), setup, test_bad_events, teardown);
   g_test_add ("/medion-transport/interruption-budget", Fixture, GINT_TO_POINTER (5), setup, test_bad_events, teardown);
   g_test_add ("/medion-transport/cleanup-error", Fixture, NULL, setup, test_cleanup_error, teardown);
+  g_test_add ("/medion-transport/restore-readback", Fixture, GINT_TO_POINTER (1), setup, test_cleanup_error, teardown);
+  g_test_add ("/medion-transport/lock-busy", Fixture, NULL, setup, test_lock_busy, teardown);
+  for (guint i = 0; i < 4; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/medion-transport/guard/%u", i);
+      g_test_add (name, Fixture, GINT_TO_POINTER (i), setup, test_guard, teardown);
+    }
   return g_test_run ();
 }

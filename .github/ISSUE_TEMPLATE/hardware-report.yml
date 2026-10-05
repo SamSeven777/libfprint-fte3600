@@ -78,7 +78,9 @@ body:
       placeholder: |
         grep -H . /sys/bus/acpi/devices/FTE3600:*/hid
         ls -l /dev/fte3600-*
-        cat /sys/class/misc/fte3600-*/fte3600_abi
+        grep -H . /sys/bus/platform/devices/fte3600-glue.*/fte3600_glue_abi
+        grep -H . /sys/bus/platform/devices/fte3600-glue.*/fte3600_status
+        grep -H . /sys/bus/platform/devices/fte3600-glue.*/fte3600_cs_control
     validations:
       required: true
 
@@ -87,9 +89,9 @@ body:
     attributes:
       label: Furthest stage reached
       options:
-        - Not tested because this model is not enabled
+        - Not tested yet
         - Device is not discovered
-        - ACPI bridge or chip identity is rejected
+        - ACPI resources or chip identity are rejected
         - Open or initialization fails
         - Capture or enrollment fails
         - Verification fails

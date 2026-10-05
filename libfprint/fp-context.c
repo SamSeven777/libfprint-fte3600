@@ -409,6 +409,90 @@ fp_context_new (void)
   return g_object_new (FP_TYPE_CONTEXT, NULL);
 }
 
+#ifdef HAVE_UDEV
+/* Pair resources by their physical SPI parent, never by a model, line name or
+ * substring in a sysfs path. The transport validates the opened descriptors
+ * again, since nodes can disappear or be replaced after enumeration.
+ */
+static gboolean
+fte3600_spi_matches (GUdevDevice *spi, const gchar *acpi_id)
+{
+  const gchar *sysfs;
+  g_autofree gchar *hid_path = NULL;
+  g_autofree gchar *hid = NULL;
+
+  if (!spi || !acpi_id ||
+      g_strcmp0 (g_udev_device_get_subsystem (spi), "spi") != 0 ||
+      g_strcmp0 (g_udev_device_get_driver (spi), "spidev") != 0)
+    return FALSE;
+  sysfs = g_udev_device_get_sysfs_path (spi);
+  if (!sysfs || !g_path_is_absolute (sysfs))
+    return FALSE;
+  hid_path = g_build_filename (sysfs, "firmware_node", "hid", NULL);
+  return g_file_get_contents (hid_path, &hid, NULL, NULL) &&
+         g_strcmp0 (g_strstrip (hid), acpi_id) == 0;
+}
+
+static GList *
+fte3600_gpio_for_spi (GList *gpio_devices, GUdevDevice *spi)
+{
+  GList *match = NULL;
+
+  for (GList *iter = gpio_devices; iter; iter = iter->next)
+    {
+      GUdevDevice *gpio = iter->data;
+      g_autoptr(GUdevDevice) glue = g_udev_device_get_parent (gpio);
+      g_autoptr(GUdevDevice) parent = glue ? g_udev_device_get_parent (glue) : NULL;
+      const gchar *path = g_udev_device_get_device_file (gpio);
+      const gchar *cs_control = glue ? g_udev_device_get_sysfs_attr (glue, "fte3600_cs_control") : NULL;
+
+      if (!glue || !parent || !path || !g_path_is_absolute (path) ||
+          g_strcmp0 (g_udev_device_get_subsystem (gpio), "gpio") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_attr (glue, "fte3600_ngpio"), "1") != 0 ||
+          g_strcmp0 (g_udev_device_get_subsystem (glue), "platform") != 0 ||
+          g_strcmp0 (g_udev_device_get_driver (glue), "fte3600-glue") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_attr (glue, "fte3600_glue_abi"), "2") != 0 ||
+          (g_strcmp0 (cs_control, "0") != 0 && g_strcmp0 (cs_control, "1") != 0) ||
+          g_strcmp0 (g_udev_device_get_subsystem (parent), "spi") != 0 ||
+          g_strcmp0 (g_udev_device_get_driver (parent), "spidev") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_path (parent),
+                     g_udev_device_get_sysfs_path (spi)) != 0)
+        continue;
+      /* Ambiguous resource publication must not select an arbitrary chip. */
+      if (match)
+        return NULL;
+      match = iter;
+    }
+  return match;
+}
+
+static GList *
+fte3600_uio_for_gpio (GList *uio_devices, GUdevDevice *gpio)
+{
+  g_autoptr(GUdevDevice) expected_glue = g_udev_device_get_parent (gpio);
+  GList *match = NULL;
+
+  for (GList *iter = uio_devices; iter; iter = iter->next)
+    {
+      GUdevDevice *uio = iter->data;
+      g_autoptr(GUdevDevice) glue = g_udev_device_get_parent (uio);
+      const gchar *path = g_udev_device_get_device_file (uio);
+
+      if (!glue || !path || !g_path_is_absolute (path) ||
+          g_strcmp0 (g_udev_device_get_subsystem (uio), "uio") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_attr (uio, "name"), "fte3600-irq") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_attr (uio, "version"), "2") != 0 ||
+          g_strcmp0 (g_udev_device_get_sysfs_path (glue),
+                     g_udev_device_get_sysfs_path (expected_glue)) != 0)
+        continue;
+      if (match)
+        return NULL;
+      match = iter;
+    }
+  return match;
+}
+#endif
+
 /**
  * fp_context_enumerate:
  * @context: a #FpContext
@@ -478,7 +562,8 @@ fp_context_enumerate (FpContext *context)
      */
 
     g_autoptr(GList) spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
-    g_autoptr(GList) bridge_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
+    g_autoptr(GList) gpio_devices = g_udev_client_query_by_subsystem (udev_client, "gpio");
+    g_autoptr(GList) uio_devices = g_udev_client_query_by_subsystem (udev_client, "uio");
     g_autoptr(GList) hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
 
     /* for each potential driver, try to match all requested resources. */
@@ -495,6 +580,46 @@ fp_context_enumerate (FpContext *context)
           {
             GList *matched_spidev = NULL, *matched_hidraw = NULL;
 
+            if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
+              {
+                GList *iter = spidev_devices;
+
+                while (iter)
+                  {
+                    GUdevDevice *node = iter->data;
+                    GList *next = iter->next;
+                    g_autoptr(GUdevDevice) spi = g_udev_device_get_parent (node);
+                    const gchar *path = g_udev_device_get_device_file (node);
+                    GList *gpio, *uio;
+
+                    if (!path || !g_path_is_absolute (path) ||
+                        !fte3600_spi_matches (spi, entry->spi_acpi_id) ||
+                        !(gpio = fte3600_gpio_for_spi (gpio_devices, spi)) ||
+                        !(uio = fte3600_uio_for_gpio (uio_devices, gpio->data)))
+                      {
+                        iter = next;
+                        continue;
+                      }
+                    priv->pending_devices++;
+                    g_async_initable_new_async (driver, G_PRIORITY_LOW,
+                                                priv->cancellable,
+                                                async_device_init_done_cb, context,
+                                                "fpi-driver-data", entry->driver_data,
+                                                "fpi-udev-data-spidev", path,
+                                                "fpi-udev-data-gpio", g_udev_device_get_device_file (gpio->data),
+                                                "fpi-udev-data-uio", g_udev_device_get_device_file (uio->data),
+                                                NULL);
+                    g_object_unref (node);
+                    spidev_devices = g_list_delete_link (spidev_devices, iter);
+                    g_object_unref (gpio->data);
+                    gpio_devices = g_list_delete_link (gpio_devices, gpio);
+                    g_object_unref (uio->data);
+                    uio_devices = g_list_delete_link (uio_devices, uio);
+                    iter = next;
+                  }
+                continue;
+              }
+
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
               {
                 for (matched_spidev = spidev_devices; matched_spidev; matched_spidev = matched_spidev->next)
@@ -508,29 +633,6 @@ fp_context_enumerate (FpContext *context)
                 /* If match was not found exit */
                 if (matched_spidev == NULL)
                   continue;
-              }
-            if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
-              {
-                for (GList *iter = bridge_devices; iter; iter = iter->next)
-                  {
-                    GUdevDevice *node = iter->data;
-                    g_autoptr(GUdevDevice) parent = g_udev_device_get_parent (node);
-                    const gchar *path = g_udev_device_get_device_file (node);
-
-                    if (!parent || !path || !g_path_is_absolute (path) ||
-                        g_strcmp0 (g_udev_device_get_subsystem (parent), "spi") != 0 ||
-                        g_strcmp0 (g_udev_device_get_driver (parent), "fte3600") != 0 ||
-                        g_strcmp0 (g_udev_device_get_sysfs_attr (node, "fte3600_abi"), "1") != 0)
-                      continue;
-                    priv->pending_devices++;
-                    g_async_initable_new_async (driver, G_PRIORITY_LOW,
-                                                priv->cancellable,
-                                                async_device_init_done_cb, context,
-                                                "fpi-driver-data", entry->driver_data,
-                                                "fpi-udev-data-spidev", path,
-                                                NULL);
-                  }
-                continue;
               }
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
               {
@@ -580,7 +682,8 @@ fp_context_enumerate (FpContext *context)
 
     /* free all unused elemnts in both lists */
     g_list_foreach (spidev_devices, (GFunc) g_object_unref, NULL);
-    g_list_foreach (bridge_devices, (GFunc) g_object_unref, NULL);
+    g_list_foreach (gpio_devices, (GFunc) g_object_unref, NULL);
+    g_list_foreach (uio_devices, (GFunc) g_object_unref, NULL);
     g_list_foreach (hidraw_devices, (GFunc) g_object_unref, NULL);
   }
 #endif

@@ -32,6 +32,7 @@ typedef enum {
   MOCK_IOCTL_NONE,
   MOCK_IOCTL_FULL_DUPLEX,
   MOCK_IOCTL_SEQUENTIAL,
+  MOCK_IOCTL_WRITE,
 } MockIoctlMode;
 
 typedef struct
@@ -89,7 +90,16 @@ ioctl (int fd, unsigned long request, ...)
       g_assert_cmpuint (xfers[1].len, ==, mock_ioctl.length_rd);
       g_assert_cmpuint (xfers[1].cs_change, ==, 0);
       memcpy (mock_ioctl.buffer_rd, mock_ioctl.reply, mock_ioctl.length_rd);
+      if (mock_ioctl.has_result_override)
+        return mock_ioctl.result_override;
       return xfers[0].len + xfers[1].len;
+
+    case MOCK_IOCTL_WRITE:
+      g_assert_cmpuint (request, ==, SPI_IOC_MESSAGE (1));
+      g_assert_true ((guint8 *) (guintptr) xfers[0].tx_buf == mock_ioctl.buffer_wr);
+      g_assert_cmpuint (xfers[0].rx_buf, ==, 0);
+      g_assert_cmpuint (xfers[0].len, ==, mock_ioctl.length_wr);
+      return mock_ioctl.has_result_override ? mock_ioctl.result_override : xfers[0].len;
 
     case MOCK_IOCTL_NONE:
     default:
@@ -276,6 +286,7 @@ test_transport_buffer_size (void)
   g_autofree guint8 *request = g_malloc0 (size);
   g_autofree guint8 *response = g_malloc0 (size);
   g_autofree guint8 *reply = g_malloc0 (size);
+
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
 
   for (guint attempt = 0; attempt < 2; attempt++)
@@ -283,7 +294,7 @@ test_transport_buffer_size (void)
       g_autoptr(GError) error = NULL;
       g_autoptr(FpiSpiTransfer) transfer =
         fpi_spi_transfer_new_with_buffer_size (device, MOCK_SPI_FD,
-                                                attempt == 0 ? 32768 : 8192);
+                                               attempt == 0 ? 32768 : 8192);
       mock_ioctl_reset (MOCK_IOCTL_FULL_DUPLEX, request, size, response, size, reply);
       fpi_spi_transfer_write_full (transfer, request, size, NULL);
       fpi_spi_transfer_read_full (transfer, response, size, NULL);
@@ -367,6 +378,85 @@ test_sensitive_log_redaction (void)
   g_test_trap_assert_stdout_unmatched ("*baadf00d1234*");
 }
 
+static void
+test_sequential_short (gconstpointer data)
+{
+  gboolean write_only = GPOINTER_TO_INT (data);
+  guint8 request[] = { 0x70, 0x00 };
+  guint8 response[2] = { 0 };
+  const guint8 reply[2] = { 0xa5, 0x5a };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  g_autoptr(GError) error = NULL;
+
+  mock_ioctl_reset (write_only ? MOCK_IOCTL_WRITE : MOCK_IOCTL_SEQUENTIAL,
+                    request, sizeof (request), response, sizeof (response), reply);
+  mock_ioctl.has_result_override = TRUE;
+  mock_ioctl.result_override = write_only ? 1 : 3;
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  if (!write_only)
+    fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 1);
+}
+
+static guint guard_calls;
+static guint guard_fail_at;
+
+static gboolean
+session_guard (FpDevice *device, GError **error)
+{
+  g_assert_true (FP_IS_DEVICE (device));
+  guard_calls++;
+  if (guard_calls != guard_fail_at)
+    return TRUE;
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE, "Session changed during suspend");
+  return FALSE;
+}
+
+static void
+test_session_guard (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  gboolean full_duplex = scenario >= 3;
+  guint8 request[] = { 0x10, 0xef, 0x14, 0x00 };
+  guint8 response[4] = { 0 };
+  const guint8 reply[4] = { 0, 0, 0x93, 0x61 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = NULL;
+  g_autoptr(GError) error = NULL;
+
+  guard_calls = 0;
+  guard_fail_at = scenario % 3;
+  mock_ioctl_reset (full_duplex ? MOCK_IOCTL_FULL_DUPLEX : MOCK_IOCTL_WRITE,
+                    request, sizeof (request), response, sizeof (response), reply);
+  fpi_spi_transfer_set_device_guard (device, session_guard);
+  transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  /* The allocated transfer retains its check even when registration changes. */
+  fpi_spi_transfer_set_device_guard (device, NULL);
+  fpi_spi_transfer_write_full (transfer, request, sizeof (request), NULL);
+  if (full_duplex)
+    {
+      fpi_spi_transfer_read_full (transfer, response, sizeof (response), NULL);
+      fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+    }
+  if (guard_fail_at)
+    {
+      g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+    }
+  else
+    {
+      g_assert_true (fpi_spi_transfer_submit_sync (transfer, &error));
+      g_assert_no_error (error);
+    }
+  g_assert_cmpuint (guard_calls, ==, guard_fail_at == 1 ? 1 : 2);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, guard_fail_at == 1 ? 0 : 1);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -378,6 +468,15 @@ main (int argc, char *argv[])
   g_test_add_func ("/spi-transfer/full-duplex/unequal-lengths", test_full_duplex_unequal_lengths);
   g_test_add_func ("/spi-transfer/full-duplex/too-large", test_full_duplex_too_large);
   g_test_add_func ("/spi-transfer/sequential/unchanged", test_sequential_unchanged);
+  g_test_add_data_func ("/spi-transfer/sequential/short", GINT_TO_POINTER (FALSE), test_sequential_short);
+  g_test_add_data_func ("/spi-transfer/write/short", GINT_TO_POINTER (TRUE), test_sequential_short);
+  for (guint i = 0; i < 6; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/spi-transfer/guard/%s/%s",
+                                                i >= 3 ? "duplex" : "write",
+                                                i % 3 == 0 ? "valid" : (i % 3 == 1 ? "before" : "after"));
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_session_guard);
+    }
   g_test_add_func ("/spi-transfer/transport/buffer-size", test_transport_buffer_size);
   g_test_add_func ("/spi-transfer/log/sensitive-redaction", test_sensitive_log_redaction);
 

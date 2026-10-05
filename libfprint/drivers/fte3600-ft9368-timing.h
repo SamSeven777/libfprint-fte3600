@@ -5,6 +5,7 @@
 
 /* FT9368 observed waits, rounded up where Linux does not schedule in us. */
 #define FTE3600_FT9368_WAKE_MS 10
+#define FTE3600_FT9368_WAKE_ATTEMPTS 3
 #define FTE3600_FT9368_START_MS 100
 #define FTE3600_FT9368_SHORT_DELAY_MS 1
 #define FTE3600_FT9368_PRAM_START_MS 10

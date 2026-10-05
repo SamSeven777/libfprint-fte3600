@@ -364,6 +364,13 @@ subdir('tests')
 
 subdir('examples')
 
+if 'fte3600' in drivers
+    # The experimental glue setup and udev rules use this fixed system path.
+    install_data('scripts/fte3600-pair.py',
+        install_dir: '/usr/libexec', rename: 'fte3600-pair',
+        install_mode: 'rwxr-xr-x')
+endif
+
 meson.add_dist_script(sync_unsupported_files, '--check', udev_hwdb_list_file)
 
 pkgconfig = import('pkgconfig')

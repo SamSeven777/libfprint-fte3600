@@ -20,9 +20,25 @@ offset seven of the same full-duplex transaction (SPI wrapper `0x2e200`).
 | --- | ---: | --- |
 | `ff00` | 0 | Wake; application path waits 10 ms |
 | `9180` | 32 | Device information and finger state |
+| `9180` | 4 | Windows wake-response check; separate from the full information query |
 | `9080` | 6 | Acknowledge/discard a pending capture |
 | `9080` | 5120 | Read an 8-bit image |
 | `f680` | 4 | Begin normal operation; startup waits 100 ms afterward |
+
+Windows wake helper `0x38E90` sends `ff00`, waits 10 ms, then uses `0x38DEC`
+to read four bytes from `9180`. If all four bytes are equal and nonzero, it
+repeats the sequence, up to **three attempts total** (counter starts at zero;
+`0x38F7C–0x38F81` increments and compares with three). All-zero bytes do not
+meet this particular retry condition; that does not make them a valid identity.
+Linux initialization and both capture wake points now use this bounded
+four-byte check, then require a valid 32-byte information response containing
+the established ID and geometry. Three unsuccessful wake checks fail explicitly;
+transfer errors and cancellation do not cause unbounded retry. All-zero check
+bytes alone never authorize initialization or image interpretation.
+The independent wake-response predicate is tested over every nonzero repeated
+byte and unequal-byte positions; state-machine tests cover retry success,
+exhaustion, cancellation and transfer failure.
+See the [lifecycle coverage record](windows-lifecycle-coverage.md).
 
 The information payload contains big-endian chip ID `9368` at offsets 19–20,
 application version at 21, manufacturer at 22, width at 23 and height at 24.
@@ -51,6 +67,13 @@ succeeds and final identity/geometry are valid. This is a responsive application
 with acknowledged capture data, not the legacy `a5 5a` idle state and not a claim
 that the device is powered off. Cleanup is bounded and ignores cancellation so
 the original failure can be reported after cleanup.
+
+Every complete information response is checked for a positive conflicting ID
+before another protocol command, including the two preliminary cleanup reads.
+Such a response invalidates the session and forbids further cleanup writes.
+Blank `0000`/`ffff` identity bytes and temporary health errors are not treated as
+proof of a different chip; they retain bounded best-effort cleanup and still
+cannot authorize capture or persistent programming.
 
 ## Firmware boundary
 

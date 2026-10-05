@@ -1,56 +1,118 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Independent ACPI resource bridge for FTE3600 fingerprint sensors.
- * No platform model, GPIO controller name, pin number or firmware is embedded.
+/*
+ * FTE3600 ACPI glue for standard spidev, GPIO and UIO character interfaces.
+ * No sensor commands, firmware, board names or physical pin numbers belong here.
  */
 #include <linux/acpi.h>
-#include <linux/compat.h>
+#include <linux/cred.h>
+#include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/gpio/driver.h>
 #include <linux/interrupt.h>
 #include <linux/kref.h>
-#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/poll.h>
+#include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
-#include <linux/spi/spidev.h>
-#include <linux/uaccess.h>
+#include <linux/suspend.h>
+#include <linux/uio_driver.h>
+#include <linux/version.h>
+#include <linux/workqueue.h>
 
-#include "fte3600-bridge.h"
 #include "fte3600-policy.h"
 
+#define FTE3600_GLUE_NAME "fte3600-glue"
+
 struct fte3600 {
-	struct spi_device *spi;
-	struct miscdevice misc;
-	struct kref ref;
+	struct device *dev;
+	struct acpi_device *adev;
+	struct gpio_chip chip;
+	struct gpio_desc *lines[FTE3600_LEASE_COUNT];
+	struct acpi_gpio_params params[FTE3600_LEASE_COUNT];
+	struct acpi_gpio_mapping mapping[FTE3600_LEASE_COUNT + 1];
+	struct uio_info uio;
+	struct fte3600_resources resources;
+	struct fte3600_lease lease;
 	struct mutex lock;
-	wait_queue_head_t wait;
-	atomic_t pending;
-	struct gpio_desc *reset;
-	struct acpi_gpio_params reset_param;
-	struct acpi_gpio_mapping mapping[2];
-	struct fte3600_bridge_info info;
-	struct fte3600_cs_state cs;
+	struct notifier_block pm;
+	struct kref ref;
+	struct work_struct cleanup;
 	int irq;
-	bool opened;
-	bool suspended;
-	bool invalidated;
-	bool has_gpio_mapping;
-	char *name;
+	bool irq_requested;
+	bool uio_registered;
+	bool mapped;
 };
+
+struct fte3600_binding {
+	struct list_head node;
+	struct platform_device *pdev;
+	struct device *spi;
+};
+
+static LIST_HEAD(fte3600_bindings);
+static DEFINE_MUTEX(fte3600_bindings_lock);
+static struct workqueue_struct *fte3600_cleanup_queue;
+static const char * const fte3600_line_names[] = { "reset", "irq" };
+
+static void fte3600_last_reference(struct kref *ref);
+
+static const struct acpi_device_id fte3600_acpi_ids[] = {
+	{ "FTE3600", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, fte3600_acpi_ids);
 
 static acpi_status fte3600_resource(struct acpi_resource *res, void *data)
 {
 	struct fte3600_resources *r = data;
+	struct acpi_resource_spi_serialbus *spi;
 	struct acpi_resource_gpio *gpio;
 	enum fte3600_resource_kind kind;
 	bool valid;
 
 	if (res->type == ACPI_RESOURCE_TYPE_SERIAL_BUS &&
 	    res->data.common_serial_bus.type == ACPI_RESOURCE_SERIAL_TYPE_SPI) {
-		fte3600_resource_add(r, FTE3600_RESOURCE_SPI,
-			res->data.common_serial_bus.producer_consumer == ACPI_CONSUMER);
+		spi = &res->data.spi_serial_bus;
+		valid = spi->producer_consumer == ACPI_CONSUMER &&
+			spi->data_bit_length == 8 && spi->connection_speed &&
+			spi->wire_mode == ACPI_SPI_4WIRE_MODE &&
+			spi->clock_phase <= ACPI_SPI_SECOND_PHASE &&
+			spi->clock_polarity <= ACPI_SPI_START_HIGH &&
+			spi->device_polarity <= ACPI_SPI_ACTIVE_HIGH;
+		fte3600_resource_add(r, FTE3600_RESOURCE_SPI, valid);
+		r->speed_hz = spi->connection_speed;
+		if (spi->clock_phase == ACPI_SPI_SECOND_PHASE)
+			r->mode |= SPI_CPHA;
+		if (spi->clock_polarity == ACPI_SPI_START_HIGH)
+			r->mode |= SPI_CPOL;
+		if (spi->device_polarity == ACPI_SPI_ACTIVE_HIGH)
+			r->mode |= SPI_CS_HIGH;
+		return AE_OK;
+	}
+	if (res->type == ACPI_RESOURCE_TYPE_IRQ) {
+		struct acpi_resource_irq *irq = &res->data.irq;
+
+		valid = irq->interrupt_count == 1 &&
+			irq->triggering == ACPI_EDGE_SENSITIVE &&
+			(irq->polarity == ACPI_ACTIVE_HIGH ||
+			 irq->polarity == ACPI_ACTIVE_LOW);
+		r->irq_active_low = irq->polarity == ACPI_ACTIVE_LOW;
+		fte3600_resource_add(r, FTE3600_RESOURCE_IRQ_ACPI, valid);
+		return AE_OK;
+	}
+	if (res->type == ACPI_RESOURCE_TYPE_EXTENDED_IRQ) {
+		struct acpi_resource_extended_irq *irq = &res->data.extended_irq;
+
+		valid = irq->producer_consumer == ACPI_CONSUMER &&
+			irq->interrupt_count == 1 &&
+			irq->triggering == ACPI_EDGE_SENSITIVE &&
+			(irq->polarity == ACPI_ACTIVE_HIGH ||
+			 irq->polarity == ACPI_ACTIVE_LOW);
+		r->irq_active_low = irq->polarity == ACPI_ACTIVE_LOW;
+		fte3600_resource_add(r, FTE3600_RESOURCE_IRQ_ACPI, valid);
 		return AE_OK;
 	}
 	if (res->type != ACPI_RESOURCE_TYPE_GPIO)
@@ -81,496 +143,797 @@ static acpi_status fte3600_resource(struct acpi_resource *res, void *data)
 		}
 	} else if (gpio->connection_type == ACPI_RESOURCE_GPIO_TYPE_INT) {
 		kind = FTE3600_RESOURCE_IRQ;
-		/* A level interrupt needs a sensor-specific acknowledge protocol. */
 		valid &= gpio->triggering == ACPI_EDGE_SENSITIVE &&
 			 (gpio->polarity == ACPI_ACTIVE_HIGH ||
 			  gpio->polarity == ACPI_ACTIVE_LOW);
+		r->irq_active_low = gpio->polarity == ACPI_ACTIVE_LOW;
 	} else {
 		kind = FTE3600_RESOURCE_INVALID_GPIO;
 	}
-	/* This index includes both GpioIo and GpioInt, as gpiolib requires. */
 	fte3600_resource_add(r, kind, valid);
 	return AE_OK;
 }
 
-/* Validate firmware metadata before acquiring a descriptor can drive a pin.
- * Return 1 for an accepted property, 0 when a driver mapping is needed.
+/* Firmware properties must agree with the validated resource roles. GpioInt
+ * defines its own polarity; the _DSD active_low argument for it must be zero.
+ * GpioIo has no polarity: independently established reset polarity is low.
  */
-static int fte3600_reset_property(struct device *dev,
-				 const struct fte3600_resources *r)
+static int fte3600_check_property(struct device *spi, unsigned int index,
+				 unsigned int resource)
 {
-	struct fwnode_handle *fwnode = dev_fwnode(dev);
+	struct fwnode_handle *fwnode = dev_fwnode(spi);
 	struct fwnode_reference_args args = { };
-	bool plural = fwnode_property_present(fwnode, "reset-gpios");
-	bool singular = fwnode_property_present(fwnode, "reset-gpio");
-	const char *property;
+	const char *plural = index == FTE3600_RESET ? "reset-gpios" : "irq-gpios";
+	const char *singular = index == FTE3600_RESET ? "reset-gpio" : "irq-gpio";
+	bool has_plural = fwnode_property_present(fwnode, plural);
+	bool has_singular = fwnode_property_present(fwnode, singular);
 	bool valid;
 	int ret;
 
-	if (!plural && !singular)
+	if (!has_plural && !has_singular)
 		return 0;
-	if (plural && singular)
+	if ((has_plural && has_singular) ||
+	    gpiod_count(spi, fte3600_line_names[index]) != 1)
 		return -EINVAL;
-	if (gpiod_count(dev, "reset") != 1)
-		return -EINVAL;
-	property = plural ? "reset-gpios" : "reset-gpio";
-	ret = fwnode_property_get_reference_args(fwnode, property, NULL, 3, 0,
-					       &args);
+	ret = fwnode_property_get_reference_args(fwnode,
+		has_plural ? plural : singular, NULL, 3, 0, &args);
 	if (ret)
 		return ret;
-	valid = fte3600_reset_reference_valid(args.fwnode == fwnode, args.nargs,
-		args.args[0], args.args[1], args.args[2], r->reset_index);
+	valid = fte3600_gpio_reference_valid(args.fwnode == fwnode, args.nargs,
+		args.args[0], args.args[1], args.args[2], resource,
+		index == FTE3600_RESET);
 	fwnode_handle_put(args.fwnode);
-	return valid ? 1 : -EINVAL;
+	return valid ? 0 : -EINVAL;
 }
 
-static void fte3600_free(struct kref *ref)
+static int fte3600_deassert(struct fte3600 *f)
 {
-	struct fte3600 *f = container_of(ref, struct fte3600, ref);
-
-	kfree(f->name);
-	kfree(f);
+	/* The underlying descriptor is active-low; logical zero is physical H.
+	 * direction_output also gives an error return on kernels predating 6.17.
+	 */
+	return gpiod_direction_output(f->lines[FTE3600_RESET], 0);
 }
 
-static irqreturn_t fte3600_irq(int irq, void *data)
+static irqreturn_t fte3600_irq_handler(int irq, void *data)
 {
 	struct fte3600 *f = data;
 
-	atomic_set(&f->pending, 1);
-	wake_up_interruptible(&f->wait);
+	/* No SPI access or sensor-specific acknowledgement belongs in this ISR.
+	 * An edge IRQ is exclusively requested while the UIO session is open.
+	 */
+	uio_event_notify(&f->uio);
 	return IRQ_HANDLED;
 }
 
-static int fte3600_setup(void *context)
+/* Caller holds f->lock. The ISR never takes that lock, so free_irq can
+ * synchronize it here before reset release or UIO unregistration.
+ */
+static void fte3600_stop_irq(struct fte3600 *f)
 {
-	struct fte3600 *f = context;
-
-	return spi_setup(f->spi);
+	if (f->irq_requested) {
+		free_irq(f->irq, f);
+		f->irq_requested = false;
+	}
 }
 
-/* Caller holds lock, with a live SPI device and an awake controller. */
-static int fte3600_restore_cs(struct fte3600 *f)
+static int fte3600_uio_open(struct uio_info *info, struct inode *inode)
 {
+	struct fte3600 *f = info->priv;
+	unsigned long flags;
 	int ret;
 
-	ret = fte3600_cs_restore(&f->cs, &f->spi->mode, fte3600_setup, f);
-	if (ret) {
-		f->invalidated = true;
-		dev_warn(&f->spi->dev,
-			 "Could not restore session CS polarity: %d\n", ret);
-	} else {
-		f->info.mode = f->spi->mode;
-	}
-	return ret;
-}
-
-static int fte3600_open(struct inode *inode, struct file *file)
-{
-	struct fte3600 *f = container_of(file->private_data, struct fte3600, misc);
-	int ret = 0;
-
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+		return -EPERM;
 	mutex_lock(&f->lock);
-	if (!f->spi)
-		ret = -ENODEV;
-	else if (f->suspended)
-		ret = -EHOSTDOWN;
-	else if (f->opened)
-		ret = -EBUSY;
-	else {
-		/* A failed close must not make its trial polarity the new baseline. */
-		ret = fte3600_restore_cs(f);
-		if (ret)
-			goto unlock;
-		fte3600_cs_begin(&f->cs, f->spi->mode);
-		kref_get(&f->ref);
-		f->opened = true;
-		f->invalidated = false;
-		atomic_set(&f->pending, 0);
-		file->private_data = f;
-	}
+	ret = fte3600_lease_request(&f->lease, FTE3600_IRQ);
+	if (ret)
+		goto unlock;
+	flags = f->resources.irq_active_low ? IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING;
+	/* Do not use IRQF_SHARED: without sensor I/O the ISR cannot establish
+	 * ownership of a shared interrupt. An occupied IRQ must fail with EBUSY.
+	 */
+	ret = request_irq(f->irq, fte3600_irq_handler, flags, FTE3600_GLUE_NAME, f);
+	if (ret)
+		fte3600_lease_free(&f->lease, FTE3600_IRQ);
+	else
+		f->irq_requested = true;
 unlock:
 	mutex_unlock(&f->lock);
 	return ret;
 }
 
-static int fte3600_release(struct inode *inode, struct file *file)
+static int fte3600_uio_release(struct uio_info *info, struct inode *inode)
 {
-	struct fte3600 *f = file->private_data;
+	struct fte3600 *f = info->priv;
 
 	mutex_lock(&f->lock);
-	/* VFS calls release on the last file reference, including process exit.
-	 * During suspend, leave restoration for resume (or a later open).
-	 */
-	if (f->spi && !f->suspended) {
-		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
-		fte3600_restore_cs(f);
-	}
-	f->opened = false;
+	fte3600_stop_irq(f);
+	fte3600_lease_free(&f->lease, FTE3600_IRQ);
 	mutex_unlock(&f->lock);
-	kref_put(&f->ref, fte3600_free);
 	return 0;
 }
 
-static long fte3600_message(struct fte3600 *f, void __user *arg)
+static int fte3600_gpio_request(struct gpio_chip *chip, unsigned int offset)
 {
-	struct spi_ioc_transfer user;
-	struct spi_transfer xfer = { };
-	struct spi_message message;
-	void *tx = NULL, *rx = NULL;
+	struct fte3600 *f = gpiochip_get_data(chip);
 	int ret;
 
-	if (copy_from_user(&user, arg, sizeof(user)))
-		return -EFAULT;
-	ret = fte3600_check_transfer(&user, f->info.max_transfer);
-	if (ret)
-		return ret;
-	if (user.tx_buf) {
-		tx = memdup_user(u64_to_user_ptr(user.tx_buf), user.len);
-		if (IS_ERR(tx))
-			return PTR_ERR(tx);
-	}
-	if (user.rx_buf) {
-		rx = kzalloc(user.len, GFP_KERNEL);
-		if (!rx) {
-			ret = -ENOMEM;
-			goto out;
-		}
-	}
-	xfer.tx_buf = tx;
-	xfer.rx_buf = rx;
-	xfer.len = user.len;
-	spi_message_init_with_transfers(&message, &xfer, 1);
-	ret = spi_sync(f->spi, &message);
-	ret = fte3600_transfer_result(ret, message.actual_length, user.len);
-	if (ret > 0 && rx && copy_to_user(u64_to_user_ptr(user.rx_buf), rx, user.len))
-		ret = -EFAULT;
-out:
-	kfree_sensitive(tx);
-	kfree_sensitive(rx);
-	return ret;
-}
-
-static long fte3600_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct fte3600 *f = file->private_data;
-	void __user *ptr = (void __user *)arg;
-	u32 value;
-	long ret = 0;
-
-	mutex_lock(&f->lock);
-	if (!f->spi) {
-		ret = -ENODEV;
-		goto out;
-	}
-	if (f->suspended || f->invalidated) {
-		ret = -EHOSTDOWN;
-		goto out;
-	}
-	switch (cmd) {
-	case FTE3600_IOC_SET_CS_POLARITY:
-		if (copy_from_user(&value, ptr, sizeof(value))) {
-			ret = -EFAULT;
-			break;
-		}
-		if (value > 1) {
-			ret = -EINVAL;
-			break;
-		}
-		ret = fte3600_cs_set(&f->cs, &f->spi->mode, value,
-				     fte3600_setup, f);
-		if (f->cs.configuration_invalid) {
-			f->invalidated = true;
-			wake_up_interruptible(&f->wait);
-		} else if (!ret) {
-			f->info.mode = f->spi->mode;
-			atomic_set(&f->pending, 0);
-		}
-		break;
-	case FTE3600_IOC_GET_INFO:
-		if (copy_to_user(ptr, &f->info, sizeof(f->info)))
-			ret = -EFAULT;
-		break;
-	case FTE3600_IOC_SET_RESET:
-		if (copy_from_user(&value, ptr, sizeof(value)))
-			ret = -EFAULT;
-		else if (value > FTE3600_RESET_ASSERTED)
-			ret = -EINVAL;
-		else
-			gpiod_set_value_cansleep(f->reset, value);
-		break;
-	case FTE3600_IOC_GET_EVENTS:
-		value = atomic_xchg(&f->pending, 0);
-		if (copy_to_user(ptr, &value, sizeof(value))) {
-			if (value)
-				atomic_set(&f->pending, 1);
-			ret = -EFAULT;
-		}
-		break;
-	case SPI_IOC_MESSAGE(1):
-		ret = fte3600_message(f, ptr);
-		break;
-	default:
-		ret = -ENOTTY;
-	}
-out:
-	mutex_unlock(&f->lock);
-	return ret;
-}
-
-static __poll_t fte3600_poll(struct file *file, poll_table *wait)
-{
-	struct fte3600 *f = file->private_data;
-	__poll_t events = 0;
-
-	poll_wait(file, &f->wait, wait);
-	mutex_lock(&f->lock);
-	if (!f->spi)
-		events = EPOLLERR | EPOLLHUP;
-	else if (f->suspended || f->invalidated)
-		events = EPOLLERR;
-	else if (atomic_read(&f->pending))
-		events = EPOLLIN | EPOLLRDNORM;
-	mutex_unlock(&f->lock);
-	return events;
-}
-
-static const struct file_operations fte3600_fops = {
-	.owner = THIS_MODULE,
-	.open = fte3600_open,
-	.release = fte3600_release,
-	.unlocked_ioctl = fte3600_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = compat_ptr_ioctl,
-#endif
-	.poll = fte3600_poll,
-	.llseek = NULL,
-};
-
-static ssize_t fte3600_abi_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "%u\n", FTE3600_BRIDGE_ABI);
-}
-static DEVICE_ATTR_RO(fte3600_abi);
-static struct attribute *fte3600_attrs[] = {
-	&dev_attr_fte3600_abi.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(fte3600);
-
-static int fte3600_probe(struct spi_device *spi)
-{
-	struct device *dev = &spi->dev;
-	struct fte3600_resources r = { };
-	struct fte3600 *f;
-	acpi_status status;
-	bool reset_property;
-	int ret;
-
-	if (!ACPI_COMPANION(dev))
-		return -ENODEV;
-	status = acpi_walk_resources(ACPI_HANDLE(dev), METHOD_NAME__CRS,
-				     fte3600_resource, &r);
-	if (ACPI_FAILURE(status) || !fte3600_resources_valid(&r))
-		return dev_err_probe(dev, -EINVAL,
-			"Need one SPI, one reset GpioIo and one edge GpioInt resource\n");
-	/* Linux 6.8 ACPI may replace even GPIOD_ASIS/OUT_LOW with an initial
-	 * value inferred from OutputOnly and pull bias. A pull-down would assert
-	 * reset before protocol timing begins; refuse it before GPIO acquisition.
+	/* Keep access root-only even if an unrelated generic GPIO udev rule
+	 * accidentally grants this new subset device to a broader group.
 	 */
-	if (!fte3600_reset_bias_valid(r.reset_bias))
-		return dev_err_probe(dev, -EINVAL,
-			"Reset bias conflicts with the verified inactive-high line\n");
-	ret = fte3600_reset_property(dev, &r);
-	if (ret < 0)
-		return dev_err_probe(dev, ret,
-			"Reset property must identify the active-low GpioIo resource\n");
-	reset_property = ret == 1;
-	if ((spi->bits_per_word && spi->bits_per_word != 8) ||
-	    (spi->mode & ~(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH)))
-		return dev_err_probe(dev, -EINVAL, "Unsupported SPI resource format\n");
-	if (!spi->max_speed_hz)
+	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+		return -EPERM;
+	if (offset >= FTE3600_NGPIO)
 		return -EINVAL;
-	spi->bits_per_word = 8;
-	spi->max_speed_hz = min(spi->max_speed_hz, 1000000U);
-	ret = spi_setup(spi);
-	if (ret)
-		return ret;
-	f = kzalloc(sizeof(*f), GFP_KERNEL);
-	if (!f)
-		return -ENOMEM;
-	kref_init(&f->ref);
-	mutex_init(&f->lock);
-	init_waitqueue_head(&f->wait);
-	atomic_set(&f->pending, 0);
-	f->spi = spi;
-	/* Probe established a known mode before publishing the device. */
-	fte3600_cs_begin(&f->cs, spi->mode);
-	f->info.abi_version = FTE3600_BRIDGE_ABI;
-	f->info.max_transfer = min_t(size_t, FTE3600_BRIDGE_MAX_TRANSFER,
-		min(spi_max_transfer_size(spi), spi_max_message_size(spi)));
-	if (!f->info.max_transfer) {
-		ret = -EMSGSIZE;
-		goto free;
-	}
-	f->info.speed_hz = spi->max_speed_hz;
-	f->info.mode = spi->mode;
-	f->info.bits_per_word = spi->bits_per_word;
-	f->info.capabilities = FTE3600_BRIDGE_CAP_CS_POLARITY;
-
-	/* Windows writes physical H/L/H through IOCTL_GPIO_WRITE_PINS. Our ABI
-	 * instead uses logical deassert/assert/deassert (0/1/0), so active_low
-	 * must be true. Conflicting _DSD polarity was rejected before any write.
-	 * GpioIo alone has no polarity field; use this independently established
-	 * protocol fact only when firmware has no named reset property.
-	 * crs_entry_index counts GPIO resources, not controllers or pin numbers.
-	 */
-	f->reset_param.crs_entry_index = r.reset_index;
-	f->reset_param.line_index = 0;
-	f->reset_param.active_low = true;
-	f->mapping[0].name = "reset-gpios";
-	f->mapping[0].data = &f->reset_param;
-	f->mapping[0].size = 1;
-	if (!reset_property) {
-		ret = acpi_dev_add_driver_gpios(ACPI_COMPANION(dev), f->mapping);
+	mutex_lock(&f->lock);
+	ret = fte3600_lease_request(&f->lease, offset);
+	if (!ret && offset == FTE3600_RESET) {
+		ret = fte3600_deassert(f);
 		if (ret)
-			goto free;
-		f->has_gpio_mapping = true;
+			fte3600_lease_free(&f->lease, offset);
 	}
-	f->reset = gpiod_get(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(f->reset)) {
-		ret = PTR_ERR(f->reset);
-		goto unmap;
-	}
-	if (!gpiod_is_active_low(f->reset)) {
-		ret = -EINVAL;
-		goto gpio;
-	}
-	ret = gpiod_direction_output(f->reset, FTE3600_RESET_DEASSERTED);
-	if (ret)
-		goto gpio;
-	f->irq = acpi_dev_gpio_irq_get(ACPI_COMPANION(dev), 0);
-	if (f->irq < 0) {
-		ret = f->irq;
-		goto gpio;
-	}
-	ret = request_threaded_irq(f->irq, NULL, fte3600_irq, IRQF_ONESHOT,
-				  dev_name(dev), f);
-	if (ret)
-		goto gpio;
-	f->name = kasprintf(GFP_KERNEL, "fte3600-%s", dev_name(dev));
-	if (!f->name) {
-		ret = -ENOMEM;
-		goto irq;
-	}
-	f->misc.minor = MISC_DYNAMIC_MINOR;
-	f->misc.name = f->name;
-	f->misc.fops = &fte3600_fops;
-	f->misc.parent = dev;
-	f->misc.mode = 0600;
-	f->misc.groups = fte3600_groups;
-	spi_set_drvdata(spi, f);
-	ret = misc_register(&f->misc);
 	if (!ret)
-		return 0;
-irq:
-	free_irq(f->irq, f);
-gpio:
-	gpiod_put(f->reset);
-unmap:
-	if (f->has_gpio_mapping)
-		acpi_dev_remove_driver_gpios(ACPI_COMPANION(dev));
-free:
-	kref_put(&f->ref, fte3600_free);
-	return dev_err_probe(dev, ret, "Cannot acquire ACPI sensor resources\n");
-}
-
-static void fte3600_remove(struct spi_device *spi)
-{
-	struct fte3600 *f = spi_get_drvdata(spi);
-
-	mutex_lock(&f->lock);
-	if (!f->suspended) {
-		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
-		fte3600_restore_cs(f);
-	}
-	f->spi = NULL;
+		kref_get(&f->ref);
 	mutex_unlock(&f->lock);
-	wake_up_interruptible(&f->wait);
-	misc_deregister(&f->misc);
-	free_irq(f->irq, f);
-	gpiod_put(f->reset);
-	if (f->has_gpio_mapping)
-		acpi_dev_remove_driver_gpios(ACPI_COMPANION(&spi->dev));
-	kref_put(&f->ref, fte3600_free);
+	return ret;
 }
 
-static int fte3600_suspend(struct device *dev)
+static void fte3600_gpio_free(struct gpio_chip *chip, unsigned int offset)
 {
-	struct fte3600 *f = dev_get_drvdata(dev);
-
-	mutex_lock(&f->lock);
-	if (!f->suspended) {
-		f->invalidated |= f->opened;
-		/* The IRQ thread never takes this mutex or accesses the sensor. */
-		disable_irq(f->irq);
-		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
-		/* Parent SPI controller is still awake here. A failed restoration
-		 * stays pending for resume; it must not prevent system suspend.
-		 */
-		fte3600_restore_cs(f);
-		f->suspended = true;
-		atomic_set(&f->pending, 0);
-	}
-	mutex_unlock(&f->lock);
-	wake_up_interruptible(&f->wait);
-	return 0;
-}
-
-static int fte3600_resume(struct device *dev)
-{
-	struct fte3600 *f = dev_get_drvdata(dev);
+	struct fte3600 *f = gpiochip_get_data(chip);
 	int ret = 0;
 
 	mutex_lock(&f->lock);
-	if (f->suspended) {
-		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
-		atomic_set(&f->pending, 0);
-		/* The parent has resumed. Even if setup fails, allow a new open
-		 * to retry, keep the old session invalid and balance IRQ disable.
-		 */
-		f->suspended = false;
-		ret = fte3600_restore_cs(f);
-		enable_irq(f->irq);
+	fte3600_stop_irq(f);
+	if (offset == FTE3600_RESET && f->lease.online && !f->lease.suspended)
+		ret = fte3600_deassert(f);
+	fte3600_lease_free(&f->lease, offset);
+	if (f->uio_registered && (f->lease.requested & (1U << FTE3600_IRQ)))
+		uio_event_notify(&f->uio);
+	mutex_unlock(&f->lock);
+	if (ret)
+		dev_warn(f->dev, "Could not deassert reset on GPIO close: %d\n", ret);
+	kref_put(&f->ref, fte3600_last_reference);
+}
+
+static int fte3600_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
+{
+	/* Also called during gpiochip registration, before any user request. */
+	if (offset >= FTE3600_NGPIO)
+		return -EINVAL;
+	return 0;
+}
+
+static int fte3600_gpio_direction_input(struct gpio_chip *chip, unsigned int offset)
+{
+	return -EINVAL;
+}
+
+static int fte3600_gpio_direction_output(struct gpio_chip *chip,
+					unsigned int offset, int value)
+{
+	struct fte3600 *f = gpiochip_get_data(chip);
+	int ret;
+
+	if (offset != FTE3600_RESET)
+		return -EINVAL;
+	mutex_lock(&f->lock);
+	ret = fte3600_lease_check(&f->lease, offset);
+	if (!ret)
+		ret = gpiod_direction_output_raw(f->lines[offset], value);
+	mutex_unlock(&f->lock);
+	return ret;
+}
+
+static int fte3600_gpio_get(struct gpio_chip *chip, unsigned int offset)
+{
+	struct fte3600 *f = gpiochip_get_data(chip);
+	int ret;
+
+	if (offset >= FTE3600_NGPIO)
+		return -EINVAL;
+	mutex_lock(&f->lock);
+	ret = fte3600_lease_check(&f->lease, offset);
+	if (!ret)
+		ret = gpiod_get_raw_value_cansleep(f->lines[offset]);
+	mutex_unlock(&f->lock);
+	return ret;
+}
+
+static int fte3600_gpio_set_value(struct gpio_chip *chip,
+				 unsigned int offset, int value)
+{
+	struct fte3600 *f = gpiochip_get_data(chip);
+	int ret;
+
+	if (offset != FTE3600_RESET)
+		return -EINVAL;
+	mutex_lock(&f->lock);
+	ret = fte3600_lease_check(&f->lease, offset);
+	if (!ret) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+		ret = gpiod_set_raw_value_cansleep(f->lines[offset], value);
+#else
+		gpiod_set_raw_value_cansleep(f->lines[offset], value);
+#endif
 	}
 	mutex_unlock(&f->lock);
 	return ret;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(fte3600_pm, fte3600_suspend, fte3600_resume);
-static const struct acpi_device_id fte3600_acpi_ids[] = {
-	{ "FTE3600", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, fte3600_acpi_ids);
-static const struct spi_device_id fte3600_spi_ids[] = {
-	{ "fte3600", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(spi, fte3600_spi_ids);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static int fte3600_gpio_set(struct gpio_chip *chip, unsigned int offset, int value)
+{
+	return fte3600_gpio_set_value(chip, offset, value);
+}
+#else
+static void fte3600_gpio_set(struct gpio_chip *chip, unsigned int offset, int value)
+{
+	/* Older GPIO setters cannot return errors. A stale session never drives
+	 * reset; the userspace generation checks are mandatory on these kernels.
+	 */
+	fte3600_gpio_set_value(chip, offset, value);
+}
+#endif
 
-static struct spi_driver fte3600_driver = {
-	.driver = {
-		.name = "fte3600",
-		.acpi_match_table = fte3600_acpi_ids,
-		.pm = pm_sleep_ptr(&fte3600_pm),
-	},
+static int fte3600_pm_notify(struct notifier_block *nb, unsigned long event,
+			     void *unused)
+{
+	struct fte3600 *f = container_of(nb, struct fte3600, pm);
+	int ret = 0;
+
+	mutex_lock(&f->lock);
+	switch (event) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+		fte3600_lease_suspend(&f->lease);
+		fte3600_stop_irq(f);
+		ret = fte3600_deassert(f);
+		if (f->uio_registered)
+			uio_event_notify(&f->uio);
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		ret = fte3600_deassert(f);
+		/* On failure stay unavailable; no old request becomes usable. */
+		if (!ret)
+			f->lease.suspended = false;
+		break;
+	default:
+		break;
+	}
+	mutex_unlock(&f->lock);
+	if (ret)
+		dev_warn(f->dev, "Reset release during power transition failed: %d\n", ret);
+	/* A failed release leaves this glue unavailable. Never stop another
+	 * device's POST notifier: all suppliers have already resumed there.
+	 */
+	return NOTIFY_OK;
+}
+
+static ssize_t fte3600_glue_abi_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", FTE3600_GLUE_ABI);
+}
+static DEVICE_ATTR_RO(fte3600_glue_abi);
+
+static ssize_t fte3600_ngpio_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", FTE3600_NGPIO);
+}
+static DEVICE_ATTR_RO(fte3600_ngpio);
+
+static ssize_t fte3600_generation_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+	u64 generation;
+
+	mutex_lock(&f->lock);
+	generation = f->lease.generation;
+	mutex_unlock(&f->lock);
+	return sysfs_emit(buf, "%llu\n", generation);
+}
+static DEVICE_ATTR_RO(fte3600_generation);
+
+static ssize_t fte3600_status_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+	const char *status;
+
+	mutex_lock(&f->lock);
+	status = !f->lease.online ? "removed" :
+		 f->lease.suspended ? "suspended" : "ready";
+	mutex_unlock(&f->lock);
+	return sysfs_emit(buf, "%s\n", status);
+}
+static DEVICE_ATTR_RO(fte3600_status);
+
+static ssize_t fte3600_acpi_mode_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", f->resources.mode);
+}
+static DEVICE_ATTR_RO(fte3600_acpi_mode);
+
+static ssize_t fte3600_cs_control_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", f->resources.cs_control);
+}
+static DEVICE_ATTR_RO(fte3600_cs_control);
+
+static ssize_t fte3600_acpi_speed_hz_show(struct device *dev,
+					 struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", f->resources.speed_hz);
+}
+static DEVICE_ATTR_RO(fte3600_acpi_speed_hz);
+
+static ssize_t fte3600_irq_active_low_show(struct device *dev,
+					  struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", f->resources.irq_active_low);
+}
+static DEVICE_ATTR_RO(fte3600_irq_active_low);
+
+static ssize_t fte3600_irq_source_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct fte3600 *f = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%s\n", f->resources.irq_is_gpio ? "gpio" : "acpi");
+}
+static DEVICE_ATTR_RO(fte3600_irq_source);
+
+static struct attribute *fte3600_attrs[] = {
+	&dev_attr_fte3600_glue_abi.attr,
+	&dev_attr_fte3600_ngpio.attr,
+	&dev_attr_fte3600_generation.attr,
+	&dev_attr_fte3600_status.attr,
+	&dev_attr_fte3600_acpi_mode.attr,
+	&dev_attr_fte3600_cs_control.attr,
+	&dev_attr_fte3600_acpi_speed_hz.attr,
+	&dev_attr_fte3600_irq_active_low.attr,
+	&dev_attr_fte3600_irq_source.attr,
+	NULL,
+};
+static const struct attribute_group fte3600_attr_group = {
+	.attrs = fte3600_attrs,
+};
+
+static int fte3600_change_uevent(struct device *dev, void *unused)
+{
+	kobject_uevent(&dev->kobj, KOBJ_CHANGE);
+	return 0;
+}
+
+static void fte3600_put_gpios(struct fte3600 *f)
+{
+	unsigned int i;
+
+	for (i = 0; i < FTE3600_LEASE_COUNT; i++)
+		if (!IS_ERR_OR_NULL(f->lines[i]))
+			gpiod_put(f->lines[i]);
+	if (f->mapped)
+		acpi_dev_remove_driver_gpios(f->adev);
+}
+
+static void fte3600_free(struct fte3600 *f)
+{
+	fte3600_put_gpios(f);
+	put_device(&f->adev->dev);
+	put_device(f->dev);
+	kfree(f);
+}
+
+static void fte3600_cleanup(struct work_struct *work)
+{
+	struct fte3600 *f = container_of(work, struct fte3600, cleanup);
+	unsigned int i;
+	bool pending;
+	char *label;
+
+	/* Gpiolib clears FLAG_REQUESTED only after our .free callback returns. Wait
+	 * for this final commit before removing the chip. No successful new
+	 * requests are possible after the driver reference has been dropped.
+	 * Allocation failure in the label query is conservatively still busy.
+	 */
+	do {
+		pending = false;
+		for (i = 0; i < FTE3600_NGPIO; i++) {
+			label = gpiochip_dup_line_label(&f->chip, i);
+			pending |= label != NULL;
+			if (!IS_ERR(label))
+				kfree(label);
+		}
+		if (pending)
+			msleep(1);
+	} while (pending);
+	gpiochip_remove(&f->chip);
+	fte3600_free(f);
+}
+
+static void fte3600_last_reference(struct kref *ref)
+{
+	struct fte3600 *f = container_of(ref, struct fte3600, ref);
+
+	/* .free must return before cleanup; module exit drains this dedicated
+	 * queue after the last GPIO request drops its gpiolib module reference.
+	 */
+	queue_work(fte3600_cleanup_queue, &f->cleanup);
+}
+
+static int fte3600_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct device *spi = dev->parent;
+	struct fte3600_resources *r;
+	struct fte3600 *f;
+	unsigned int indices[FTE3600_LEASE_COUNT];
+	unsigned int i, gpio_count;
+	acpi_status status;
+	int ret;
+
+	if (!spi || spi->bus != &spi_bus_type || !ACPI_COMPANION(spi))
+		return -ENODEV;
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f)
+		return -ENOMEM;
+	f->dev = get_device(dev);
+	f->adev = ACPI_COMPANION(spi);
+	get_device(&f->adev->dev);
+	mutex_init(&f->lock);
+	kref_init(&f->ref);
+	INIT_WORK(&f->cleanup, fte3600_cleanup);
+	r = &f->resources;
+	r->cs_control = fte3600_cs_control_supported(
+		!!spi_get_csgpiod(to_spi_device(spi), 0),
+		!!(to_spi_device(spi)->controller->mode_bits & SPI_CS_HIGH));
+	status = acpi_walk_resources(f->adev->handle, METHOD_NAME__CRS,
+				     fte3600_resource, r);
+	if (ACPI_FAILURE(status) || !fte3600_resources_valid(r)) {
+		ret = dev_err_probe(dev, -EINVAL,
+			"Need one 8-bit SPI, one reset GpioIo and one edge GPIO or ACPI interrupt\n");
+		goto free;
+	}
+	/* OutputOnly ACPI bias may override even GPIOD_ASIS. Reject a bias
+	 * which could assert reset before the verified H/L/H protocol begins.
+	 */
+	if (!fte3600_reset_bias_valid(r->reset_bias)) {
+		ret = dev_err_probe(dev, -EINVAL, "Reset bias conflicts with inactive-high reset\n");
+		goto free;
+	}
+	indices[FTE3600_RESET] = r->reset_index;
+	indices[FTE3600_IRQ] = r->irq_index;
+	gpio_count = r->irq_is_gpio ? 2 : 1;
+	if (!r->irq_is_gpio &&
+	    (device_property_present(spi, "irq-gpios") ||
+	     device_property_present(spi, "irq-gpio"))) {
+		ret = dev_err_probe(dev, -EINVAL,
+			"A named IRQ GPIO conflicts with the non-GPIO interrupt resource\n");
+		goto free;
+	}
+	for (i = 0; i < gpio_count; i++) {
+		ret = fte3600_check_property(spi, i, indices[i]);
+		if (ret) {
+			dev_err_probe(dev, ret, "Conflicting named GPIO property\n");
+			goto free;
+		}
+		f->params[i].crs_entry_index = indices[i];
+		f->params[i].active_low = i == FTE3600_RESET;
+		f->mapping[i].name = i == FTE3600_RESET ? "reset-gpios" : "irq-gpios";
+		f->mapping[i].data = &f->params[i];
+		f->mapping[i].size = 1;
+	}
+	/* Do not replace another driver's mapping or share its resources. */
+	if (f->adev->driver_gpios) {
+		ret = -EBUSY;
+		goto free;
+	}
+	ret = acpi_dev_add_driver_gpios(f->adev, f->mapping);
+	if (ret)
+		goto free;
+	f->mapped = true;
+	for (i = 0; i < gpio_count; i++) {
+		f->lines[i] = fwnode_gpiod_get_index(acpi_fwnode_handle(f->adev),
+			fte3600_line_names[i], 0, GPIOD_ASIS, dev_name(dev));
+		if (IS_ERR(f->lines[i])) {
+			ret = PTR_ERR(f->lines[i]);
+			goto gpio;
+		}
+	}
+	if (!gpiod_is_active_low(f->lines[FTE3600_RESET])) {
+		ret = -EINVAL;
+		goto gpio;
+	}
+	ret = fte3600_deassert(f);
+	if (ret)
+		goto gpio;
+	if (r->irq_is_gpio) {
+		ret = gpiod_direction_input(f->lines[FTE3600_IRQ]);
+		if (ret)
+			goto gpio;
+		f->irq = gpiod_to_irq(f->lines[FTE3600_IRQ]);
+	} else {
+		/* SPI core already resolved the ordinary ACPI IRQ. Its number is
+		 * neither a GPIO offset nor a raw ACPI GSI to remap ourselves.
+		 */
+		f->irq = to_spi_device(spi)->irq;
+	}
+	if (f->irq <= 0) {
+		ret = f->irq < 0 ? f->irq : -ENXIO;
+		goto gpio;
+	}
+
+	f->chip.label = dev_name(dev);
+	f->chip.parent = dev;
+	f->chip.owner = THIS_MODULE;
+	f->chip.base = -1;
+	f->chip.ngpio = FTE3600_NGPIO;
+	f->chip.names = fte3600_line_names;
+	f->chip.can_sleep = true;
+	f->chip.request = fte3600_gpio_request;
+	f->chip.free = fte3600_gpio_free;
+	f->chip.get_direction = fte3600_gpio_get_direction;
+	f->chip.direction_input = fte3600_gpio_direction_input;
+	f->chip.direction_output = fte3600_gpio_direction_output;
+	f->chip.get = fte3600_gpio_get;
+	f->chip.set = fte3600_gpio_set;
+	f->uio.name = "fte3600-irq";
+	f->uio.version = "2";
+	f->uio.irq = UIO_IRQ_CUSTOM;
+	f->uio.open = fte3600_uio_open;
+	f->uio.release = fte3600_uio_release;
+	f->uio.priv = f;
+	f->pm.notifier_call = fte3600_pm_notify;
+	platform_set_drvdata(pdev, f);
+	ret = register_pm_notifier(&f->pm);
+	if (ret)
+		goto gpio;
+	ret = gpiochip_add_data(&f->chip, f);
+	if (ret)
+		goto notifier;
+	ret = uio_register_device(dev, &f->uio);
+	if (ret)
+		goto chip;
+	mutex_lock(&f->lock);
+	f->uio_registered = true;
+	mutex_unlock(&f->lock);
+	ret = sysfs_create_group(&dev->kobj, &fte3600_attr_group);
+	if (ret)
+		goto uio;
+	mutex_lock(&f->lock);
+	f->lease.online = true;
+	mutex_unlock(&f->lock);
+	/* GPIO/UIO ADD may precede metadata publication. Retry this exact set
+	 * after publication, without touching unrelated devices.
+	 */
+	kobject_uevent(&dev->kobj, KOBJ_CHANGE);
+	device_for_each_child(dev, NULL, fte3600_change_uevent);
+	device_for_each_child(spi, NULL, fte3600_change_uevent);
+	dev_info(dev, "ACPI reset and %s IRQ ready; SPI remains with spidev\n",
+		 r->irq_is_gpio ? "GPIO" : "ordinary");
+	return 0;
+
+uio:
+	/* No open can succeed before lease.online was published. */
+	mutex_lock(&f->lock);
+	f->uio_registered = false;
+	mutex_unlock(&f->lock);
+	uio_unregister_device(&f->uio);
+chip:
+	gpiochip_remove(&f->chip);
+notifier:
+	unregister_pm_notifier(&f->pm);
+gpio:
+	dev_err_probe(dev, ret, "Could not create ACPI reset/IRQ interfaces\n");
+free:
+	platform_set_drvdata(pdev, NULL);
+	fte3600_free(f);
+	return ret;
+}
+
+static void fte3600_remove(struct platform_device *pdev)
+{
+	struct fte3600 *f = platform_get_drvdata(pdev);
+	int ret = 0;
+
+	/* Stop new userspace pairing before removing callbacks or descriptors. */
+	sysfs_remove_group(&pdev->dev.kobj, &fte3600_attr_group);
+	unregister_pm_notifier(&f->pm);
+	mutex_lock(&f->lock);
+	f->lease.online = false;
+	fte3600_stop_irq(f);
+	fte3600_lease_free(&f->lease, FTE3600_IRQ);
+	f->uio_registered = false;
+	if (!f->lease.suspended)
+		ret = fte3600_deassert(f);
+	mutex_unlock(&f->lock);
+	/* UIO holds info_lock while calling open/release, which take f->lock.
+	 * Unregister outside f->lock, before dropping the registration reference.
+	 * It drains those callbacks and makes old UIO fds return EIO/HUP. Old fd
+	 * release will NOT call our callback after unregister, so UIO opens must
+	 * not own private krefs requiring that callback to relinquish them.
+	 */
+	uio_unregister_device(&f->uio);
+	if (ret)
+		dev_warn(f->dev, "Could not deassert reset on removal: %d\n", ret);
+	platform_set_drvdata(pdev, NULL);
+	/* Keep the chip and underlying descriptors alive until GPIO cdev has
+	 * released the outstanding reset request. Old requests fail lease checks;
+	 * userspace observes missing metadata and must close its line fds.
+	 */
+	kref_put(&f->ref, fte3600_last_reference);
+}
+
+static struct platform_driver fte3600_glue_driver = {
 	.probe = fte3600_probe,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 	.remove = fte3600_remove,
-	.id_table = fte3600_spi_ids,
+#else
+	.remove_new = fte3600_remove,
+#endif
+	.driver = {
+		.name = FTE3600_GLUE_NAME,
+	},
 };
-module_spi_driver(fte3600_driver);
 
-MODULE_DESCRIPTION("FTE3600 ACPI SPI/reset/interrupt resource bridge");
-MODULE_AUTHOR("FTE3600 Linux contributors");
+static bool fte3600_is_spidev(struct device *dev)
+{
+	return dev->driver && !strcmp(dev->driver->name, "spidev") &&
+	       ACPI_COMPANION(dev) &&
+	       !acpi_match_device_ids(ACPI_COMPANION(dev), fte3600_acpi_ids);
+}
+
+/* SPI driver core holds the physical device lock during BOUND/UNBIND. The
+ * initial scan takes it explicitly. Never bind another driver to that device,
+ * mutate its drvdata/mode, or create a second SPI device on its chip select.
+ */
+static int fte3600_attach(struct device *dev)
+{
+	struct fte3600_binding *binding, *iter;
+	int ret = 0;
+
+	if (!fte3600_is_spidev(dev))
+		return 0;
+	mutex_lock(&fte3600_bindings_lock);
+	list_for_each_entry(iter, &fte3600_bindings, node)
+		if (iter->spi == dev)
+			goto unlock;
+	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
+	if (!binding) {
+		ret = -ENOMEM;
+		goto unlock;
+	}
+	binding->pdev = platform_device_alloc(FTE3600_GLUE_NAME, PLATFORM_DEVID_AUTO);
+	if (!binding->pdev) {
+		ret = -ENOMEM;
+		goto free;
+	}
+	binding->spi = dev;
+	binding->pdev->dev.parent = dev;
+	ret = platform_device_add(binding->pdev);
+	if (ret) {
+		platform_device_put(binding->pdev);
+		goto free;
+	}
+	list_add_tail(&binding->node, &fte3600_bindings);
+	goto unlock;
+free:
+	kfree(binding);
+unlock:
+	mutex_unlock(&fte3600_bindings_lock);
+	return ret;
+}
+
+static void fte3600_detach(struct device *dev)
+{
+	struct fte3600_binding *binding, *next;
+
+	mutex_lock(&fte3600_bindings_lock);
+	list_for_each_entry_safe(binding, next, &fte3600_bindings, node) {
+		if (dev && binding->spi != dev)
+			continue;
+		list_del(&binding->node);
+		platform_device_unregister(binding->pdev);
+		kfree(binding);
+	}
+	mutex_unlock(&fte3600_bindings_lock);
+}
+
+static int fte3600_spi_notify(struct notifier_block *nb, unsigned long event,
+			      void *data)
+{
+	struct device *dev = data;
+	int ret;
+
+	switch (event) {
+	case BUS_NOTIFY_BOUND_DRIVER:
+		ret = fte3600_attach(dev);
+		if (ret)
+			dev_warn(dev, "Could not create FTE3600 glue device: %d\n", ret);
+		break;
+	case BUS_NOTIFY_UNBIND_DRIVER:
+	case BUS_NOTIFY_DEL_DEVICE:
+		fte3600_detach(dev);
+		break;
+	default:
+		break;
+	}
+	/* Observing binding never changes another driver's probe outcome. */
+	return NOTIFY_OK;
+}
+
+static struct notifier_block fte3600_spi_notifier = {
+	.notifier_call = fte3600_spi_notify,
+};
+
+static int fte3600_scan(struct device *dev, void *unused)
+{
+	int ret;
+
+	device_lock(dev);
+	ret = fte3600_attach(dev);
+	device_unlock(dev);
+	if (ret)
+		dev_warn(dev, "Could not create FTE3600 glue device: %d\n", ret);
+	/* Once a subset has been published, module init must not fail while a
+	 * concurrent GPIO client could already hold one of its requests.
+	 */
+	return 0;
+}
+
+static int __init fte3600_init(void)
+{
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_ACPI) || !IS_ENABLED(CONFIG_GPIO_CDEV) ||
+	    !IS_ENABLED(CONFIG_UIO))
+		return -ENODEV;
+	fte3600_cleanup_queue = alloc_workqueue("fte3600-cleanup", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	if (!fte3600_cleanup_queue)
+		return -ENOMEM;
+	ret = platform_driver_register(&fte3600_glue_driver);
+	if (ret)
+		goto queue;
+	ret = bus_register_notifier(&spi_bus_type, &fte3600_spi_notifier);
+	if (ret)
+		goto driver;
+	ret = bus_for_each_dev(&spi_bus_type, NULL, NULL, fte3600_scan);
+	if (!ret)
+		return 0;
+	bus_unregister_notifier(&spi_bus_type, &fte3600_spi_notifier);
+	fte3600_detach(NULL);
+driver:
+	platform_driver_unregister(&fte3600_glue_driver);
+queue:
+	destroy_workqueue(fte3600_cleanup_queue);
+	return ret;
+}
+module_init(fte3600_init);
+
+static void __exit fte3600_exit(void)
+{
+	bus_unregister_notifier(&spi_bus_type, &fte3600_spi_notifier);
+	fte3600_detach(NULL);
+	platform_driver_unregister(&fte3600_glue_driver);
+	destroy_workqueue(fte3600_cleanup_queue);
+}
+module_exit(fte3600_exit);
+
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("FTE3600 ACPI reset and IRQ glue for standard spidev");

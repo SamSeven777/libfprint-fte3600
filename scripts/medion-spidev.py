@@ -225,6 +225,17 @@ def binding(spi):
     return canonical(driver).name if driver.exists() else None
 
 
+def assert_no_glue(spi):
+    # The new main driver is a platform companion; the SPI binding can still
+    # be spidev while that companion owns the physical reset/IRQ resources.
+    for child in spi.iterdir():
+        driver = child / "driver"
+        if child.is_dir() and driver.exists() and canonical(driver).name == "fte3600-glue":
+            raise DiagnosticError("FTE3600 ACPI glue still owns this sensor's GPIO resources. "
+                                  "Stop the normal driver and remove its integration before using "
+                                  "the standalone Medion diagnostic; no driver was unbound.")
+
+
 def spidev_node(spi, required=True):
     matches = []
     for entry in (SYS / "class/spidev").glob("*"):
@@ -375,6 +386,7 @@ def assert_no_fprintd():
 class Session:
     def __init__(self, resources):
         self.resources = resources
+        assert_no_glue(resources.spi)
         self.original_binding = binding(resources.spi)
         if self.original_binding not in (None, "spidev"):
             raise DiagnosticError(f"Target is bound to {self.original_binding}; refusing to unbind another driver. "
@@ -446,6 +458,7 @@ class Session:
                 raise DiagnosticError(f"spidev could not bind the ACPI device; this kernel may reject this override: {error}") from error
         if binding(self.resources.spi) != "spidev":
             raise DiagnosticError("spidev binding was not established")
+        assert_no_glue(self.resources.spi)
         device = spidev_node(self.resources.spi)
         wait_for_node(device)
         verify_node(self.resources.reset)

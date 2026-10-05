@@ -311,6 +311,21 @@ It does not install a permanent service override or change authentication
 configuration. Restoration failures must be reported as failures, not hidden
 behind a successful probe or capture result.
 
+The standalone adapter owns each SPI/GPIO session from open through close.
+It takes a cooperative exclusive lock on the spidev descriptor, retains the
+fixed existing mode without writing CS polarity, and verifies the configured
+mode, word size and speed before and after SPI transfers and during IRQ waits.
+Stock spidev can hide the internal CS_HIGH flag on GPIO-controlled CS; the mode
+readback is therefore not a measurement of the physical chip-select level.
+The synchronous identification and boot callbacks use the same checks. A
+configuration mismatch or failed configuration read invalidates the session
+until close; later matching settings cannot revive it. Close releases IRQ
+before reset, restores and reads back the original word size and
+speed, and reports restoration failures even after otherwise successful sensor
+operations. These checks do not provide the ACPI glue's suspend generation:
+keep the system awake during this standalone experiment and restart the tool
+after any suspend or device rebind.
+
 The sensor should be uncovered before initialization. In particular, the
 FW9369 backend measures an uncovered baseline during initialization; placing a
 finger on the sensor at that point can spoil calibration. Touch the sensor
@@ -360,7 +375,51 @@ source commit, kernel, stage and sanitized result when reporting this Medion
 experiment; no Medion hardware success is claimed by the existence of this
 branch or its mock tests.
 
-## Local validation, 2026-10-04
+## Local validation, 2026-10-05
+
+This update merges common-driver commit `6e25b20` and migrates the standalone
+adapter to the shared open/close/session-check contract. It preserves direct
+stock-spidev operation without the custom ACPI glue. The identification and
+RAM-boot wire engines were not changed in this migration.
+
+The merged source was built with GCC 13.3, warnings as errors, on Ubuntu 24.04
+under WSL. Both `fte3600_personal_auth` and `fte3600_ipa_auth` were tested as
+`false` and as `true`, with `fte3600_medion_spidev=true` and only the FTE3600
+driver enabled. In each configuration, the complete Meson run finished with
+**36 passing suites, 33 skipped suites, zero failures and zero timeouts**.
+The skips were 32 unrelated recorded-driver replay suites (introspection was
+disabled) and the generic generated-hwdb check. The passing general-driver
+suite also skipped its optional external FT9361 firmware-file subcase.
+
+| Regression | Cases in each configuration |
+| --- | ---: |
+| Medion launcher, including active ACPI-glue exclusion | 62 |
+| Medion transport ownership, restoration and sticky session guard | 23 |
+| Legacy identification engine | 18 |
+| Native identification I/O, including pre/post-transfer guards | 14 |
+| FT9338/FT9348 RAM boot engine | 13 |
+| Standalone `--help` | 1 invocation |
+| Shared public lifecycle | 144 with authentication disabled; 147 enabled |
+
+No Medion case was skipped. The lifecycle run includes a separate-IRQ
+standalone session through probe, initialization, capture, cancellation and
+reopen, plus probe-close and final-close failure propagation. Test logs are in
+`build-medion-sync/meson-logs/testlog.{txt,json}` and
+`build-medion-sync-true/meson-logs/testlog.{txt,json}` in the validation worktree.
+
+An independent AddressSanitizer/UndefinedBehaviorSanitizer run of the adapter
+and syscall fixture passed all 23 transport cases. Those two objects were
+instrumented; the linked shared libraries were not rebuilt with sanitizers,
+and leak detection was disabled. This is targeted adapter evidence, not a
+claim of a fully instrumented library run.
+
+The branch's `scripts/check-fte3600.sh` now enables and runs all six standalone
+suites alongside the shared regression suites in both policy configurations;
+the GitHub workflow calls that script. No sensor was accessed and no kernel
+module or policy was installed during these checks. Physical Medion operation,
+Fedora Secure Boot/SELinux access and suspend behavior remain hardware checks.
+
+## Historical validation, 2026-10-04
 
 The standalone branch incorporates shared-driver fixes through main `1ce4c74`.
 The Medion software-wake path and launcher checks were then verified with:

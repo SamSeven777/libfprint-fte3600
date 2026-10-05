@@ -18,9 +18,45 @@ typedef struct
   guint         calls;
   gint          result;
   gint          failure_errno;
+  guint         guard_calls;
+  guint         guard_fail_at;
 } ExchangeMock;
 
 static ExchangeMock exchange_mock;
+
+static gboolean
+check_session (FpiDeviceFte3600 *self, GError **error)
+{
+  if (++exchange_mock.guard_calls == exchange_mock.guard_fail_at)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE,
+                           "Injected session invalidation");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
+close_session (FpiDeviceFte3600 *self, GError **error)
+{
+  self->spi_fd = -1;
+  return TRUE;
+}
+
+static FpiDeviceFte3600 *
+new_device (guint32 max_transfer)
+{
+  static const Fte3600TransportOps ops = {
+    .check = check_session,
+    .close = close_session,
+  };
+  FpiDeviceFte3600 *device = g_object_new (fpi_device_fte3600_get_type (), NULL);
+
+  device->spi_fd = MOCK_SPI_FD;
+  device->max_transfer = max_transfer;
+  device->transport_ops = &ops;
+  return device;
+}
 
 int __wrap_ioctl (int           fd,
                   unsigned long request,
@@ -67,8 +103,8 @@ static void
 test_exchange (gconstpointer data)
 {
   gboolean discard_reply = GPOINTER_TO_INT (data);
-  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
-  IdentifyIo io = { .device = &device };
+  g_autoptr(FpiDeviceFte3600) device = new_device (64);
+  IdentifyIo io = { .device = device };
   const guint8 tx[] = { 0x10, 0xef, 0x20, 0, 0, 0 };
   guint8 rx[sizeof tx];
 
@@ -79,6 +115,7 @@ test_exchange (gconstpointer data)
   g_assert_true (identify_exchange (&io, tx, discard_reply ? NULL : rx, sizeof tx, &error));
   g_assert_no_error (error);
   g_assert_cmpuint (exchange_mock.calls, ==, 1);
+  g_assert_cmpuint (exchange_mock.guard_calls, ==, 2);
   for (gsize i = 0; i < sizeof rx; i++)
     g_assert_cmpuint (rx[i], ==, discard_reply ? 0xff : 0xa0 + i);
 }
@@ -87,8 +124,8 @@ static void
 test_transfer_failure (gconstpointer data)
 {
   gint syscall_errno = GPOINTER_TO_INT (data);
-  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
-  IdentifyIo io = { .device = &device };
+  g_autoptr(FpiDeviceFte3600) device = new_device (64);
+  IdentifyIo io = { .device = device };
   const guint8 tx[] = { 0x09, 0xf6, 0xf4, 0 };
 
   g_autoptr(GError) error = NULL;
@@ -105,8 +142,8 @@ test_transfer_failure (gconstpointer data)
 static void
 test_transfer_length_mismatch (gconstpointer data)
 {
-  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
-  IdentifyIo io = { .device = &device };
+  g_autoptr(FpiDeviceFte3600) device = new_device (64);
+  IdentifyIo io = { .device = device };
   const guint8 tx[] = { 0x08, 0xf7, 0xf3, 0 };
 
   g_autoptr(GError) error = NULL;
@@ -122,8 +159,8 @@ test_transfer_length_mismatch (gconstpointer data)
 static void
 test_wake_transfer (void)
 {
-  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
-  IdentifyIo io = { .device = &device };
+  g_autoptr(FpiDeviceFte3600) device = new_device (64);
+  IdentifyIo io = { .device = device };
   const guint8 tx[] = { 0x70 };
 
   for (gint result = -1; result <= 1; result++)
@@ -154,8 +191,8 @@ test_wake_transfer (void)
 static void
 test_invalid_request (void)
 {
-  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 4 };
-  IdentifyIo io = { .device = &device };
+  g_autoptr(FpiDeviceFte3600) device = new_device (4);
+  IdentifyIo io = { .device = device };
   const guint8 tx[5] = { 0 };
 
   const struct { const guint8 *tx;
@@ -180,6 +217,24 @@ typedef struct
   GCancellable *cancellable;
   guint         calls;
 } PendingCancel;
+
+static void
+test_exchange_guard (gconstpointer data)
+{
+  g_autoptr(FpiDeviceFte3600) device = new_device (64);
+  IdentifyIo io = { .device = device };
+  const guint8 tx[] = { 0x70 };
+  guint fail_at = GPOINTER_TO_UINT (data);
+  g_autoptr(GError) error = NULL;
+
+  exchange_mock = (ExchangeMock){
+    .tx = tx, .length = sizeof tx, .result = sizeof tx, .guard_fail_at = fail_at,
+  };
+  g_assert_false (identify_exchange (&io, tx, NULL, sizeof tx, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+  g_assert_cmpuint (exchange_mock.guard_calls, ==, fail_at);
+  g_assert_cmpuint (exchange_mock.calls, ==, fail_at - 1);
+}
 
 static gboolean
 cancel_once (gpointer user_data)
@@ -243,6 +298,8 @@ main (int argc, char **argv)
   g_test_add_data_func ("/medion-identify-io/length/long", GINT_TO_POINTER (5), test_transfer_length_mismatch);
   g_test_add_func ("/medion-identify-io/wake-transfer", test_wake_transfer);
   g_test_add_func ("/medion-identify-io/invalid-request", test_invalid_request);
+  g_test_add_data_func ("/medion-identify-io/guard/before", GUINT_TO_POINTER (1), test_exchange_guard);
+  g_test_add_data_func ("/medion-identify-io/guard/after", GUINT_TO_POINTER (2), test_exchange_guard);
   g_test_add_func ("/medion-identify-io/cancel-dispatch", test_cancel_dispatch);
   g_test_add_func ("/medion-identify-io/wait-finishes-pulse", test_wait_finishes_pulse);
   return g_test_run ();
