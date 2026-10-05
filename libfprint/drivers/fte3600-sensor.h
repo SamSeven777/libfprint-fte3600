@@ -65,7 +65,8 @@ typedef struct
   /* Zero means not established. Geometry does not specify a frame format. */
   guint16         width;
   guint16         height;
-  /* Physical image metadata; zero leaves the framework's unknown default.
+  /* Image density in pixels/mm; zero leaves the unknown default.
+   * Per-profile provenance and limits: docs/fte3600/image-resolution.md.
    * Never infer pixel pitch from a chip's dimensions or a related model. */
   gdouble                 image_ppmm;
   Fte3600SensorCapability capabilities;

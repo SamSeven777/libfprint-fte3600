@@ -28,6 +28,7 @@ procedure with the normal `main` installation.
 | Document | Purpose |
 | --- | --- |
 | [Architecture](architecture.md) | Module boundaries, lifecycle, ownership and failure contracts |
+| [Image resolution](image-resolution.md) | Per-chip physical-scale metadata, manufacturer sources and unknown values |
 | [Dynamic discovery](dynamic-discovery.md) | ACPI resource selection, sensor identity and firmware authorization |
 | [Kernel interface](../../kernel/fte3600/README.md) | Reset GPIO, IRQ-only UIO, metadata ABI and lease behavior |
 | [Matcher architecture](matcher-architectures.md) | Algorithm cores, adapters and standalone checks |

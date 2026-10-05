@@ -7,6 +7,7 @@
  * Independently expressed technical facts and provenance:
  * docs/fte3600/windows-hardware-inventory.{md,json}
  * docs/fte3600/windows-runtime-adaptation.md
+ * docs/fte3600/image-resolution.md
  *
  * A catalog entry establishes neither a working Linux backend nor permission
  * to use another sensor's firmware. No vendor code or payload is included.
@@ -79,7 +80,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .name = "FT9361",
     .protocol = FTE3600_PROTOCOL_FT95A8,
     .width = 64, .height = 80,
-    .image_ppmm = 20.0,
+    .image_ppmm = 20.0, /* Retained A1 profile value; see image-resolution.md. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE | FTE3600_SENSOR_CAP_FIRMWARE_LOAD,
     .firmware = firmware_ft9361,
     .firmware_count = G_N_ELEMENTS (firmware_ft9361),
@@ -99,7 +100,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .name = "FT9365",
     .protocol = FTE3600_PROTOCOL_FT9365,
     .width = 64, .height = 80,
-    .image_ppmm = 20.0,
+    .image_ppmm = 552.0 / 25.4, /* Manufacturer's Simplified Chinese nominal DPI. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
   },
   {
@@ -107,7 +108,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .name = "FT9368",
     .protocol = FTE3600_PROTOCOL_FT9368,
     .width = 64, .height = 80,
-    .image_ppmm = 20.0,
+    .image_ppmm = 0.0, /* Physical pixel pitch has not been established. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
     .firmware = firmware_ft9368,
     .firmware_count = G_N_ELEMENTS (firmware_ft9368),
@@ -117,7 +118,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .name = "FT9369",
     .protocol = FTE3600_PROTOCOL_FT9369,
     .width = 64, .height = 80,
-    .image_ppmm = 20.0,
+    .image_ppmm = 0.0, /* Physical pixel pitch has not been established. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
   },
   {
@@ -125,7 +126,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .name = "FT9769",
     .protocol = FTE3600_PROTOCOL_FT9769,
     .width = 40, .height = 196,
-    .image_ppmm = 20.0,
+    .image_ppmm = 564.0 / 25.4, /* Manufacturer's Simplified Chinese nominal DPI. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
   },
 };

@@ -166,8 +166,13 @@ Cancellation and failures in release observers must clean up before completing
 the action; an unverified state invalidates the session.
 
 Physical image resolution is catalog metadata, independent of the matcher.
-Only FT9361 currently specifies 20 pixels/mm; other chips retain the framework's
-unknown value rather than inheriting FT9361's pixel pitch.
+FT9338/9348/9536 specify 20 pixels/mm, supported by manufacturer sensor-area
+and resolution data. FT9365/9769 use the manufacturer's nominal 552/564 dpi,
+respectively. FT9361 retains its existing A1 profile value of 20 pixels/mm;
+FT9368/9369 leave the value unknown (`0`). The current BRISK and
+IPA paths do not consume this metadata. See [image resolution](image-resolution.md)
+for sources, the retained A1 setting, nominal and cross-checked values, and
+remaining variant uncertainty.
 
 ## Electrical and failure contracts
 
