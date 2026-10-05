@@ -21,7 +21,7 @@ Install build dependencies for your distribution:
 ### Arch Linux
 ```sh
 sudo pacman -S --needed base-devel git meson ninja glib2 glib2-devel \
-  libgusb libgudev cairo fprintd python
+  libgusb libgudev systemd cairo fprintd python
 ```
 
 ### Fedora 43+
@@ -35,8 +35,13 @@ sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
 ```sh
 sudo apt install build-essential git meson ninja-build pkg-config \
   libglib2.0-dev libgusb-dev libgudev-1.0-dev libudev-dev \
-  systemd-dev libcairo2-dev fprintd python3
+  systemd systemd-dev libcairo2-dev fprintd python3
 ```
+
+The device-permission helper requires `systemd-escape`, provided by the
+`systemd` package on these distributions. Development packages such as
+`systemd-dev` alone do not supply this runtime tool; it is also required by
+the setup helper's local tests.
 
 The experimental transport requires stock `spidev`, kernel UIO support
 (`CONFIG_UIO=y` or `m`), the `fte3600` reset/IRQ glue and matching kernel headers.

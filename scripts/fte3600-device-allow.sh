@@ -63,6 +63,11 @@ if [ "$REMOVE" = 1 ]; then
   exit 0
 fi
 
+if ! command -v systemd-escape >/dev/null 2>&1; then
+  echo 'systemd-escape is required; install the systemd package before generating device permissions.' >&2
+  exit 1
+fi
+
 PAIR_DATA=$(python3 "$PAIR_HELPER")
 NEWLINE='
 '

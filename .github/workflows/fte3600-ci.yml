@@ -35,7 +35,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates git meson ninja-build pkg-config \
             libglib2.0-dev libgusb-dev libgudev-1.0-dev \
-            libudev-dev systemd-dev libcairo2-dev linux-headers-generic
+            libudev-dev systemd systemd-dev libcairo2-dev linux-headers-generic
       - uses: actions/checkout@v6
       - name: Build ACPI reset and IRQ glue
         run: |
