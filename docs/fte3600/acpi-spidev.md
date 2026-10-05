@@ -61,6 +61,8 @@ or GPIO device or take ownership from another bound driver.
 ## Build the current working tree
 
 Use the distribution dependencies in [install.md](install.md#1-prerequisites--dependencies).
+Include the `systemd` runtime package: the device-permission helper uses its
+`systemd-escape` tool to generate the exact device-unit names.
 The kernel must enable `CONFIG_UIO=y` or `m`. Also install the exact headers/development package for the kernel you will
 boot, DKMS if using it, and SELinux administration tools on SELinux systems.
 For example, Fedora needs `kernel-devel-$(uname -r)`, `dkms` and
