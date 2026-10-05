@@ -113,22 +113,28 @@ and validates all six catalog payloads, including the FT9368 pair, before
 installing externally obtained files. Each file replacement is atomic; the
 pair is not a filesystem transaction. Firmware is not redistributed here.
 
-Discovery tries application identity protocols on both supported CS polarities,
-then a single legacy wake stage before factory negotiation. The first
-`70` / 5 ms / `70` / 2 ms pair preserves the A1-tested immediate geometry
-confirmation path, including initially stale register bytes. If geometry is
-still empty, a slower fallback checks MCU `a5 5a`, waits 350 ms and repeats
-geometry confirmation; failed status rounds retry at most six pairs total per
-polarity. A started pair finishes before observing cancellation; transfer
-errors stop immediately. All waits start at the actual monotonic scheduling
-time. See [dynamic discovery](dynamic-discovery.md).
+Discovery follows the normal Windows SPI factory rounds zero and one.
+For each available CS, it tries FT9368 wake/full information twice on a negative
+reply, using the factory's 5 ms wake delay. Then it runs special-family wake,
+two independent C6 configuration calls (31 attempts each), and confirmed ID.
+A negative special result causes H10/L20/H plus 10 ms and one same-CS retry;
+a second negative does not add another reset. FT9391 also needs variant
+validation. Unknown-family FD/FE pad-voltage registers are never written.
 
-If wake does not identify a chip, factory wake and verified `c6=01` negotiation
-run on each supported polarity. They require repeated IDs and the FT9391
-variant check, and never write unknown-family FD/FE pad-voltage registers.
-Failed negotiation resets the chip; I/O or cleanup errors stop discovery.
-See [special-probe.md](special-probe.md). Explicit boot-only discovery retains
-its ROM sequence; unknown or contradictory identities do not authorize upload.
+After both factory rounds return negative, legacy detection sends
+`70` / 5 ms / `70`, then reads MCU status immediately. Non-idle status retries
+up to six rounds, 5 ms apart; idle status waits 350 ms before confirmed geometry.
+The direct identity and immediate-geometry shortcuts are removed. A started
+pair finishes before observing cancellation; transfer errors stop immediately.
+See [dynamic discovery](dynamic-discovery.md) and
+[special-family evidence](special-probe.md).
+
+Linux retains capability-gated alternate CS, repeated identity validation and
+explicit I/O/cancellation handling. Later reference factory branches that guess
+a chip and load firmware without positive identity are excluded. Eligible
+unknown devices instead reach the existing reliable ROM checks. Explicit
+boot-only discovery retains its ROM sequence. The earlier A1 and GPD hardware
+reports do not establish the new sequence's behavior or latency.
 
 FT9338/FT9536 RAM recovery has separate four-byte boot-register framing and
 compares every uploaded byte against a complete readback before restarting.

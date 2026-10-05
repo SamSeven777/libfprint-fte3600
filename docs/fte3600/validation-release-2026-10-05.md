@@ -104,3 +104,47 @@ cross-client leases or atomic PM revocation. An abnormal process exit cannot
 guarantee immediate native-CS rollback; the next controlled open restores its
 baseline. These limits and the incomplete Windows power/background-calibration
 coverage remain documented, rather than being treated as fixed by unit tests.
+
+## Vendor factory restoration on the c87992a working tree
+
+This later local run covers the normal Windows SPI factory round-zero/one
+restoration based on `c87992a`. It supersedes the earlier discovery-order
+prototype, which retained direct identity shortcuts. It is not a published CI
+result or a new hardware report.
+
+The corrected sequence uses FT9368 factory wake with 5 ms, two 31-attempt C6
+configuration calls per special attempt, one same-CS H10/L20/H + 10 ms retry,
+and legacy MCU status before the 350 ms geometry settle. Direct-ID and early
+geometry shortcuts and the extra 2 ms discovery wait are removed. A8 firmware
+startup remains unchanged. Identity confirmation, cancellation, transfer-error
+handling and reliable firmware authorization remain explicit Linux safeguards.
+See [discovery behavior](dynamic-discovery.md) and [wire evidence](special-probe.md).
+
+GCC 13.3, warnings as errors, WSL Ubuntu:
+
+| Check | Result |
+| --- | --- |
+| Capture-only full Meson run | 32 suites passed, 33 skipped |
+| Personal + IPA authentication full Meson run | 30 suites passed, 33 skipped |
+| Device lifecycle, capture-only / authentication | 146 / 149 cases passed |
+| Public action lifecycle, capture-only / authentication | 14 / 33 cases passed |
+| Special-family factory / FW9369 backend | 27 / 57 cases passed |
+| General SSM timer and state tests | 42 cases passed |
+| ASan + UBSan | Four suites passed: special factory, FW9369 backend, device lifecycle, public action lifecycle |
+
+Skips retain the meaning documented above; leak detection remains disabled in
+the sanitizer environment. Local logs are in
+`work/vendor-factory-validation-2026-10-05/`, separate from prototype runs.
+
+Lifecycle protocol waits use an explicit virtual clock with asynchronous
+dispatch, so tests check requested intervals and bus ordering without waiting
+through every real-time 31-attempt loop. SPI workers, cancellation and public
+device actions still execute. The general SSM timer tests retain real-time
+scheduling checks. These results do not measure device latency.
+
+The legacy simulator explicitly models retained application RAM: reset hides
+runtime geometry until the complete wake/status/settle sequence. It does not
+assert that every board retains RAM. FW9369 tests preserve C1 sleep and chip
+registers while destroying and recreating the host device, and cover correct,
+alternate and fixed CS, wake errors and identity conflicts after reset. No
+real A1 or GPD device was available for this correction; both need revalidation.

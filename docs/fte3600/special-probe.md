@@ -3,7 +3,8 @@
 [Documentation index](README.md)
 
 This specification records observable protocol facts from
-`ftWbioUmdfDriverV2.dll` version 2.0.3.102, SHA-256
+`ftWbioUmdfDriverV2.dll` from INF package 2.0.3.102 (PE FileVersion
+1.0.0.3188), SHA-256
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`.
 It contains no firmware, register tables, or vendor implementation. The Linux
 state machine is an independent implementation of the transactions below.
@@ -40,6 +41,16 @@ The backend-specific FW9369 probe at `0x10088` must not substitute for the
 shared factory helper: it additionally clears all IRQ flags (`1a84 = ffff`) even
 when the eventual ID is not `9362`.
 
+The reset target is established through transport vtable `0x462c0`, slot
+`+0x68`: the call at `0x24192` reaches `0x2f5e0`, which sends physical H for
+10 ms, L for 20 ms, then H without a post-release delay. The caller at
+`0x2419c–0x241a1` adds 10 ms before retrying. There is no A8 160 ms startup
+wait on this branch. The separate FT9368 recovery branch has a 300 ms wait;
+it does not define a generic reset delay either.
+
+This factory belongs to `EvtDevicePrepareHardware`. Its ordering is not
+evidence that every Windows user close/reopen repeats the whole factory.
+
 ## Wire transactions
 
 All lengths below include command bytes and receive clocks. Multibyte payload
@@ -71,41 +82,51 @@ value would also require electrical semantics not established here.
 
 ## Linux policy and cleanup boundary
 
-The fallback runs only after the non-configuring family probes have failed.
+The special-family probe runs after the FT9368 factory wake/information probes.
 The caller selects one supported CS polarity and owns whether another
-polarity should be tried. This child never changes CS.
+polarity should be tried. The parent repeats factory rounds zero and one
+before legacy `70` detection. This child never changes CS.
 
-1. Wake using the sequence above; write C6 and require its readback to be one.
-   C6 readback failure permits at most four write/wait/read attempts. This is
-   a Linux bound matching the FT93xx helper's count, not the larger FW9369
-   helper count.
+1. Wake using the sequence above. Run the C6 write/4 ms/read helper **twice**,
+   as `10a74` and `10d70` each call `fd94`. Each invocation allows **31**
+   attempts. If readback never becomes one, continue to the second invocation
+   and ID read as the reference does; do not substitute four attempts or
+   require C6 success as an additional identity gate. Transport errors stop.
 2. Read ID twice on the same CS and require exact agreement. A mismatch is a
    protocol error, including a positive ID followed by an empty response.
-   Only the four IDs selected by the shared reference factory can select a backend.
-3. For `9391`, additionally read and validate the variant twice. `0fff` is
-   reported as known but unsupported `9395`, never as FT9769. Invalid CRC or
-   inconsistent observations terminate discovery after reset cleanup. They
-   must not be returned as an unidentified device that permits legacy ROM probing.
-4. On success, leave the chip awake with C6 set to one and return the positive
-   identity for backend initialization. No firmware, pad, IRQ-mask, or image
-   calibration operation occurs here.
-5. On no match, I/O failure, or cancellation after the first submitted wake,
-   perform uncancellable GPIO cleanup: controller-level H for at least 10 ms,
-   L for at least 20 ms, then H and a 160 ms Linux recovery wait. The reset
-   restores a startup boundary, not the prior application's transient state.
-   Its GPIO interpretation is specified in [gpio-polarity.md](gpio-polarity.md).
+   Only the four IDs selected by the reference factory can select a backend.
+3. For `9391`, read and validate the variant twice. `0fff` is known unsupported
+   `9395`, never FT9769. Invalid CRC or inconsistent observations terminate
+   discovery. Confirmed unsupported silicon cannot be reinterpreted through
+   another protocol.
+4. On an ordinary negative result, reset H10/L20/H, wait 10 ms, and repeat
+   wake/C6/C6/ID once on the **same connection**. A second ordinary negative
+   returns unknown directly, with no additional reset. On success, return the
+   identity without claiming verified idle or acknowledged C6. No firmware, pad-voltage, IRQ-mask,
+   or image-calibration operation occurs here.
+5. I/O, cancellation, inconsistent identity and known unsupported identity
+   use an explicit Linux cleanup boundary. If SPI has been attempted since
+   the last reset, perform H10/L20/H plus 10 ms before returning the error or
+   unsupported evidence. Once a reset starts it completes despite cancellation,
+   and an earlier GPIO failure does not prevent attempted final deassertion.
+   Do not repeat a reset merely because that reset itself failed.
 
-Cleanup always attempts final deassertion even if an earlier GPIO operation
-fails. The first operation error is preserved. A negative result is returned
-without an error **only if cleanup succeeded**; I/O, cancellation and cleanup
-errors, inconsistent IDs and variant validation failures must stop the caller's
-discovery sequence. A known unsupported ID is
-preserved as diagnostic evidence so the caller cannot reinterpret it as a
-blank device and enter legacy firmware recovery. Cancellation before any
-transaction and an insufficient transfer limit perform no GPIO reset.
+The first error is preserved. An actual transfer/cleanup error cannot be
+returned as an ordinary negative identity. Cancellation before the first
+transaction and an insufficient transfer limit perform no reset. GPIO levels
+are defined in [gpio-polarity.md](gpio-polarity.md); a completed reset does not
+prove restoration of a previous application's transient state.
+
+The previous direct-ID-first optimization, four-attempt C6 bound, omitted
+same-connection retry and A8 160 ms cleanup wait are removed. Remaining Linux
+differences are repeated identity/variant checks, explicit failure cleanup and
+capability-gated alternate CS. The reference ignores some transfer return
+values and may continue using a pre-cleared zero response; Linux reports the
+failure. A8 firmware-startup waits are unchanged. This factory is called for
+each Linux discovery, without asserting that every Windows user reopen runs it.
 
 The independent asynchronous mock tests model a device whose ID is unavailable
-until wake and C6 negotiation succeed. They exercise every supported ID,
+until the expected wake and configuration sequence has run. They exercise every supported ID,
 variant and CRC rejection, changing IDs, bounded C6 retries, every transfer
 failure/cancellation boundary, GPIO failures and minimum reset delays. This
 validates software sequencing, not cold-start success or voltage levels on

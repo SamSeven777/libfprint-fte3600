@@ -39,10 +39,10 @@ Failure allows up to 30 retries, or 31 attempts in total. `0x23010` waits in mil
 microseconds. `0x10A74` calls this configuration, then `0x10D70` configures it again and reads
 `1A8B`.
 
-Linux first attempts repeated, consistent positive ID reads. If read-only discovery fails, the
-separately bounded [special-mode probe](special-probe.md) can perform the documented C6 negotiation.
-This is a deliberate state-changing fallback, not a claim that C6 is a harmless write for every
-unknown device. Chip-specific initialization still requires a confirmed identity.
+Linux performs the [special-family factory sequence](special-probe.md) after FT9368
+factory probing. It runs both C6 configuration calls and the same-connection reset/retry
+before considering legacy firmware detection. Direct ID reads no longer bypass this
+sequence. Chip-specific initialization still requires a confirmed identity.
 
 <a id="电源状态与命令"></a>
 
@@ -270,6 +270,12 @@ completed, not measured power consumption or IRQ behavior. This final-close poli
 commands without claiming that Windows takes the same chain on every user close. This backend sends
 no hardware resets, ROM commands, firmware downloads, or persistent-storage writes.
 
+Rediscovery now attempts special-family wake/C6/ID before legacy `70` wake.
+Its negative special-probe reset uses H10/L20/H followed by the reference
+factory's 10 ms settle; it does not reuse the A8 firmware startup delay.
+The factory sequence also runs when a direct ID read might already succeed. See
+[factory ordering and remaining Linux differences](special-probe.md).
+
 Independent synthetic tests cover full-frame sizes, byte order, capacity/invalid-command handling,
 saturated subtraction, and empty-frame rejection, plus DB/SMIC initialization, repeated capture,
 cancellation, SPI errors, and cleanup errors. Release regressions additionally cover UP alone,
@@ -279,3 +285,14 @@ cover irrelevant/empty events, newly latched events during recovery, C2 restart 
 cancellation, with the same event sequences without wake as controls. Simulated hardware is not
 additional protocol evidence. CS polarity, actual IRQ behavior, power consumption, and final image
 quality still require physical validation on GPD and other devices.
+
+Shutdown/rediscovery regressions run the real backend initialization, capture
+and C1 shutdown, destroy the host device object, and create a new one while
+preserving the simulated chip's registers and sleep state. They require two
+matching `9362` replies before backend reinitialization, with no legacy wake,
+ROM or firmware commands during discovery. Correct baseline CS, alternate CS,
+fixed CS, wake-transfer failure and changing identity (also after reset) are covered.
+Both C6 configuration calls and the negative same-CS retry are checked. Fixed CS
+must not change mode. These tests exercise production state machines with
+simulated transport; they do not measure reopen latency or exercise real
+GPIO/UIO/spidev resource acquisition.

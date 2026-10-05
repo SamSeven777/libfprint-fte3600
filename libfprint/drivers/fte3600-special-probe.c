@@ -15,11 +15,14 @@ typedef struct
   guint16          first_id;
   guint16          first_variant;
   guint            mode_attempts;
+  guint            mode_configurations;
+  guint            attempts;
   gboolean         touched;
 } SpecialProbe;
 
 enum {
   SPECIAL_VALIDATE,
+  SPECIAL_ATTEMPT,
   SPECIAL_WAKE,
   SPECIAL_WAKE_DELAY,
   SPECIAL_READ_STATE,
@@ -38,15 +41,79 @@ enum {
   SPECIAL_VARIANT_SAVE,
   SPECIAL_VARIANT_REPEAT,
   SPECIAL_VARIANT_CHECK,
+  SPECIAL_RESULT,
+  SPECIAL_RETRY_RESET,
+  SPECIAL_RETRY,
   SPECIAL_CLEANUP,
-  SPECIAL_CLEANUP_HIGH,
-  SPECIAL_CLEANUP_ASSERT,
-  SPECIAL_CLEANUP_LOW,
-  SPECIAL_CLEANUP_RELEASE,
-  SPECIAL_CLEANUP_SETTLE,
   SPECIAL_DONE,
   SPECIAL_NSTATES,
 };
+
+enum {
+  RESET_BEGIN,
+  RESET_RELEASE,
+  RESET_HIGH_DELAY,
+  RESET_ASSERT,
+  RESET_LOW_DELAY,
+  RESET_END,
+  RESET_SETTLE,
+  RESET_DONE,
+  RESET_NSTATES,
+};
+
+static void
+special_reset_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+
+  /* Once started, finish the physical H10/L20/H sequence even if a GPIO
+   * operation fails or cancellation arrives. Cleanup states preserve the
+   * first error while still attempting the final deassertion. */
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case RESET_BEGIN:
+      fpi_ssm_next_state (ssm);
+      return;
+    case RESET_RELEASE:
+    case RESET_END:
+      fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
+      return;
+    case RESET_HIGH_DELAY:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_HIGH_MS);
+      return;
+    case RESET_ASSERT:
+      fpi_fte3600_set_hardware_reset (ssm, self, TRUE);
+      return;
+    case RESET_LOW_DELAY:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
+      return;
+    case RESET_SETTLE:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_SPECIAL_RESET_SETTLE_MS);
+      return;
+    case RESET_DONE:
+      fpi_ssm_mark_completed (ssm);
+      return;
+    default:
+      g_assert_not_reached ();
+    }
+}
+
+static void
+special_reset (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  SpecialProbe *data = fpi_ssm_get_data (ssm);
+  FpiSsm *child;
+
+  self->armed = FALSE;
+  fpi_fte3600_clear_irq_source (self);
+  /* The child always attempts the entire pulse, including on failure. Its
+   * error must not cause the parent's cleanup to issue a second pulse. */
+  data->touched = FALSE;
+  child = fpi_ssm_new_full (FP_DEVICE (self), special_reset_handler,
+                            RESET_NSTATES, RESET_RELEASE, "special-factory-reset");
+  fpi_ssm_start_subsm (ssm, child);
+}
 
 static void
 special_exchange (FpiSsm *ssm, const guint8 *packet, gsize length, GError *error)
@@ -120,6 +187,13 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
                                                  FTE3600_FW9369_CMD_WAKE, &error);
       break;
 
+    case SPECIAL_ATTEMPT:
+      data->attempts++;
+      data->mode_attempts = 0;
+      data->mode_configurations = 0;
+      fpi_ssm_next_state (ssm);
+      return;
+
     case SPECIAL_WAKE_DELAY:
     case SPECIAL_IDLE_DELAY:
       fpi_ssm_next_state_delayed (ssm, FTE3600_SPECIAL_COMMAND_DELAY_MS);
@@ -161,12 +235,22 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case SPECIAL_MODE_CHECK:
-      if (data->rx[FTE3600_FW9369_SFR_RESULT_OFFSET] == 1)
-        fpi_ssm_next_state (ssm);
-      else if (data->mode_attempts < FTE3600_SPECIAL_MODE_ATTEMPTS)
-        fpi_ssm_jump_to_state (ssm, SPECIAL_MODE_WRITE);
+      if (data->rx[FTE3600_FW9369_SFR_RESULT_OFFSET] != 1 &&
+          data->mode_attempts < FTE3600_SPECIAL_MODE_ATTEMPTS)
+        {
+          fpi_ssm_jump_to_state (ssm, SPECIAL_MODE_WRITE);
+          return;
+        }
+      /* The factory invokes the C6 helper twice before reading the ID and
+       * does not use either helper's exhausted-readback result as a gate.
+       * Each helper has its own counter; transport errors still fail closed. */
+      if (++data->mode_configurations < 2)
+        {
+          data->mode_attempts = 0;
+          fpi_ssm_jump_to_state (ssm, SPECIAL_MODE_WRITE);
+        }
       else
-        fpi_ssm_jump_to_state (ssm, SPECIAL_CLEANUP);
+        fpi_ssm_next_state (ssm);
       return;
 
     case SPECIAL_ID_READ:
@@ -203,7 +287,7 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
           Fte3600Identity candidate = fpi_fte3600_identify_special (value);
           if (candidate.evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
             data->candidate = candidate;
-          fpi_ssm_jump_to_state (ssm, SPECIAL_CLEANUP);
+          fpi_ssm_jump_to_state (ssm, SPECIAL_RESULT);
           return;
         }
       if (value == 0x9391)
@@ -215,7 +299,7 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
         }
       else
         {
-          fpi_ssm_jump_to_state (ssm, SPECIAL_CLEANUP);
+          fpi_ssm_jump_to_state (ssm, SPECIAL_RESULT);
         }
       return;
 
@@ -251,41 +335,45 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
         }
       return;
 
+    case SPECIAL_RESULT:
+      if (data->candidate.sensor != FTE3600_SENSOR_UNKNOWN)
+        fpi_ssm_jump_to_state (ssm, SPECIAL_DONE);
+      else if (data->candidate.evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
+        fpi_ssm_jump_to_state (ssm, SPECIAL_CLEANUP);
+      else if (data->attempts == 1)
+        fpi_ssm_next_state (ssm);
+      else
+        /* The second ordinary negative goes directly to the next family:
+         * there is no third hardware reset in the reference factory. */
+        fpi_ssm_jump_to_state (ssm, SPECIAL_DONE);
+      return;
+
+    case SPECIAL_RETRY_RESET:
+      special_reset (ssm);
+      return;
+
+    case SPECIAL_RETRY:
+      fpi_ssm_jump_to_state (ssm, SPECIAL_ATTEMPT);
+      return;
+
     case SPECIAL_CLEANUP:
-      if (!data->touched ||
-          (!fpi_ssm_get_error (ssm) && data->candidate.sensor != FTE3600_SENSOR_UNKNOWN))
+      if (!data->touched)
         {
           fpi_ssm_jump_to_state (ssm, SPECIAL_DONE);
           return;
         }
-      /* The reference does not restore a saved C6 value on mismatch: its
-       * recovery boundary is hardware reset. Do not guess a default mode. */
-      self->armed = FALSE;
-      fpi_fte3600_clear_irq_source (self);
-      fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
-      return;
-
-    case SPECIAL_CLEANUP_HIGH:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_HIGH_MS);
-      return;
-
-    case SPECIAL_CLEANUP_ASSERT:
-      fpi_fte3600_set_hardware_reset (ssm, self, TRUE);
-      return;
-
-    case SPECIAL_CLEANUP_LOW:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
-      return;
-
-    case SPECIAL_CLEANUP_RELEASE:
-      fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
-      return;
-
-    case SPECIAL_CLEANUP_SETTLE:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_BOOT_MS);
+      /* Linux additionally resets after an I/O/cancellation/identity error
+       * or a known unsupported identity. Never restore a guessed C6 value. */
+      special_reset (ssm);
       return;
 
     case SPECIAL_DONE:
+      /* RESULT checks cancellation before the synchronous success path.
+       * A cleanup reset may instead have waited asynchronously; report any
+       * cancellation received there without starting a second pulse. */
+      if (!data->touched && !fpi_ssm_get_error (ssm) &&
+          fpi_fte3600_fail_if_cancelled (ssm, dev))
+        return;
       if (!fpi_ssm_get_error (ssm))
         *data->result = data->candidate;
       fpi_ssm_mark_completed (ssm);

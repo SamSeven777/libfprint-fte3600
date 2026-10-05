@@ -563,6 +563,7 @@ if 'fte3600' in drivers
         'fpi_fte3600_resources_resolve', 'fpi_fte3600_resources_check',
         'fpi_fte3600_resources_buffer_size', 'fpi_fte3600_transport_open',
         'fpi_fte3600_transport_close',
+        'fpi_ssm_next_state_delayed', 'fpi_ssm_jump_to_state_delayed',
     ]
     fte3600_mock_link_args = []
     if get_option('fte3600_personal_auth')
@@ -583,7 +584,7 @@ if 'fte3600' in drivers
         fte3600_lifecycle_test,
         suite: ['unit-tests'],
         env: envs,
-        # Discovery tests retain real wake/settle delays across both CS modes.
+        # Protocol waits use a virtual clock; workers and cancellation remain asynchronous.
         timeout: 60,
     )
 

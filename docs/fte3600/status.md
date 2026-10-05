@@ -54,8 +54,16 @@ closed and exited with status 0. C1 shutdown produced no warning.
 Identification took about 15 ms on the first run and 440 ms on reopen. After
 shutdown, rediscovery exhausted six legacy wake pairs on each CS polarity
 (twelve `0x70` pairs in total) before the special-family `0x5a` wake obtained
-an identity. Reopen succeeded, but this extra discovery work remains
-unoptimized.
+an identity. Reopen succeeded on that revision.
+
+The subsequent correction restores the reference factory's first two rounds:
+FT9368 wake/information, special wake with two 31-attempt C6 calls, and a
+same-CS reset/retry before legacy status/geometry. It removes the direct-ID
+and early-geometry shortcuts and uses the reference special reset's 10 ms
+settle instead of A8's 160 ms. This is a behavioral baseline, not a latency
+optimization claim. New GPD timing and A1 compatibility both need hardware
+revalidation. See [discovery behavior](dynamic-discovery.md) and
+[reference differences](special-probe.md#linux-policy-and-cleanup-boundary).
 
 Close released the host IRQ handler and its entry disappeared from
 `/proc/interrupts`; the earlier closed-device counter increase was no longer

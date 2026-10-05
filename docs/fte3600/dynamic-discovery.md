@@ -30,56 +30,65 @@ There is no computer-model bypass. See the
 
 ### Application identity
 
-Discovery first probes application identities. Runtime pairs `5858`, `6060`,
-`4050`, `4080` select FT9338, FT9348, FT9361 and FT9536 respectively. Further
-probes read word `1a8b` using the distinct FW9369 and FT93xx framing, or
-wake/query FT9368 using `ff00`/`9180`. Positive application identities must
-repeat unchanged. Raw `9391` also requires register `1816 != 0fff`; the 9395
-variant is rejected. A contradictory confirmation or failed variant check
-stops discovery rather than falling through to firmware recovery.
+Discovery follows the normal SPI factory's first two rounds in Windows
+`EvtDevicePrepareHardware`. It no longer tries direct legacy geometry or
+special-family IDs before the factory wake sequence. At each available
+connection it performs:
 
-Where `fte3600_cs_control=1`, discovery can repeat probes at the alternate
-native CS polarity. A successful probe retains that polarity for the open
-session. GPIO-controlled CS and controllers without polarity control use only
-their existing effective polarity. Failed discovery attempts to restore the
-ACPI baseline on the controllable path. Process death has different guarantees;
-see [the transport boundary](#kerneluserspace-boundary).
+1. FT9368 `ff00` wake, **5 ms**, then 32-byte `9180` application information
+   (39-byte total transaction). A negative first attempt repeats this complete
+   sequence once. Positive metadata must also pass independent validation and
+   identity confirmation.
+2. Special-family wake, then **two** C6 configuration calls. Each call writes
+   `c6=01`, waits 4 ms, and reads back, up to **31 attempts**. Exhausting a
+   readback mismatch still proceeds to the next call and ultimately the ID
+   read, as the reference does. Actual transfer errors remain fatal.
+3. If special identification returns no known identity, H10/L20/H reset plus
+   **10 ms**, then repeat the whole special sequence once on the same CS.
+   A second negative result returns without another reset. Repeated positive
+   IDs and the FT9391 variant check are mandatory; known unsupported IDs,
+   conflicting observations and I/O errors cannot authorize another family.
 
-### Legacy wake and factory negotiation
+Where `fte3600_cs_control=1`, Linux also tries the alternate native CS
+connection before finishing a factory round. Fixed-CS transports retain their
+effective connection without mode writes. Successful discovery keeps its
+selected connection; failed discovery attempts to restore the baseline.
+These connection trials are Linux integration, not observed Windows behavior.
 
-If the first application probes do not identify a chip, discovery retries the
-legacy application after `70`, a minimum 5 ms wait, `70`, and a minimum 2 ms
-wait. This initial wake runs once per supported CS polarity, after the other
-application protocols have had a chance to identify or reject the chip.
-Inactive legacy registers can return stale bytes as well as zeros; an unknown
-reply still prevents firmware recovery if waking fails. A started command pair
+When every connection returns negative, factory round zero repeats the
+FT9368/special sequence as round one. Only after round one also fails does
+legacy application detection begin. This preserves the normal reference
+ordering instead of collapsing its repetitions into an unverified fast path.
+See [special-family transactions and reference RVAs](special-probe.md).
+
+<a id="legacy-wake-and-factory-negotiation"></a>
+
+### Factory negotiation and legacy wake
+
+Legacy detection sends `70`, waits **5 ms**, sends `70` again, and immediately
+reads MCU status `20/21`. There is no added 2 ms wait or early geometry shortcut.
+Non-idle status permits six rounds total per available CS, with 5 ms between
+failed rounds. Only `a5 5a` permits the **350 ms** settle followed by geometry
+reads. Positive geometry must repeat unchanged: `5858`, `6060`, `4050`, `4080`
+select FT9338, FT9348, FT9361 and FT9536 respectively. A started command pair
 finishes before cancellation is observed; transfer errors stop immediately.
-A positive legacy identity still has to repeat unchanged. This preserves the
-inactive-application path observed on One-Netbook A1 without treating it as
-cold ROM identity.
 
-If the first awake geometry remains `0000` or `ffff`, discovery checks `20/21`
-for `a5 5a`. It can repeat the wake/status round up to six times total per
-polarity, with 5 ms between failed rounds. Later rounds go straight to the
-status check. An idle reply is followed by 350 ms and two matching geometry
-observations. This slower fallback does not add an idle gate to the immediate
-geometry path. A nonempty unknown reply preserves the firmware guard and
-moves to the next supported polarity; an identity that changes on confirmation
-fails. All delays start at the actual monotonic scheduling time, so work
-already done in the main-loop callback cannot shorten the requested wait.
+Unknown nonempty geometry prevents unidentified ROM recovery on that
+connection. Changing identity, failed variant validation, transfer errors and
+cancellation stop discovery rather than becoming permission to upload.
+Explicit boot-only discovery retains its separate ROM entry sequence.
 
-If application probes and legacy wake fail, factory wake and verified `c6=01`
-negotiation retry identification on each supported polarity. This state-changing
-fallback requires repeated IDs and the FT9391 variant check. It never writes
-unknown-family FD/FE pad-voltage controls. Negative results require successful
-reset cleanup; I/O, conflicting identity and cleanup errors stop discovery.
-Known unsupported IDs cannot fall through to legacy firmware recovery. See
-[factory negotiation](special-probe.md).
+The earlier A1 hardware results covered a different discovery order. The
+reference-based sequence now performs special-family reset/retry before legacy
+status and geometry, even for a running legacy application. It needs A1
+revalidation; neither preservation nor erasure of runtime RAM across reset is
+assumed from software tests. Corrected GPD reopen latency also needs measurement.
 
-There is no second legacy wake after factory negotiation. Already identified
-families skip the fallback, and explicit boot-only discovery retains its ROM
-entry sequence. A failed/cancelled soft wake does not trigger an additional
-hardware reset or claim verified idle.
+The later Windows outer rounds include a 300 ms FT9368 recovery and eventually
+force an unconfirmed family into a firmware loader. Linux stops at reliable ROM
+identification instead of reproducing those guesses, defaulting an unknown
+boot-A reply to FT9338, or retaining an old global identity after unknown
+geometry. This is the explicit limit of the reproduced factory path.
 
 ### ROM identity and upload authorization
 

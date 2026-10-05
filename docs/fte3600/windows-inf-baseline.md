@@ -30,6 +30,24 @@ The CAB contains 7 files: one INF, one CAT, `ftWbioUmdfDriverV2.dll`, `ftWbioEng
 `ftWbioSensorAdapter.dll`, `ftWbioStorageAdapter.dll`, and `focalFpSrvcDeamon.exe`. There is no
 separately named firmware file; firmware embedded in a binary is still possible.
 
+### Later daemon cross-check: 2026-10-05
+
+The package's `focalFpSrvcDeamon.exe` is 296,968 bytes, SHA-256
+`ab44e8c505e9dd6d627ec2df0730700ebbcb2c284124e0cce1d82a9214e34033`.
+This later binary check supplements the original INF-only scope.
+
+RVA `2290` enumerates biometric device nodes; `2392/23a8` filters for
+`VID_2808` or `VEN_FTE`. `23e0` queries device-node status, and the error-code
+mask selects 10, 31, 37 and 43. `2413/242d` call helper `2130` to disable and
+then enable the selected node through `DIF_PROPERTYCHANGE`. This confirms a
+device-error recovery service rather than merely a copied executable.
+
+A separate branch logs "reboot usbhub" at `249a`, searches for `VID_0000`
+at `2578`, and calls the same device-node disable/enable helper at
+`25b2/25cd`. The log does not prove a reset of the entire USB hub or a physical
+sensor reset pulse. This does not establish a need for an equivalent service
+on the Linux ACPI/SPI path.
+
 <a id="完整设备映射仅限此-inf"></a>
 
 ## Complete device mapping in this INF

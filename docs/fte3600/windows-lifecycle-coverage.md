@@ -117,7 +117,7 @@ path in this checkpoint was not proof of complete recovery behavior.
 
 | Family/stage | Windows evidence | Finding |
 | --- | --- | --- |
-| Wake before legacy identification | `24221 → 28344 → 270E4 → 28C54`: two 70 commands, 5 ms, MCU check, at most six rounds and 350 ms after success | Slow-start fallback exists; the A1 fast path and 2 ms after the second 70 are retained independent optimizations |
+| Wake before legacy identification | `24221 → 28344 → 270E4 → 28C54`: two 70 commands, 5 ms, MCU check, at most six rounds and 350 ms after success | This checkpoint retained an A1 fast path and an extra 2 ms. The later [factory restoration](dynamic-discovery.md) removes both and restores MCU-before-geometry ordering |
 | FT9338/FT9536 RAM recovery | `365C0` uploads; failed comparison at `368DA` returns; only after `3691B` does startup occur | Double reset follows complete matching readback only; failure releases reset and invalidates the session. Refusing to guess an initially unidentified FT9338 is independent policy |
 | FT9348/FT9361 A8 upload | `397EA` enters download, `3982D` uploads, `3983A` waits 2 ms, `39866` starts | Order checked; Windows also lacks legacy38-style complete RAM readback in this path |
 | Legacy stop | `28668 → 28C54`: two 70 commands, mode-dependent clearing of 1E/1F and 10 ms wait | Main stop rule checked; bounded exit after unrelated IRQs is independent policy |
@@ -130,6 +130,27 @@ path in this checkpoint was not proof of complete recovery behavior.
 This investigation did not recheck every AFE field, FT9368 PRAM/flash error
 branch, per-family cancellation path or D0/Modern Standby condition. Those
 remain within the scope of a complete-port audit.
+
+## Private controls and POA cross-check: 2026-10-05
+
+These additional observations use the same UMDF DLL and RVA convention as
+this report. A private IOCTL name does not establish the sensor command or
+operating-system authentication effect behind it.
+
+| Control or path | Verified behavior | Limit |
+| --- | --- | --- |
+| APP_EXIT `0044202c` | Dispatcher `35060/353ee` reaches `2ae30/2b0b4→290f4`, clears global `1a9322`, and conditionally calls WDF table slot `7c8` | This releases an idle-prevention reference through ResumeIdle; it is not a direct C1 transaction or proof of immediate chip sleep |
+| APP_LOCK / APP_UNLOCK | `29184` conditionally calls StopIdle and power-button policy helper `2cce8`; `29608` clears state and calls ResumeIdle | These are driver state and power-policy controls, not evidence of an account lock or unlock |
+| APP_MATCH_3_FAIL / APP_MATCH_OK | `2956c` sets `168863`; FW9369 consumer `1052d` clears it and enters finger/baseline rechecking. `2946c` clears this and other state, with conditional power-button policy restoration | The names alone do not establish account lockout after three failures or successful authentication of a user |
+| FT9368 POA | `38360/38af0` sends F080/read-four in scene 2. `26c5c` sends FF00, waits 5 ms, reads six bytes at 9180 and checks byte 2 for `11`. A related `38be0/38494/384c0` path starts a thread and calls `28cc4(1)`, waits 400 ms, then `28cc4(0)` | This establishes a conditional touch/notification path. It does not establish UEFI image acquisition, cross-boot image handoff, or guaranteed authentication without another touch |
+
+The slot interpretation is corroborated by Microsoft's
+[UMDF 2.15 function indices](https://raw.githubusercontent.com/microsoft/Windows-Driver-Frameworks/main/src/publicinc/wdf/umdf/2.15/wdffuncenum.h):
+248/249 correspond to StopIdleActual/ResumeIdleActual. See also
+[WdfDeviceResumeIdle semantics](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfdevice/nf-wdfdevice-wdfdeviceresumeidle).
+These observations do not change the Linux close policy or add an unconditional
+POA operation. The complete public Windows close-to-chip-command chain remains
+separate from the private APP_EXIT handler.
 
 <a id="为什么此前测试没有发现"></a>
 

@@ -14,6 +14,9 @@ source section, line number, original fields, expanded path, type flags, value, 
 references from all four installation paths. This is a static analysis of installation declarations;
 no driver was installed and no physical device registry was read.
 
+The later [engine-adapter cross-check](#engine-adapter-cross-check-2026-10-05)
+adds selected binary data-flow evidence without changing the INF counts above.
+
 <a id="已确认的差异"></a>
 
 ## Confirmed differences
@@ -87,7 +90,35 @@ name.
 
 The vendor spelling `ValidErea*` is preserved. `Center` / `*Edge` must not be treated as pixel-crop
 dimensions, and matching thresholds must not be copied directly into libfprint's independent
-matcher. Their readers and downstream data flow need to be established first.
+matcher. The engine cross-check below identifies the former as enrollment sample
+requirements; several algorithm thresholds still lack a complete downstream interpretation.
+
+## Engine-adapter cross-check: 2026-10-05
+
+Sample: `ftWbioEngineAdapter.dll`, 1,287,336 bytes, SHA-256
+`2e70ec5599e5269fb9f7999a111d67a5ccd644e4a30b45f139d718f43e809004`.
+Addresses in this section are RVAs in that engine DLL, not in the UMDF driver.
+This check evaluates specific claims in an external package-analysis report;
+it does not reproduce the proprietary matcher or establish its accuracy.
+
+| Claim | Verified data flow and limit |
+| --- | --- |
+| `Center` and edge values are pixel crop dimensions | Incorrect. `B950` is `EngineAdapterQueryExtendedInfo`; `BABE–BB5F` writes them into output offsets `10/14/18/1c/20`. These are the center/top/bottom/left/right enrollment sample requirements, not image coordinates. The INF defaults total 18 regional samples. |
+| `4740` reads all 17 keys | Incorrect. Function `4740–48f2` reads seven: AlgMaxTemplates, EnrollMaxTemplates, EnrollScore, VerifyLevel, UpdateLevel, QualityScore and ValidEreaScore. Other values need their own readers traced. |
+| VerifyLevel=15 is a demonstrated independent FAR threshold | Not established. The stores at `4843` and `4870` for VerifyLevel and UpdateLevel target the same global `1504ec`. Later diagnostics at `73f8/7410` distinguish separate verify/update structure fields. The registry reader alone neither establishes the operative verify setting nor provides a measured FAR mapping. |
+| ValidEreaScore=75 proves 75% sensor coverage | Only the normalization is established: `48b5–48cd` divides by 100; `73bd` labels it `valid_area_scale`, and `d98e→24150` supplies it to a setting operation. The denominator and region used by the actual acceptance decision were not established by this check. |
+| EnrollScore=100 rejects every image with quality below 100 | The value reaches `1504d8`, labelled `enroll_score_threshold` at `735a`. Equating this with an individual image-quality score requires the downstream decision rule, not just the name. |
+| NonFingerDetect=0 proves that liveness detection is disabled | The cited `91539` is inside the string `focal_SetNonFingerDetectVer`, not a parameter address. `d9f9→d9fb→241a0` supplies detection version zero; `d923/d92c` separately configure enrollment and verification non-finger detection. This does not prove that all non-finger detection, or liveness detection, is disabled. |
+
+The sample-count interpretation is corroborated by Microsoft's
+[WINBIO_EXTENDED_ENGINE_INFO definition](https://learn.microsoft.com/en-us/windows/win32/secbiomet/winbio-extended-engine-info),
+which specifies the required good enrollment samples for each region.
+
+Mayflower source paths, function names and diagnostic strings are present
+(for example `1775b` and `1bba5`). Such strings identify implementation leads;
+they do not constitute embedded source text or a complete reconstruction of
+the BRISK/MFS matching and quality decisions. None of these values is imported
+into the independent Linux matcher on the strength of a name alone.
 
 <a id="设备配置四条路径共用"></a>
 
