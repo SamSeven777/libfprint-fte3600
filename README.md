@@ -1,71 +1,54 @@
-# Experimental FTE3600 sensor-family Linux support
+# FTE3600 support for libfprint
 
-**The current transport uses stock spidev, an ACPI reset GPIO and an IRQ-only
-UIO companion.** Follow the [installation and migration guide](docs/fte3600/acpi-spidev.md)
-when upgrading from the earlier custom SPI bridge. This is still experimental
-downstream support; the glue is not included in the upstream kernel.
+This downstream libfprint fork implements experimental Linux support for eight
+FocalTech sensor profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368,
+FW9369 (silicon ID 9362), and FT9769 (IDs 9391/9392).
 
-This downstream libfprint fork implements runtime-selected SPI capture for
-FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 (silicon ID 9362) and
-FT9769 (9391/9392). It implements external RAM recovery for FT9348/FT9361,
-explicit FT9368 flash updates, and opt-in BRISK enrollment/verification for all
-eight identified chips. Templates are bound to the chip and image-processing
-profile; sharing the matcher does not make different sensors' templates interchangeable.
-FT9536 supports positively identified boot-A RAM recovery; FT9338-family boot-B
-recovery additionally requires a matching runtime identity observed during the
-current open. An unidentified blank FT9338 is not guessed from an absent reply.
-New paths have software test coverage, not hardware
-qualification or population-accuracy certification.
+The current `main` uses the distribution's **stock spidev** for SPI transfers
+and a small **ACPI reset/IRQ glue module** for board resources. Sensor identity
+is detected at runtime; there is no laptop-model whitelist. The glue is not
+included in the upstream kernel and still requires a trusted module signature
+where Secure Boot requires one.
 
-The transport uses a small Linux ACPI reset/IRQ glue module instead of a DMI
-model/pin whitelist. SPI data goes through stock spidev. Reset and IRQ may reside on different controllers.
-Chip identity comes from repeated runtime/word-register responses or a
-ROM-family/OTP probe. Discovery can negotiate SPI chip-select polarity when
-ACPI describes it incorrectly, without a machine table. Eight catalogued chips
-now have capture backends across six protocol families. Each backend has its
-own initialization, raw framing and cleanup; this is not a claim that all
-eight have passed physical-device tests. See the [support matrix](docs/fte3600/architecture.md).
+Capture backends exist for all eight profiles. Physical validation varies by
+device, and reports from older transports do not validate the current one.
+Read the [support and hardware status](docs/fte3600/status.md) before testing.
 
-The [architecture](docs/fte3600/architecture.md) separates device lifecycle,
-wire protocol, reusable image matching and build policy. The
-[BRISK core](libfprint/matchers/brisk/README.md) accepts image dimensions and row
-stride, depends only on GLib and libm, and returns numerical match evidence.
-FTE3600 template compatibility and authentication decisions live in adapters.
-New enrollments use a versioned sensor-aware template; existing compatible
-wire-v1 FT9361 templates remain readable. Earlier wire-v2 templates with
-diagnostic policy 6 / authentication policy 7 require re-enrollment after the
-rotation and mosaic-quality corrections. See [family authentication](docs/fte3600/family-authentication.md).
+<a id="build-and-use"></a>
 
-See [dynamic discovery](docs/fte3600/dynamic-discovery.md) for the new module,
-installation/migration, protocol limits and test evidence. Historical A1/GPD/
-Medion observations in [hardware status](docs/fte3600/status.md) do not validate
-this new transport on those machines.
+## Getting started
 
-## Build and use
+1. Follow the [installation guide](docs/fte3600/install.md) for dependencies,
+   chip-specific firmware, build options and rollback.
+2. Follow [ACPI glue and spidev integration](docs/fte3600/acpi-spidev.md) to
+   migrate an older bridge installation and configure the current transport.
+3. Use the [troubleshooting guide](docs/fte3600/troubleshooting.md) to separate
+   resource, permission, identification and capture failures.
 
-Follow the [installation and rollback guide](docs/fte3600/install.md).
-The driver is optional: select `-Ddrivers=fte3600` or
-`-Ddrivers=all,fte3600`. Authentication remains disabled unless
-`-Dfte3600_personal_auth=true` is selected. The downstream Arch package
-explicitly opts into this experimental personal policy.
+Select `-Ddrivers=fte3600` or `-Ddrivers=all,fte3600` when building. Authentication
+is disabled by default; `-Dfte3600_personal_auth=true` enables experimental
+BRISK enrollment and verification. Keep a working password fallback. See
+[authentication and template compatibility](docs/fte3600/family-authentication.md)
+and [security](SECURITY.md) for the validation limits.
 
-Keep a working password fallback. Multi-person, multi-session FAR/FRR for the
-actual eight-template authentication flow remains unmeasured. Do not enable
-experimental biometric authentication for system-wide sudo or root access.
+The board-specific [Medion E3224 diagnostic](https://github.com/SamSeven777/libfprint-fte3600/blob/medion-spidev/docs/fte3600/medion-spidev.md)
+lives on the separate `medion-spidev` branch. Its standalone testing procedure
+is distinct from installing this driver.
 
-- [Security and privacy](SECURITY.md)
-- [Troubleshooting](docs/fte3600/troubleshooting.md)
-- [Implementation and provenance](docs/fte3600/clean-room.md)
-- [Windows hardware and protocol inventory](docs/fte3600/windows-hardware-inventory.md)
-- [Contributing](CONTRIBUTING.md)
+## Documentation and development
 
-The host code is independently written under LGPL-2.1-or-later and does not run
-a vendor matching library. The sensor firmware remains proprietary and is not
-bundled. Protocol knowledge includes Windows transport/binary analysis and
-hardware experiments; no exclusive bus-capture provenance claim is made.
+The **[documentation index](docs/fte3600/README.md)** groups user guides,
+architecture, protocols, Windows research and dated validation records.
 
-See [upstream preparation](docs/fte3600/upstream-preparation.md) for the kernel,
-libfprint and matcher review boundaries and remaining hardware evidence.
-The optional 2D-IPA policy is a separate build choice from BRISK; neither
-policy is qualified by synthetic tests alone. CI configuration and local tests
-do not replace hardware or biometric evaluation.
+- [Architecture](docs/fte3600/architecture.md): driver, transport, protocol,
+  algorithm and build boundaries.
+- [Matcher cores](docs/fte3600/matcher-architectures.md): reusable BRISK and
+  2D-IPA interfaces, separate from sensor protocols.
+- [Contributing](CONTRIBUTING.md): development checks and documentation policy.
+- [Upstream preparation](docs/fte3600/upstream-preparation.md): proposed kernel
+  and libfprint review boundaries and outstanding evidence.
+
+The host implementation is independently written under LGPL-2.1-or-later and
+does not execute a vendor matching library. Proprietary sensor firmware is
+external and is not bundled. [Implementation provenance](docs/fte3600/clean-room.md)
+records the use of Windows binary/transport analysis and hardware experiments.

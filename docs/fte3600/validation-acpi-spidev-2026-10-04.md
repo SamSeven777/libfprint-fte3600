@@ -1,11 +1,14 @@
 # ACPI glue / stock spidev validation — 2026-10-04
 
-Historical checkpoint. The [October 5 release validation](validation-release-2026-10-05.md)
+[Documentation index](README.md)
+
+**Historical checkpoint.** The [October 5 release validation](validation-release-2026-10-05.md)
 records subsequent audit fixes and regression coverage; the counts below
 describe the earlier working tree.
 
 Branch: `acpi-spidev`, based on `1ce4c740ac759b69537312f46ac956e39c4a9b53`.
-The implementation remains uncommitted. No module was loaded, system policy
+The implementation was uncommitted at this checkpoint; it was later published
+with further audit fixes in `6e25b20`. No module was loaded, system policy
 installed, hardware accessed, or upstream submission made during this work.
 
 ## Implemented boundary

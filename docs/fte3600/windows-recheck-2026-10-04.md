@@ -1,112 +1,164 @@
-# Windows 对照复查 — 2026-10-04
+<a id="windows-对照复查--2026-10-04"></a>
 
-**后续覆盖纠正：**本记录只证明下列当时检查的分支，不代表原厂完整生命周期
-已移植。后续发现的普通IRQ、各族睡眠/后台事件、FT9368唤醒重试等问题，
-及 `acpi-spidev` 本轮修复状态，详见
-[生命周期覆盖与未完成项](windows-lifecycle-coverage.md)。下文的测试结果保留为
-对应旧工作树的历史结果，不能用于证明当前acpi-spidev支持全部资源布局。
+# Windows comparison recheck — 2026-10-04
 
-检查对象为 `a59b2e3` 之后的本地工作树，包括 CS 会话清理修复。
-Windows 基线为本地保存的 AMD64 `ftWbioUmdfDriverV2.dll` 2.0.3.102，
-重新计算 SHA-256 为
-`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`。
-本次逐项对照已有原始反汇编与 Linux 状态机，没有执行厂商 DLL 或操作硬件。
-以下地址均为 Windows RVA。仓库只记录协议事实，不收录厂商代码或固件。
+[Documentation index](README.md)
 
-## 发现并修复的问题
+**Historical audit of the pre-ACPI-glue implementation.** This record covers
+the local working tree after `a59b2e3`, including CS-session cleanup changes.
+It establishes only the branches checked below, not a complete port of the
+Windows lifecycle. Later ordinary-IRQ, sleep/background-event and FT9368 wake
+findings are recorded in [lifecycle coverage](windows-lifecycle-coverage.md).
+The counts below belong to that earlier tree and do not validate all current
+stock-spidev/ACPI-glue resource layouts.
 
-### 1. FT9338/FT9536 下载失败仍进入应用启动
+The Windows baseline was the locally retained AMD64
+`ftWbioUmdfDriverV2.dll` from package 2.0.3.102, with recomputed SHA-256
+`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`.
+Its actual PE FileVersion/ProductVersion is 1.0.0.3188; package and file
+versions are distinct. The audit compared original disassembly with Linux
+state machines without executing the vendor DLL or accessing hardware.
+All Windows addresses below are RVAs. Only protocol facts are recorded in
+the repository, not vendor code or firmware.
 
-此前 `fte3600-legacy-recovery.c` 把双硬件复位、等待应用启动及 MCU/几何检查
-放在 SSM 清理区。上传、回读、完整比较失败，甚至取消，都会进入这段流程。
-保留错误码可以阻止最终报告成功，却不能阻止实际发送启动脉冲。
+<a id="发现并修复的问题"></a>
 
-Windows `0x365c0` 的下载路径中，回读失败在 `0x36854–0x368aa` 返回；
-完整比较失败在 `0x368da–0x36916` 返回。只有校验通过，控制流才到
-`0x3691b`，随后在 `0x3693b–0x36948` 调用启动方法 `0x36bd0`。
+## Issues found and fixed
 
-修复将启动与错误清理分开：完整回读一致后才允许进入双脉冲和应用检查。
-失败只尝试释放 reset，并标记会话失效。上层 `fte3600_init_complete` 看到
-失效标记后直接关闭和释放资源，不再额外发送 `70`、读模式或检查 MCU。
-正在进行的 GPIO 脉冲会先完成，再响应取消；原始错误不会被清理错误替换。
+<a id="1-ft9338ft9536-下载失败仍进入应用启动"></a>
 
-这项修复涉及 RAM 恢复失败后的动作，不改变固件身份门槛，也不声称单纯释放
-reset 能证明芯片已回到空闲状态。详细流程见 [legacy38-recovery.md](legacy38-recovery.md)。
+### 1. Failed FT9338/FT9536 download still entered application startup
 
-### 2. 专用身份确认失败被当成“未知设备”继续探测
+Previously, `fte3600-legacy-recovery.c` put the double hardware reset,
+application-start wait and MCU/geometry checks in the state machine's cleanup
+section. Upload, readback or full-comparison failure, and cancellation, could
+all enter that sequence. Preserving the error prevented a successful result
+but did not prevent physical startup pulses.
 
-Windows 主工厂在 `0x2411c–0x24185` 唤醒并配置 C6 后，以真实返回的
-`9362/9365/9391/9392` 选择专用家族。Linux 为防止误识别额外要求重复确认。
+In Windows `0x365c0`, readback failure returns at `0x36854–0x368aa`;
+full-comparison failure returns at `0x368da–0x36916`. Only successful
+validation reaches `0x3691b` and then invokes startup method `0x36bd0`
+at `0x3693b–0x36948`.
 
-此前专用冷探测中，两次 ID 不同，或 `9391` 的细分寄存器 `1816` 校验失败、
-复读不一致，只会清理并返回空结果。父状态机可能继续另一极性乃至 legacy
-ROM 探测；这与直接识别路径的错误处理不一致，也丢失了已观察到的身份异常。
+The fix separated startup from error cleanup. Only a complete, matching
+readback allows the double pulse and application checks. Failure merely
+attempts to release reset and invalidates the session. The parent
+`fte3600_init_complete` then closes resources without sending another
+`70`, reading mode or checking MCU state. An active GPIO pulse completes
+before responding to cancellation, and cleanup errors do not replace the
+original error.
 
-现在 ID 不一致返回协议错误，细分数据 CRC 错误保留校验错误，完成必要 GPIO
-清理后停止整条识别。父层只恢复 CS，不再继续 ROM 回退。稳定的未知响应仍可
-作为未命中处理；稳定的已知不支持型号仍保留其诊断证据。
-这是独立确认策略的修复，不是声称 Windows 也执行了相同的双读确认。
-见 [special-probe.md](special-probe.md)。
+This changes actions after RAM-recovery failure, not firmware identity gates.
+Releasing reset alone is not proof that the chip returned to idle. See
+[legacy38 recovery](legacy38-recovery.md).
 
-## 正常路径核对
+<a id="2-专用身份确认失败被当成未知设备继续探测"></a>
 
-| 项目 | Windows 证据 | 核对结果 |
+### 2. Conflicting special-family identity was treated as an unknown device
+
+The Windows factory path at `0x2411c–0x24185` wakes/configures C6, then selects
+the special family from observed `9362/9365/9391/9392`. Linux independently
+requires repeated confirmation to reduce misidentification.
+
+Previously, special cold probing cleaned up and returned an empty result when
+two IDs differed, or when the `9391` subtype register `1816` had invalid CRC
+or inconsistent repeated values. The parent could try another polarity or
+legacy ROM probing. This discarded positive identity-conflict evidence and
+differed from the direct-read path's handling.
+
+After the fix, inconsistent IDs return a protocol error; invalid subtype CRC
+retains the checksum error. Required GPIO cleanup completes, then discovery
+ends. The parent restores CS without continuing to ROM fallback. Stable unknown
+responses can remain a miss; stable known-but-unsupported models retain their
+diagnostic evidence.
+
+This repairs Linux's independent confirmation policy; it does not claim
+Windows used the same double-read rule. See [special probing](special-probe.md).
+
+<a id="正常路径核对"></a>
+
+## Normal-path checks
+
+| Item | Windows evidence | Finding within the checked scope |
 | --- | --- | --- |
-| reset 输出 | `0x2f5e0`，`0x31414 → 0x3106c` | 原始 pin 值 `1 → 10 ms → 0 → 20 ms → 1` 原样传入 GPIO 写请求。Linux active-low 描述符下逻辑 `0/1/0` 对应同一 H/L/H 目标。尚非实测波形证明。 |
-| SPI 传输 | `0x30cbc–0x30e08` | 原厂以同长度 TX/RX 构成全双工请求；Linux bridge 的同一 `spi_transfer` 同时收发与此一致，未发现应增加额外时钟的依据。 |
-| legacy 唤醒 | `0x28c54`、`0x28344`、`0x2422a` | 两个独立单字节 `70`，间隔 5 ms；最多六轮；MCU 空闲后等 350 ms。Linux 保留 A1 已验证的尾部 2 ms 和重复几何快速确认，再使用慢启动回退。 |
-| FT9348/FT9361 A8 上传 | `0x39730`、`0x39c50` | `55 aa`、完整上传、2 ms、双硬复位、160 ms、双 `70` 的顺序相符。上传失败到不了启动双脉冲；原厂这条路径也没有 38 家族式完整 RAM 回读。 |
-| FT9338/FT9536 上传 | `0x365c0`、`0x36bd0` | 四字节配置、20 ms、完整上传、2 ms、完整回读、80/180 ms 启动等待相符；本次修正错误分支。 |
-| 四款 legacy 图像 | `0x2e990 → 0x2f020` | `3400`、帧长 `N+8`、像素偏移 8、逐字节反相相符。FT9536 使用模式寄存器 `47`，其余三款为 `76`。 |
-| FW9369 / raw ID `9362` | `0x10d70`、`0x186b0`、`0x17000`、`0x18208`、`0x180f4` | 身份/制程选择、手动扫描、FIFO 帧结构相符；完整帧为 6 字节头加 10,240 字节像素。 |
-| FT93xx / `9365,9391,9392` | `0x19978`、`0x1aa7c`、`0x1ebe0`、`0x21ed0`、`0x21f94` | FD/FE、C6、ADC 窗口和积分设置、每包最多 1,790 字节负载、额外 4 行、像素掩码及 9392 换序相符。`9391 + 1816=0fff` 不可误选 FT9769。 |
-| FT9368 | `0x2444e`、`0x384f0`、`0x38670`、`0x25328`、`0x266b4` | 常规 INFO/清理、7 字节头加 5,120 字节像素，以及显式更新的 PRAM 回读、flash 分包校验顺序相符。 |
+| Reset output | `0x2f5e0`, `0x31414 → 0x3106c` | Raw pin values `1 → 10 ms → 0 → 20 ms → 1` are passed unchanged to GPIO writes. Linux logical `0/1/0` through an active-low descriptor requests the same H/L/H waveform. This is not a measured waveform. |
+| SPI transfer | `0x30cbc–0x30e08` | Windows constructs equal-length TX/RX full-duplex requests. The old Linux bridge's simultaneous TX/RX in one `spi_transfer` matched this; no evidence required extra clocks. |
+| Legacy wake | `0x28c54`, `0x28344`, `0x2422a` | Two separate one-byte `70` commands, 5 ms apart, up to six rounds, then 350 ms after MCU idle. Linux retained the validated A1 trailing 2 ms/repeated-geometry fast path before slow fallback. |
+| FT9348/FT9361 A8 upload | `0x39730`, `0x39c50` | `55 aa`, complete upload, 2 ms, double hardware reset, 160 ms and double `70` follow the checked order. Upload failure cannot reach startup pulses. Windows also lacks legacy38-style complete RAM readback here. |
+| FT9338/FT9536 upload | `0x365c0`, `0x36bd0` | Four-byte preparation, 20 ms, complete upload, 2 ms, complete readback and 80/180 ms startup waits match. This audit corrected the error branch. |
+| Four legacy image formats | `0x2e990 → 0x2f020` | `3400`, frame length `N+8`, pixel offset 8 and byte inversion match. FT9536 uses mode register `47`; the other three use `76`. |
+| FW9369 / raw ID `9362` | `0x10d70`, `0x186b0`, `0x17000`, `0x18208`, `0x180f4` | Identity/process selection, manual scan and FIFO framing match; a complete frame has a six-byte header and 10,240 pixel bytes. |
+| FT93xx / `9365,9391,9392` | `0x19978`, `0x1aa7c`, `0x1ebe0`, `0x21ed0`, `0x21f94` | FD/FE, C6, ADC windows/integration, at most 1,790 payload bytes per packet, four extra rows, pixel masking and 9392 reordering match. `9391 + 1816=0fff` must not select FT9769. |
+| FT9368 | `0x2444e`, `0x384f0`, `0x38670`, `0x25328`, `0x266b4` | The checked INFO/cleanup paths, seven-byte header plus 5,120 pixel bytes, and explicit-update PRAM readback/flash-packet verification order match. Later wake-path gaps are documented separately. |
 
-“相符”只覆盖表中已核查的报文和控制流，不代表全部寄存器含义、OEM 差异、
-校准算法或冷启动分支都已验证。FT9769 的主工厂响应是 `9391/9392`；
-类名、芯片读数和实际整机型号不能互换。
+“Match” is limited to the listed messages and control flow. It does not validate
+all register meanings, OEM differences, calibration algorithms or cold-start
+branches. FT9769's main factory responses are `9391/9392`; class names, raw
+chip values and computer model names are not interchangeable.
 
-## 保留的独立设计与验证边界
+<a id="保留的独立设计与验证边界"></a>
 
-- **CS：**原厂 `0x2eb20 → 0x303bc` 使用 ACPI connection ID 打开 Resource Hub。
-  在已核查链中没有找到双 CS 校正。Linux 的双极性尝试和最终关闭时恢复是
-  独立设计；恢复进入会话前的值不保证该值电气正确，也不隔离共享总线。
-- **ACPI：**Windows 选择首个匹配资源；Linux 要求资源角色不歧义。
-  不同 GPIO 控制器或 reset/IRQ 交错不会改变 GpioInt 自身的索引语义。
-- **C6 重试：**Windows 共享 helper `0xfd94` 最多 31 次，Linux 冷探测最多 4 次，
-  每次等 4 ms。该较短上限是现有策略；是否需要扩大必须结合慢响应设备证据，
-  本次不把差异写成已经证明的硬件故障。
-- **FT9338 全空白首次启动：**Linux 不采用 Windows `FE!=02` 或 OTP=`FF` 的
-  默认分类。没有可靠身份仍不自动选固件；Medion 的显式候选实验路径保持独立。
-- **A8 上传失败后的软件复位：**主流程不会发启动双硬脉冲，但上层仍可能发
-  legacy `70` 清理。尚无证据证明它在 A8 下载态等价于启动未验证 RAM，
-  不能与本次已证明的 38 家族缺陷混为一谈。
-- **校准与待机：**FW9369 的无遮挡基线检查、FT93xx 的曝光/纹理判定是独立
-  主机算法；不能宣称复现全部 Windows FDT/OTP 校准。FT93xx 保持已验证的
-  awake idle，未照搬 Windows `0x1a804` 最后的 `A5`；全型号等效性待实测。
-- **FT9368 冷恢复：**显式 flash 更新先要求有效应用身份，不覆盖原厂所有
-  无应用 ROM 恢复分支。legacy RAM 恢复与 FT9368 flash 更新已在来源说明中区分。
+## Independent decisions and evidence limits
 
-同时修正了旧说明中“当前只实现 FT9361”和“任意 `_DSD` reset 极性优先”的
-过期表述。现在有八个后端；reset 属性冲突会在输出引脚前被拒绝。
+- **CS:** Windows `0x2eb20 → 0x303bc` opens Resource Hub using the ACPI
+  connection ID. The checked chain did not show dual-CS correction. Linux's
+  polarity trials and restoration were independent decisions. Restoring a
+  session's original value did not establish electrical correctness or
+  shared-bus isolation. Current stock-spidev restoration has different process
+  lifetime limits; see [the current transport](acpi-spidev.md).
+- **ACPI:** Windows selects the first matching resource; Linux requires
+  unambiguous roles. Different GPIO controllers or interleaved reset/IRQ
+  resources do not change GpioInt's index semantics.
+- **C6 retries:** Windows helper `0xfd94` allows at most 31 attempts. Linux
+  cold probing allowed four, each with a 4 ms wait. This shorter bound was a
+  policy difference; slow-device evidence was needed before calling it a
+  demonstrated hardware failure.
+- **First completely blank FT9338 boot:** Linux does not adopt Windows'
+  `FE!=02` or OTP=`FF` default classification. No reliable identity means
+  no automatic firmware choice. The Medion explicit-candidate experiment is
+  separate.
+- **Software reset after failed A8 upload:** Startup double hardware pulses
+  are unreachable after failure, but the parent can still issue legacy `70`
+  cleanup. There was no evidence that this starts unverified RAM in A8 download
+  state; it must not be conflated with the demonstrated legacy38 defect.
+- **Calibration and standby:** FW9369's uncovered-baseline checks and FT93xx's
+  exposure/texture decisions are independent host algorithms, not a complete
+  implementation of Windows FDT/OTP calibration. FT93xx keeps verified awake
+  idle instead of the final `A5` at `0x1a804`; equivalence across hardware
+  remains unmeasured.
+- **FT9368 cold recovery:** Explicit flash update requires valid application
+  identity first and does not cover every Windows no-application ROM recovery
+  branch. This is distinct from legacy RAM recovery.
 
-## 验证记录
+The audit also corrected stale descriptions of FT9361-only support and
+unconditional `_DSD` reset-polarity precedence. There were eight sensor profiles
+across four backend modules, not eight separate backend implementations.
+Conflicting reset properties were rejected before driving the output.
 
-新增专用身份变化回归在修复前复现了“应报错却返回空成功”；修复后专项通过。
-测试还检查父状态机没有继续发 ROM 查询、CS 被恢复及首个错误被保留。
-38 家族测试覆盖两款芯片所有八笔启动前 SPI 交易失败、末字节回读不符、
-上传/回读/启动中取消，以及 GPIO 清理失败。
+<a id="验证记录"></a>
 
-在 Ubuntu 24.04 / WSL、GCC 13.3、警告视为错误的构建下：
+## Validation at that checkpoint
 
-| 配置 | 通过套件 | 专用探测 | 38 家族恢复 | 完整生命周期 |
+A new identity-change regression reproduced “error expected, empty success
+returned” before the fix and passed afterward. Tests also checked that the
+parent sent no further ROM query, restored CS and retained the first error.
+Legacy38 tests covered failures in all eight pre-start SPI transactions for
+both chips, a mismatch in the last readback byte, cancellation during
+upload/readback/startup, and GPIO-cleanup failure.
+
+Ubuntu 24.04/WSL, GCC 13.3, warnings treated as errors:
+
+| Configuration | Passing suites | Special probe | Legacy38 recovery | Complete lifecycle |
 | --- | ---: | ---: | ---: | ---: |
-| 认证与 IPA 关闭 | 26 | 21 | 39 | 120 |
-| 认证与 IPA 开启 | 26 | 21 | 39 | 123 |
-| ASan + UBSan，三个受影响套件 | 3 | 21 | 39 | 123 |
+| Authentication and IPA off | 26 | 21 | 39 | 120 |
+| Authentication and IPA on | 26 | 21 | 39 | 123 |
+| ASan + UBSan, three affected suites | 3 | 21 | 39 | 123 |
 
-所有选定套件通过，无失败。两组完整矩阵各跳过一个需要外部 FT9361 固件的
-可选子用例；三个受影响套件没有跳过。上轮 CS 修复的 49 个策略测试及
-Linux 6.8 `W=1` 模块编译结果仍适用，本轮没有继续改动内核代码。
+All selected suites passed. Each complete normal matrix skipped one optional
+case requiring external FT9361 firmware; the three affected suites had no
+skips. The preceding CS fix's 49 policy tests and Linux 6.8 `W=1` module build
+remained applicable to that old bridge; this audit made no further kernel
+change.
 
-没有 A1、Medion 或 GPD 的新实机数据，不能据此宣布任一整机已通过验证。
+No new A1, Medion or GPD hardware evidence was obtained, so these results did
+not establish validation of any complete computer.

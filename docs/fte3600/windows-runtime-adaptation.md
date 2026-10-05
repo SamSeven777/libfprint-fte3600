@@ -1,162 +1,247 @@
-# Windows 驱动如何适配不同硬件
+# How the Windows driver adapts to different hardware
 
-分析日期：2026-10-04。对象为前两步同一 CAB 中的 AMD64 `ftWbioUmdfDriverV2.dll`，版本来自配套 INF：`2.0.3.102`。DLL 大小 1,515,192 字节，SHA-256：
+[Documentation index](README.md)
+
+<a id="windows-驱动如何适配不同硬件"></a>
+
+Analysis date: 2026-10-04. Sample: AMD64 `ftWbioUmdfDriverV2.dll` from the same CAB as the two
+preceding analysis steps. The accompanying INF declares package version `2.0.3.102`. The DLL is
+1,515,192 bytes, with SHA-256:
 
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`
 
-DLL 自身 PE FileVersion / ProductVersion 为 `1.0.0.3188`；不要把 INF 包版本
-当作文件版本。完整生命周期尚未核对完毕，范围见[覆盖记录](windows-lifecycle-coverage.md)。
+The DLL's own PE FileVersion / ProductVersion is `1.0.0.3188`; the INF package version must not be
+substituted for the file version. Verification does not yet cover the complete lifecycle; see the
+[coverage record](windows-lifecycle-coverage.md).
 
-## 结论
+<a id="结论"></a>
 
-**没有按笔记本型号拆分 INF，不等于没有硬件适配。该 DLL 把适配分为总线选择、主板资源绑定、传感器识别和具体实现选择四层。**
+## Findings
 
-1. 查询 Windows 枚举器名称，选择 USB 或 SPI 传输对象。
-2. SPI 路径消费 Windows 传入的连接资源和中断资源，通过 Resource Hub 打开本机的 SPI/GPIO 连接。
-3. 按芯片响应、运行固件状态、启动版本、OTP 等信息判断传感器类型。
-4. 创建不同传感器对象，由对象关联的固件、初始化和采集方法完成操作。
+**An INF without separate laptop-model branches still supports hardware adaptation. This DLL
+separates adaptation into bus selection, board-resource binding, sensor detection, and
+implementation selection.**
 
-这些结论来自实际指令、调用、比较分支和数据指针，日志字符串仅用于辅助命名。没有执行厂商 DLL、安装驱动或操作硬件。原始二进制及反汇编保存在仓库外的工作目录；本文只记录分析事实和证据定位。
+1. Query the Windows enumerator name and select a USB or SPI transport object.
+2. On SPI, consume the connection and interrupt resources supplied by Windows and open the local
+   SPI/GPIO connections through Resource Hub.
+3. Determine sensor type from chip responses, application-firmware state, boot version, OTP, and
+   related evidence.
+4. Create a sensor-specific object whose associated firmware, initialization, and capture methods
+   perform the operations.
+
+These findings come from actual instructions, calls, comparisons, and data pointers. Log strings
+only assist naming. The vendor DLL was not executed, no driver was installed, and no hardware was
+operated. Original binaries and disassembly remain in a workspace outside the repository; this
+document records only analytical facts and evidence locations.
 
 ```mermaid
 flowchart TD
-  A[INF 匹配设备] --> B[查询 USB 或 ACPI 枚举器]
-  B --> C[USB 传输对象]
-  B --> D[SPI 传输对象]
-  E[主板 ACPI 描述] --> F[Windows 分配连接 ID 与中断资源]
+  A[INF device match] --> B[Query USB or ACPI enumerator]
+  B --> C[USB transport object]
+  B --> D[SPI transport object]
+  E[Board ACPI description] --> F[Windows assigns connection IDs and interrupt resources]
   F --> D
-  C --> G[读取芯片响应与启动状态]
+  C --> G[Read chip response and boot state]
   D --> G
-  G --> H[必要时检查 OTP 或寄存器行为]
-  H --> I[选择具体传感器对象]
-  I --> J[对应固件、初始化与采集路径]
+  G --> H[Check OTP or register behavior when needed]
+  H --> I[Select sensor object]
+  I --> J[Associated firmware, initialization, and capture path]
 ```
 
-图示表达分层关系；实际启动还有固件已运行、无运行固件、专用芯片探测及恢复重试分支，并非所有设备都经过完全相同的步骤。
+The diagram shows the layers. Actual startup also branches for running firmware, absent application
+firmware, special-chip probes, and recovery retries; not every device follows an identical sequence.
 
-## 证据定位规则
+<a id="证据定位规则"></a>
 
-下文地址均为 **RVA（相对 DLL 映像基址）**，不是文件偏移。此 DLL 的首选映像基址为 `0x180000000`。PE 的 `.pdata` 提供函数范围，Capstone 5.0.9 用于指令解码，pefile 2024.8.26 用于 PE 映射。函数标签来自被实际引用的日志及调用关系，不是取得了厂商源码或 PDB。
+## Evidence-location conventions
 
-## 1. 总线在运行时选择
+All addresses below are **RVAs relative to the DLL image base**, not file offsets. This DLL's
+preferred image base is `0x180000000`. PE `.pdata` supplies function ranges; Capstone 5.0.9 was used
+for instruction decoding and pefile 2024.8.26 for PE mapping. Function labels derive from referenced
+logs and call relationships, not vendor source code or a PDB.
 
-主入口 `0x23D80` 中，`0x23DDF` 调用 `0x27C08` 查询设备枚举器；后者通过 WDF 表项 `0xF8 / 8 = 31` 查询属性 `0x0F`。随后分别比较宽字符串 `USB` 与 `ACPI`（字符串 RVA `0x43678`、`0x43680`），设置内部总线值 1 或 2。
+<a id="1-总线在运行时选择"></a>
 
-`0x23DF2` 调用接口工厂 `0x23558`，其两个分支分别调用 USB 构造函数 `0x3145C` 和 SPI 构造函数 `0x2DAB0`。主入口随后通过选中的接口对象调用硬件准备方法。
+## 1. Runtime bus selection
 
-WDF 表索引及属性含义分别对照 [UMDF 2.15 函数枚举](https://raw.githubusercontent.com/microsoft/Windows-Driver-Frameworks/main/src/publicinc/wdf/umdf/2.15/wdffuncenum.h) 和 [UMDF 2.15 类型定义](https://raw.githubusercontent.com/microsoft/Windows-Driver-Frameworks/main/src/publicinc/wdf/umdf/2.15/wudfwdm.h)。这比只看到 `clsSpiDev` / `clsUsbDev` 字符串更强：实际构造分支已连接到启动入口。
+Within main entry `0x23D80`, `0x23DDF` calls `0x27C08` to query the device enumerator. The latter
+queries property `0x0F` through WDF table entry `0xF8 / 8 = 31`. It then compares wide strings `USB`
+and `ACPI` (string RVAs `0x43678`, `0x43680`) and sets internal bus value 1 or 2.
 
-## 2. 主板接线通过资源描述传入
+`0x23DF2` calls interface factory `0x23558`, whose two branches invoke USB constructor `0x3145C` and
+SPI constructor `0x2DAB0`. The main entry then invokes hardware preparation through the selected
+interface object.
 
-SPI 硬件准备函数位于 `0x2EB20`。可核实的行为如下：
+WDF table indices and property meanings were checked against the
+[UMDF 2.15 function enumeration](https://raw.githubusercontent.com/microsoft/Windows-Driver-Frameworks/main/src/publicinc/wdf/umdf/2.15/wdffuncenum.h)
+and
+[UMDF 2.15 type definitions](https://raw.githubusercontent.com/microsoft/Windows-Driver-Frameworks/main/src/publicinc/wdf/umdf/2.15/wudfwdm.h).
+This is stronger evidence than simply finding `clsSpiDev` / `clsUsbDev` strings: the constructor
+branches are connected to the startup entry.
 
-| 证据位置 | 实际行为 |
+<a id="2-主板接线通过资源描述传入"></a>
+
+## 2. Board wiring arrives through resource descriptions
+
+SPI hardware preparation is at `0x2EB20`. Its verified behavior is:
+
+| Evidence location | Actual behavior |
 | --- | --- |
-| `0x2EB9D`、`0x2EBFE` | 调用 WDF 表项 `0x5D0`、`0x5D8`，即索引 186/187 的资源数量查询和资源描述符查询 |
-| `0x2EC38`、`0x2EC41` | 区分中断资源 `Type=2` 和连接资源 `Type=0x84` |
-| `0x2EC57–0x2EC62` | 连接 `Class=2, Type=2` 进入 SPI 分支 |
-| `0x2ED43–0x2ED4E` | 连接 `Class=1, Type=2` 进入 GPIO I/O 分支 |
-| `0x2EC7D–0x2ECC7` | 从描述符取连接 ID 低/高 32 位，传给 SPI 目标创建函数 `0x303BC` |
-| `0x2ED66–0x2EDB4` | 从 GPIO 描述符取连接 ID，传给 GPIO 目标创建函数 `0x2FF10` |
-| `0x2EE1A–0x2EE6B` | 保存第一个中断资源的索引，调用中断创建函数 `0x301E8` |
-| `0x2EF18–0x2EF2E` | 检查 SPI、GPIO 和中断三类资源是否均已找到；缺少时返回 `0xC0000225` |
+| `0x2EB9D`, `0x2EBFE` | Call WDF entries `0x5D0`, `0x5D8`, indices 186/187, for resource count and descriptor queries |
+| `0x2EC38`, `0x2EC41` | Distinguish interrupt resource `Type=2` from connection resource `Type=0x84` |
+| `0x2EC57–0x2EC62` | Connection `Class=2, Type=2` enters the SPI branch |
+| `0x2ED43–0x2ED4E` | Connection `Class=1, Type=2` enters the GPIO I/O branch |
+| `0x2EC7D–0x2ECC7` | Read the connection ID's low/high 32 bits and pass them to SPI-target creation at `0x303BC` |
+| `0x2ED66–0x2EDB4` | Read the GPIO connection ID and pass it to GPIO-target creation at `0x2FF10` |
+| `0x2EE1A–0x2EE6B` | Save the first interrupt resource's index and call interrupt creation at `0x301E8` |
+| `0x2EF18–0x2EF2E` | Require SPI, GPIO, and interrupt resources; return `0xC0000225` if any are missing |
 
-常量和结构成员布局与 [Microsoft 资源描述符文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_cm_partial_resource_descriptor) 及上述 UMDF 头文件一致。
+Constants and structure layouts agree with the
+[Microsoft resource-descriptor documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_cm_partial_resource_descriptor)
+and the UMDF headers above.
 
-SPI/GPIO 目标创建函数分别在 `0x30511–0x305F5` 和 `0x30065–0x30149` 把连接 ID 格式化为 Resource Hub 设备路径，调用 WDF 目标创建/打开方法。中断创建函数使用同一索引取原始及转换后的描述符，再调用索引 72 的 `WdfInterruptCreate`。
+SPI/GPIO target creation at `0x30511–0x305F5` and `0x30065–0x30149` formats connection IDs into
+Resource Hub device paths and calls WDF target creation/open methods. Interrupt creation uses the
+same index to retrieve both raw and translated descriptors, then calls `WdfInterruptCreate` at index
+72.
 
-这里的 Type=2 是 Windows 的通用中断资源，**并不要求原始 ACPI 写成 GpioInt**。
-GPIO来源和普通Interrupt都可以由系统交付这种资源；见
-[微软说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-interrupt-resources)。
-已查的创建路径没有修改描述符flags来纠正极性。当前Linux仅接受GpioInt的限制
-已被GPD新报告证实会阻断正常Interrupt布局，不能再只当作未发生的理论边界。
-资源准备、后台IRQ和芯片电源处理的未完成项见
-[生命周期覆盖表](windows-lifecycle-coverage.md)。
+Here, Type=2 is a generic Windows interrupt resource; **the original ACPI does not have to use
+GpioInt**. GPIO-based and ordinary Interrupt resources can both be delivered this way; see
+[Microsoft's explanation](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-interrupt-resources).
+The examined creation path does not change descriptor flags to correct polarity. An earlier Linux
+restriction to GpioInt was shown by the GPD report to block a real ordinary-Interrupt layout. The
+current glue handles both resource forms through the shared IRQ interface; see
+[current transport](acpi-spidev.md). Untraced resource-preparation, background-IRQ, and chip-power
+behavior remains listed in [lifecycle coverage](windows-lifecycle-coverage.md).
 
-**因此，在这条资源绑定路径中，驱动需要知道资源的用途，不需要把 A1 或 GPD 的物理引脚号写进 INF。** Windows 根据主板 ACPI 配置分配连接 ID；ID 隐含控制器、总线地址、时钟等连接参数，驱动通过该 ID 打开连接。这是 [Microsoft SPB 资源模型](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/spb-peripheral-device-drivers) 描述的机制，与本 DLL 的行为吻合。
+**This resource-binding path needs to know resource roles, not A1 or GPD physical pin numbers
+embedded in the INF.** Windows assigns connection IDs from the board's ACPI description. An ID
+carries the controller, bus address, clock, and other connection parameters; the driver opens that
+connection by ID. This matches the
+[Microsoft SPB resource model](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/spb-peripheral-device-drivers)
+and the DLL's behavior.
 
-适配也不是完全无约束：此函数使用首个符合条件的 SPI、GPIO I/O 和中断资源；后续同类资源只记录重复。它预期的资源组合和用途必须与主板描述一致。本次没有各机型 ACPI 表，尚不能确定每台机器对应的 GPIO 极性、资源顺序和控制器映射。
+Adaptation is still constrained: the function selects the first matching SPI, GPIO I/O, and
+interrupt resources and only logs later duplicates. The expected resource combination and roles must
+match the board description. Without each model's ACPI tables, this analysis cannot establish every
+machine's GPIO polarity, resource ordering, or controller mapping.
 
-## 3. 同一硬件 ID 下仍会识别具体传感器
+<a id="3-同一硬件-id-下仍会识别具体传感器"></a>
 
-### SPI 入口的实际探测顺序
+## 3. Detecting a specific sensor behind a shared hardware ID
 
-本样本没有在全部芯片探测之前统一发送 `70`。主入口先在 `0x23FED`
-调用 FT9368 专用探测 `0x26D9C`；未选中 FT9368 时，SPI 分支在
-`0x2411C–0x24123` 调用专用唤醒 `0xFBA0`，再调用 `0x10A74`
-进行 C6 配置及专用 ID 读取。未命中 `9362/9365/9391/9392` 时，
-`0x2418B–0x241AE` 先调用传输层硬件复位，额外等 10 ms，
-再重复该专用唤醒和 ID 读取。该家族的完整报文及 C6 的证据边界见
-[专用家族探测说明](special-probe.md)。
+<a id="spi-入口的实际探测顺序"></a>
 
-上述专用路径未选中芯片后，才到 `0x24216` 的 legacy 分支。
-入口的外层重试计数从 0 开始：第 0 轮跳过 legacy 检测；第 1 轮
-执行下述运行固件检查；第 2 轮起直接进入无运行固件的检测路径。
-计数判断在 `0x24216–0x24221`，递增和上限检查在 `0x2428C–0x24299`。
-这里记录的是 Windows 的实际控制流，不是 Linux 优化后的探测顺序；
-不能据此把 legacy `70` 推广成 FT9368 或其他专用家族的通用唤醒命令。
+### Actual SPI probe order
 
-### 已有运行固件的路径
+This sample does not send `70` universally before every chip probe. The main entry first calls the
+dedicated FT9368 probe `0x26D9C` at `0x23FED`. If FT9368 is not selected, the SPI branch at
+`0x2411C–0x24123` calls dedicated wake `0xFBA0`, then `0x10A74` for C6 configuration and dedicated
+ID reading. If none of `9362/9365/9391/9392` matches, `0x2418B–0x241AE` first invokes the transport
+hardware reset, waits an additional 10 ms, then repeats that wake and ID read. Full packets and the
+evidence limits of C6 are documented in [special-family probing](special-probe.md).
 
-这条路径在读取 `14/15` 之前确实发送两次软件复位命令，而不是直接读取
-运行时响应。SPI 的已确认顺序如下：
+Only after these special paths fail to select a chip does execution reach the legacy branch at
+`0x24216`. Its outer retry counter begins at 0: round 0 skips legacy detection; round 1 performs the
+running-firmware check below; rounds 2 onward directly take the no-running-firmware detection path.
+The counter branch is at `0x24216–0x24221`, with increment and limit checking at `0x2428C–0x24299`.
+This is the actual Windows control flow, not Linux's optimized discovery order. It does not make
+legacy `70` a universal wake command for FT9368 or other special families.
 
-| 步骤 | 协议事实 | 证据 RVA |
+<a id="已有运行固件的路径"></a>
+
+### Path for running application firmware
+
+This path does send software reset twice before reading `14/15`; it does not simply read the runtime
+response first. The confirmed SPI sequence is:
+
+| Step | Protocol fact | Evidence RVA |
 | --- | --- | --- |
-| 进入运行固件检查 | 主入口调用 `MultiCheckFWExist`，后者调用 `CheckFWExist` | `0x24221 → 0x28344 → 0x270E4` |
-| 软件复位 | 分两次 SPI 交易发送单字节 `70`，两次之间等 5 ms | `0x270EC → 0x28C54`；命令映射 `0x22CEA`；单字节交易 `0x2FCA2–0x2FCC7` |
-| 检查 MCU 状态 | 第二次 `70` 返回后直接从 `20` 连读两字节；仅 `A5 5A` 判为空闲 | `0x270F6 → 0x2853C` |
-| 有界重试 | 首次加最多 5 次重试，共最多 6 轮；每轮重新执行双 `70` 和状态检查，失败轮之间另等 5 ms | `0x28344–0x2839C` |
-| 读取运行时响应 | 状态检查成功后，主入口再等 350 ms，然后分别读 `14`、`15` | `0x2422A–0x24235 → 0x27290` |
+| Enter running-firmware check | Main entry calls `MultiCheckFWExist`, which calls `CheckFWExist` | `0x24221 → 0x28344 → 0x270E4` |
+| Software reset | Send single-byte `70` in two separate SPI transactions, with 5 ms between them | `0x270EC → 0x28C54`; command mapping `0x22CEA`; single-byte transaction `0x2FCA2–0x2FCC7` |
+| Check MCU status | Immediately after the second `70`, read two consecutive bytes from `20`; only `A5 5A` means idle | `0x270F6 → 0x2853C` |
+| Bounded retry | Initial attempt plus at most 5 retries, 6 rounds total; each repeats both `70` commands and the status check, with another 5 ms between failed rounds | `0x28344–0x2839C` |
+| Read runtime response | After the status check succeeds, main entry waits another 350 ms, then reads `14` and `15` separately | `0x2422A–0x24235 → 0x27290` |
 
-`0x28C54` 自身在第二次 `70` 后没有额外等待；该检测链也没有在这里
-插入 2 ms。A8 硬件复位包装 `0x39C50` 在调用双 `70` 后另等 2 ms
-（`0x39D1B–0x39D20`），那属于另一条流程，不能混写成检测入口的要求。
-上述等待值是本样本的主机行为，不是经实测证明的芯片最短等待时间。
+`0x28C54` adds no wait after the second `70`; this detection chain inserts no 2 ms there either. The
+A8 hardware-reset wrapper `0x39C50` adds 2 ms after calling the dual `70` helper
+(`0x39D1B–0x39D20`). That is a different flow and must not be presented as a requirement of the
+detection entry. These waits describe the sample's host behavior, not measured minimum chip timing.
 
-`20/21` 的 `A5 5A` 是 MCU 空闲状态，`14/15` 则是下面用于分类的
-运行时几何响应；二者不能混称为同一组芯片 ID。`CheckFWExist` 将
-非空闲状态视为运行固件检查未通过，但这不证明 RAM 中没有固件，
-也不证明所有未加载固件的芯片都会在 `14/15` 返回 `00 00`。
+`20/21` = `A5 5A` is MCU idle status; `14/15` is the runtime geometry response used for classification
+below. They must not be called the same chip-ID pair. `CheckFWExist` treats a non-idle response as a
+failed running-firmware check, but that does not prove RAM contains no firmware or that every chip
+without loaded firmware returns `00 00` from `14/15`.
 
-`0x27290` 根据读取的 `14/15` 选择内部传感器类型；随后主入口经
-`0x24720` 调用传感器工厂。此分类入口覆盖以下四种 legacy 芯片：
+`0x27290` selects an internal sensor type from `14/15`; the main entry then calls the sensor factory
+through `0x24720`. This classifier covers four legacy chips:
 
-| 两个响应字节 | 内部类型 | 工厂选择的实现 |
+| Response bytes | Internal type | Factory-selected implementation |
 | --- | ---: | --- |
 | `58 58` | 1 | `clsFT9338` |
 | `60 60` | 2 | `clsFT9348` |
 | `40 50` | 3 | `clsFT9361` |
 | `40 80` | 6 | `clsFT9536` |
 
-比较分支位于 `0x27312–0x27367`；类型到对象的映射由 `0x23690` 的实际构造调用核实。
+Comparison branches are at `0x27312–0x27367`; actual constructor calls in `0x23690` verify the
+type-to-object mapping.
 
-这与现有 Linux FT9361 的 `0x14/0x15 = 0x40/0x50` 检查一致。但这里应称为**用于识别的运行时响应**，不宜直接宣称是不可变的裸硅唯一 ID：同一 DLL 的固件下载路径将这两个寄存器的读数记录为 sensor x/y。该路径的未知组合也未显式返回“未知芯片”错误，不能原样当成理想的新实现规范。
+This agrees with Linux's FT9361 `0x14/0x15 = 0x40/0x50` check. However, it is a **runtime response
+used for identification**, not a proven immutable unique bare-silicon ID: the same DLL's
+firmware-download path logs these two registers as sensor x/y. Unknown combinations in this
+classifier also do not explicitly return an unknown-chip error, so this behavior should not be
+copied unchanged as an ideal new specification.
 
-### 无运行固件的路径
+<a id="无运行固件的路径"></a>
 
-`0x24244` 调用检测入口 `0x27144`，继续调用 `0x283A4 → 0x2737C`。该路径先判别启动版本，再检查寄存器行为或 OTP，而不是必须先加载同一份 FT9361 固件才能识别所有芯片。
+### Path without confirmed running firmware
 
-- `0x28114` 使用 `0x90` 相关传输探测启动版本，返回字节 `0xEF` 对应 A 分支。
-- A 分支调用 `0x27414`，进入下载模式并访问芯片寄存器；根据 `0xFE` 的读回结果区分类型 1 与 6。
-- 另一分支调用 `0x2819C`，读取 `0x85C0` 的响应，区分后续识别路径，再调用 `0x27650` 或 `0x278F4` 的 OTP 判别逻辑。
-- 在 `0x278F4` 路径中，经总线条件修正后的 OTP 低四位为 1–3 时选类型 2，为 4、14、15 时选类型 3；其他值进入错误路径。类型 3 随后对应 `clsFT9361`。
+`0x24244` calls detector `0x27144`, which calls `0x283A4 → 0x2737C`. This path first identifies boot
+version, then examines register behavior or OTP. It does not require loading the same FT9361
+firmware to identify every chip.
 
-上述是静态控制流事实，尚不是可直接执行的完整探测配方：总线编码、前置状态、时序和失败恢复仍需单独形成协议规范并做硬件验证。
+- `0x28114` uses a `0x90`-related transfer to probe boot version; response byte `0xEF` selects
+  branch A.
+- Branch A calls `0x27414`, enters download mode, and accesses chip registers. Register `0xFE`
+  readback distinguishes internal types 1 and 6. Specifically, `FE = 02` selects FT9536; the other
+  branch defaults to FT9338 and must not be treated as positive FT9338 identity evidence.
+- The other branch calls `0x2819C`, reads the response at `0x85C0`, and selects a subsequent
+  detection route through OTP logic at `0x27650` or `0x278F4`.
+- In `0x278F4`, the OTP low nibble, adjusted for the bus, selects type 2 for 1–3 and type 3 for 4,
+  14, or 15; other values take the error path. Type 3 then maps to `clsFT9361`.
 
-**命名陷阱：** `ft_feature_devinit_DistinguishByRegFile` 中的 RegFile 指向芯片寄存器访问。函数实际通过传输对象读写 `0xCB`、`0xFD`、`0xFE` 等地址，没有在这段函数中查询 Windows 注册表；不能据此声称找到隐藏的机型注册表配置。
+These are static control-flow facts, not a complete executable probing recipe. Bus framing,
+prerequisite state, timing, and failure recovery require their own protocol specification and
+hardware validation.
 
-### 其他芯片的专用分支
+**Naming trap:** RegFile in `ft_feature_devinit_DistinguishByRegFile` refers to chip-register
+access. The function actually reads and writes addresses such as `0xCB`, `0xFD`, and `0xFE` through
+the transport object; it does not query the Windows registry in this function. Its name does not
+reveal hidden per-model registry settings.
 
-主入口还有 FT9368 专用识别/恢复路径，以及 SPI 下针对返回 `0x9362`、`0x9365`、`0x9391`、`0x9392` 的比较分支（`0x23FED–0x24185`，重试后的比较在 `0x241DA–0x24210`）。这些分支会选择其他内部类型及实现。
+<a id="其他芯片的专用分支"></a>
 
-必须区分“硬件响应”“内部枚举”“类名”三者：例如 `0x9362` 分支在 `0x246DB` 设置类型 9，而工厂类型 9 调用的是 `clsFT9369` 构造函数。日志中那条列举七种 sensor type 的文字也没有覆盖工厂全部分支，不能当作权威支持表。
+### Dedicated branches for other chips
 
-## 4. 传感器对象选择决定固件和操作实现
+The main entry also has FT9368 detection/recovery and SPI comparisons for `0x9362`, `0x9365`,
+`0x9391`, and `0x9392` (`0x23FED–0x24185`, with retry comparisons at `0x241DA–0x24210`). These
+select other internal types and implementations.
 
-工厂函数 `0x23690` 的实际分派如下。这里只证明二进制中存在并被该工厂引用的实现，不代表全部组合都能通过本 INF 加载或已通过实机验证。
+Hardware response, internal enumeration, and class name must remain distinct. For example, the
+`0x9362` branch sets type 9 at `0x246DB`, while factory type 9 calls the `clsFT9369` constructor. A
+log string listing seven sensor types also omits some factory branches and is not an authoritative
+support table.
 
-| 内部类型 | 构造函数 RVA | 实现标签 |
+<a id="4-传感器对象选择决定固件和操作实现"></a>
+
+## 4. Sensor objects select firmware and operations
+
+Factory `0x23690` dispatches as follows. This proves that implementations exist in the binary and
+are referenced by this factory; it does not establish that every combination can bind through this
+INF or has been validated on hardware.
+
+| Internal type | Constructor RVA | Implementation label |
 | ---: | --- | --- |
 | 1 | `0x3574C` | `clsFT9338` |
 | 2 | `0x35834` | `clsFT9348` |
@@ -167,46 +252,76 @@ GPIO来源和普通Interrupt都可以由系统交付这种资源；见
 | 11 | `0x35D24` | `clsFT9769` |
 | 12 | `0x359F4` | `clsFT9365` |
 
-以 FT9361 为可复核实例：
+FT9361 provides a reproducible example:
 
-- 构造函数 `0x35914` 设置自身方法表，并在 `0x3593A–0x3595E` 写入固件指针及长度。
-- 固件指针 RVA `0x79160`，对应文件偏移 `0x77960` = **489824**；长度 `0x289C` = **10396** 字节。
-- 对该范围直接计算 SHA-256，得到 `027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`，与仓库现有 FT9361 固件期望值完全一致。此次只计算范围哈希，没有将固件加入仓库。
-- 固件分派函数 `0x2C4A4` 使用已经选定的传感器对象，并按启动版本调用不同方法槽。FT9361 的方法表 RVA 为 `0x490B8`；其中普通下载槽关联 `0x39730`。
-- `0x39730` 在 `0x3981D/0x39822` 取出该对象的固件长度与指针，交给传输层写入。因此这里已经形成“识别 → 对象 → 指定固件范围 → 下载方法”的证据链，而非仅搜到固件字节或函数名。
+- Constructor `0x35914` sets its method table and writes the firmware pointer and length at
+  `0x3593A–0x3595E`.
+- Firmware pointer RVA `0x79160` corresponds to file offset `0x77960` = **489824**; length `0x289C`
+  = **10396** bytes.
+- Direct SHA-256 calculation over that range yields
+  `027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f`, exactly matching the
+  repository's expected FT9361 firmware hash. This step hashed the range without adding firmware to
+  the repository.
+- Firmware dispatcher `0x2C4A4` uses the already selected sensor object and calls different method
+  slots according to boot version. FT9361's method table is at RVA `0x490B8`; its ordinary download
+  slot points to `0x39730`.
+- `0x39730` retrieves the object's firmware length and pointer at `0x3981D/0x39822` and passes them
+  to the transport writer. This establishes a detection → object → specific firmware range →
+  download-method chain, rather than just a firmware-byte or function-name match.
 
-这说明固件选择发生在 DLL 运行时。INF 不需要为每种传感器列出不同的 `.bin` 文件。后续已定位另外 4 个后端关联的固件，见[完整清单](windows-hardware-inventory.md)；不能把 FT9361 固件套到所有 `FTE3600` 设备上。
+Firmware selection therefore occurs at DLL runtime. The INF need not list a separate `.bin` for
+every sensor. Firmware associated with another 4 backends was located subsequently; see the
+[complete inventory](windows-hardware-inventory.md). FT9361 firmware must not be applied to every
+`FTE3600` device.
 
-## 5. DLL 中的硬件 ID 逻辑比此 INF 更宽
+<a id="5-dll-中的硬件-id-逻辑比此-inf-更宽"></a>
 
-`0x27E14` 查询设备 HardwareID，并比较 `9338`、`9536`、`9348`、`93A8`、`7001`、`6100`、`3600`、`4800` 等字符串片段，设置场景和算法类别状态。`3600` 分支设置场景 1、算法类别 2，之后仍进行真实传感器检测。
+## 5. DLL hardware-ID logic extends beyond this INF
 
-这些字符串比较位于 `0x27F46–0x2802E`，不能还原成不存在于本 INF 的完整 PnP ID，更不能将它们补写为已确认受支持硬件。它们表明 DLL 内含比此分发包 INF 更广的复用逻辑；是否来自共享构建、其他 OEM 包或其他历史版本，仍需跨包比较。
+`0x27E14` queries the device HardwareID and compares string fragments including `9338`, `9536`,
+`9348`, `93A8`, `7001`, `6100`, `3600`, and `4800`, setting scenario and algorithm-class state. The
+`3600` branch sets scenario 1 and algorithm class 2, then still performs actual sensor detection.
 
-在已经核实的主启动链中，未发现按笔记本品牌/型号查表来决定引脚的步骤。这不是对整个驱动包所有代码作出的“绝无 OEM 特例”证明。
+These comparisons at `0x27F46–0x2802E` cannot be reconstructed into complete PnP IDs absent from
+this INF or added to the confirmed support list. They show reusable DLL logic broader than this
+package's INF. Whether it comes from shared builds, other OEM packages, or historical versions
+requires cross-package analysis.
 
-## 对 libfprint 扩展的影响
+The verified main startup chain contains no located laptop-brand/model lookup that determines pins.
+This is not a proof that every part of the entire package lacks OEM exceptions.
 
-后续实现已把资源适配与芯片协议分开：内核桥接层从 ACPI 获取 SPI/GPIO/IRQ，
-用户态探测真实传感器；DMI 机型白名单已移除。当前有八个传感器后端，
-各自的识别、固件授权和采集参数见硬件清单与协议说明；实现不等于实机验证。
-加载固件前要求与相应路径匹配的身份依据，不能把所有 `FTE3600` 都当作 FT9361。
-具体协议、资源约束和测试边界见 [动态发现说明](dynamic-discovery.md)。
+<a id="对-libfprint-扩展的影响"></a>
 
-GpioIo 本身没有极性字段。当前 reset 使用 active-low 描述符，将逻辑
-`0/1/0` 转换成 Windows 已确认的物理 H/L/H。若 `_DSD` 提供 reset 属性，
-它必须指向同一 reset 资源且标为 active-low，冲突会在驱动引脚前被拒绝；
-没有属性时才添加驱动映射。实际布线和波形仍需实机确认。
-参考 [Linux ACPI GPIO 文档](https://www.kernel.org/doc/html/latest/firmware-guide/acpi/gpio-properties.html)。
+## Implications for libfprint
 
-## 已证实与尚待确认
+Subsequent implementation separates resource adaptation from chip protocol: ACPI-derived glue
+exposes reset and IRQ resources, stock spidev handles SPI, and userspace detects the actual sensor.
+The DMI model whitelist has been removed. There are now 8 sensor backends; the inventory and
+protocol specifications document their identification, firmware authorization, and capture
+parameters. Implementation is distinct from hardware validation. Firmware loading requires the
+identity evidence appropriate to its path; not every `FTE3600` is an FT9361. See
+[dynamic discovery](dynamic-discovery.md) and [current transport](acpi-spidev.md) for protocols,
+resource constraints, and test limits.
 
-进一步比较 2.0.3.99、2.0.3.100、2.0.3.102 后，已确认：三个样本均有 2 个 INF ID；
-旧两版为 6 个传感器后端、4 组操作方法，102 版为 8 个后端、6 组；
-5 个后端关联的 6 段固件已定位，且在三个样本中逐字节相同。
-完整计数、另外 10 个底层 ID 的适用边界、版本差异及证据索引见
-[硬件与处理逻辑清单](windows-hardware-inventory.md)。
+GpioIo itself has no polarity field. Reset uses active-low semantics so logical `0/1/0` yields the
+controller-level H/L/H sequence confirmed from Windows. If `_DSD` provides a reset property, it must
+reference the same reset resource and declare active-low; conflicts are rejected before driving the
+pin. A driver mapping is added only without that property. The exported GPIO layer forwards raw
+levels to avoid double inversion, as explained in [GPIO polarity](gpio-polarity.md). Actual wiring
+and waveform still require hardware confirmation. See the
+[Linux ACPI GPIO documentation](https://www.kernel.org/doc/html/latest/firmware-guide/acpi/gpio-properties.html).
 
-仍未确认：每台实际机型的 ACPI 描述和电气极性；全部芯片的完整冷启动/恢复路径；
-所有初始化表及其语义；全部 OEM/历史版本差异；每条分支的实机成功率。
-不能从 8 个软件后端推导整机型号总数，也不能把静态分支数量当成兼容性认证。
+<a id="已证实与尚待确认"></a>
+
+## Confirmed facts and remaining gaps
+
+Comparison of 2.0.3.99, 2.0.3.100, and 2.0.3.102 confirmed 2 INF IDs in each sample. The older two
+versions have 6 sensor backends in 4 operation groups; version 102 has 8 backends in 6 groups. 6 firmware ranges associated with 5 backends were located and are byte-identical across all three
+samples. Complete counts, limits on the other 10 low-level IDs, version differences, and evidence
+indices are in the [hardware and implementation inventory](windows-hardware-inventory.md).
+
+Remaining gaps include each physical model's ACPI description and electrical polarity; complete
+cold-start/recovery paths for every chip; all initialization tables and their semantics; every
+OEM/historical version difference; and physical success rates for each branch. Eight software
+backends do not determine the number of computer models, and static branch counts are not
+compatibility certification.

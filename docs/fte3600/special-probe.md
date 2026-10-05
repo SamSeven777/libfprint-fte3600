@@ -1,5 +1,7 @@
 # Special-family cold identification
 
+[Documentation index](README.md)
+
 This specification records observable protocol facts from
 `ftWbioUmdfDriverV2.dll` version 2.0.3.102, SHA-256
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`.

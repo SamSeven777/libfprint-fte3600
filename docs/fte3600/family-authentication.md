@@ -1,5 +1,7 @@
 # Sensor-parameterized BRISK enrollment and verification
 
+[Documentation index](README.md)
+
 All eight implemented capture profiles feed their native 8-bit images to the
 same BRISK core. The image interface passes data length, width, height and row
 stride. There is no FT9361 reference-image conversion, resampling to 64×80,

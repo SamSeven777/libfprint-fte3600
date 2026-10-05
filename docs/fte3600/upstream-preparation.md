@@ -1,5 +1,7 @@
 # Preparing separate kernel and libfprint submissions
 
+[Documentation index](README.md)
+
 The current downstream implementation separates ACPI reset/IRQ ownership from
 SPI messages, sensor protocols and host matching. It is a reviewable development
 base, not an accepted upstream interface or a claim of hardware qualification.

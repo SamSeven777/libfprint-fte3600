@@ -1,8 +1,11 @@
 # FTE3600 implementation boundaries
 
-This document describes the uncommitted `acpi-spidev` branch; see its
-[transport contract](acpi-spidev.md). Sensor and matcher separation is retained.
-It does not implement the full Windows lifecycle; the
+[Documentation index](README.md)
+
+This document describes the current module boundaries and runtime contracts.
+For installation use [install.md](install.md); for implemented chips and
+hardware evidence use [status.md](status.md). The implementation does not
+reproduce the full Windows lifecycle; the
 [coverage record](windows-lifecycle-coverage.md) distinguishes confirmed fixes
 from independent Linux strategies and remaining evidence gaps.
 
@@ -82,19 +85,10 @@ population calibration. See [family authentication](family-authentication.md).
 
 ## Implemented support and authorization
 
-| Sensor | Image | Capture path | Cold firmware recovery | BRISK enrollment / verification |
-| --- | --- | --- | --- | --- |
-| FT9338 | 88×88 | Legacy application | RAM upload/readback after current-session runtime identity plus matching boot-B OTP; first unidentified cold boot remains unsupported | Opt-in |
-| FT9348 | 96×96 | A8 | Implemented, its own verified external firmware | Opt-in |
-| FT9361 | 64×80 | A8 | Implemented, its own verified external firmware | Opt-in |
-| FT9536 | 64×128 | Legacy application | Positive boot-A (`ef`, prepared `fe=02`) or current-session runtime + boot-B OTP; own RAM firmware/readback | Opt-in |
-| FT9365 | 64×80 | Host AFE/DAC calibration, 16-bit FIFO | Host configuration; no firmware upload | Opt-in |
-| FT9368 | 64×80 | Application wake/info, native 8-bit image | Existing application; explicit PRAM/flash updater, no blind blank-device recovery | Opt-in |
-| FW9369 / ID 9362 | 64×80 | FDT + image DAC calibration, baseline subtraction, 16-bit FIFO | Host configuration; no firmware upload | Opt-in |
-| FT9769 / IDs 9391, 9392 | 40×196 | Host AFE/DAC calibration, chunked 16-bit FIFO; extra rows cropped | Host configuration; no firmware upload | Opt-in |
-
-This is implementation and software-test scope, not a hardware compatibility
-claim. The eight catalog entries represent six observed Windows protocol
+The [support matrix](status.md#implemented-functions-and-test-limits) records
+each sensor's image size, capture path and recovery boundary. Implemented
+behavior and software coverage do not establish hardware compatibility.
+The eight catalog entries represent six observed Windows protocol
 families. Linux executes all six through four backend modules. Legacy shares
 three immutable parameter sets (9338, 9536, A8); 9365/9769 share a configurable
 host scanner. The A8 set selects geometry and firmware separately for 9348 and
@@ -171,10 +165,11 @@ unknown value rather than inheriting FT9361's pixel pitch.
 
 ## Electrical and failure contracts
 
-Windows `IOCTL_GPIO_WRITE_PINS` uses physical controller pin levels. The Linux
-bridge uses an active-low descriptor and logical asserted/deasserted values.
-High/low/high therefore maps to logical `0/1/0`; the acquisition constraints
-and binary/API evidence are in [gpio-polarity.md](gpio-polarity.md).
+Windows `IOCTL_GPIO_WRITE_PINS` uses physical controller pin levels. Userspace
+requests the glue's reset GPIO with ACTIVE_LOW and uses logical `0/1/0` for
+high/low/high. The glue forwards raw levels to avoid applying polarity twice.
+The acquisition constraints and binary/API evidence are in
+[gpio-polarity.md](gpio-polarity.md).
 
 Each reset pulse explicitly establishes high for 10 ms, low for 20 ms and then
 high. Firmware entry immediately sends the boot synchronization after that
@@ -190,7 +185,7 @@ Failed cleanup
 invalidates the session for further capture. Error/cancellation still finishes
 through one action completion, attempts necessary cleanup, and clears image
 buffers. Reopen establishes a fresh hardware state. Removal and suspend are
-also terminal for an open bridge session.
+also terminal for an open transport session.
 
 Final close uses optional `create_shutdown()` while transport/reset/IRQ resources
 are still held. FW9369 implements C0/verified awake idle, known-event mask/ack
@@ -200,11 +195,13 @@ cleanup. Per-action reset never invokes final shutdown. Close always releases
 resources and preserves the earliest error; a failed session receives no more
 sensor commands. Reopen repeats discovery and calibration as required.
 
-The transport restores the ACPI SPI mode and saved word size/speed on normal
-close. Stock spidev cannot restore CS on process death; a subsequent open
-revalidates the ACPI baseline before identification. Kernel PM frees the IRQ,
+The transport restores saved word size/speed on normal close. Native CS with
+advertised polarity control also restores the ACPI mode on close and at the
+next open. Fixed-CS sessions never write mode; reported GPIO-CS bits cannot
+establish the physical polarity. Stock spidev cannot restore native CS on
+process death. Kernel PM frees the IRQ,
 invalidates the lease and wakes UIO readers, but does not send SPI commands or
-atomically revoke stock spidev transactions. This branch therefore retains
+atomically revoke stock spidev transactions. The transport therefore retains
 cooperative locking and requires new sessions after suspend. Actual GPIO, IRQ,
 process-exit and power-management behavior still need hardware validation.
 
@@ -215,11 +212,10 @@ authentication configurations. Suites cover protocol golden packets/bounds,
 identity domains, firmware file races, metadata enumeration, eight chips with
 five image geometries, factory mode negotiation and CS polarity selection,
 session failure/reopen, transfer/cancellation, matcher golden vectors,
-strided images, concurrent extraction and template compatibility. The full
-selected library and tests also run under ASan/UBSan. Kernel policy host tests
-and a Linux-header `W=1` build check the bridge without loading it.
-The [branch validation record](validation-acpi-spidev-2026-10-04.md) gives exact counts,
-build options, skipped fixtures and sanitizer scope for the tested working tree.
+strided images, concurrent extraction and template compatibility. Kernel policy
+host tests and a Linux-header `W=1` build check the glue without loading it.
+The [release validation record](validation-release-2026-10-05.md) gives executed
+counts, build options, skipped fixtures and the exact ASan/UBSan scope.
 
 No FTE sensor is attached in the build environment. Board wiring, cold boot,
 real firmware upload, capture quality, resume behavior and biometric accuracy

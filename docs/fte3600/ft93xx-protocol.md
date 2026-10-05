@@ -1,5 +1,7 @@
 # FT9365 / FT9769 protocol notes
 
+[Documentation index](README.md)
+
 This is a technical description independently derived from the supplied
 `ftWbioUmdfDriverV2.dll`. Addresses below are RVAs in that baseline, not Linux
 symbols. No vendor implementation, firmware image or calibration database is

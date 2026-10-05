@@ -2,6 +2,8 @@
 
 General libfprint development guidance remains in [HACKING.md](HACKING.md).
 This file adds rules for the experimental FTE3600 work.
+The [documentation index](docs/fte3600/README.md) is the entry point for
+installation, architecture, protocol references and validation records.
 
 The [architecture](docs/fte3600/architecture.md) defines the module boundaries.
 Keep hardware commands in the wire module, protocol timing in its own header,
@@ -54,6 +56,31 @@ persisted template schema or authentication policy must increment the
 corresponding version and add golden-format tests.
 
 ## Evidence and audit claims
+
+### Documentation
+
+Write maintained documentation in English. Add new documents to the
+[index](docs/fte3600/README.md) and keep existing paths and section links usable.
+Prefer linking to the document responsible for a topic over copying its
+instructions into several files:
+
+- `install.md`: dependencies, firmware, library build and enrollment.
+- `acpi-spidev.md`: transport installation, migration and system integration.
+- `status.md`: implemented support and reported hardware results.
+- `architecture.md` and protocol references: implementation contracts.
+- Dated audit/validation records: findings and checks for a specific revision.
+
+Write current guides in the present tense. Identify the source version and
+scope of Windows observations. Mark historical records explicitly and link
+them to current guidance; do not leave obsolete installation commands in an
+active guide. Preserve register values, timing, source offsets and hashes when
+translating or restructuring research. Do not turn an old hardware observation
+or a software test into a claim about the current release.
+
+Check relative links and section anchors after editing. Update the relevant
+guide when behavior changes instead of adding another overlapping status page.
+
+### Validation evidence
 
 Record the source commit, build options and actual test logs. Distinguish mock
 tests, hardware observations, offline pair comparisons and full authentication

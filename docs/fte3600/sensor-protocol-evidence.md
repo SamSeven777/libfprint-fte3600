@@ -1,279 +1,328 @@
-# FTE3600 多芯片实现所需的协议证据
+# Protocol evidence for FTE3600 multi-chip support
 
-核查日期：2026-10-04。本文记录可独立实现的线协议事实和实现边界，
-不包含厂商代码、反汇编、固件字节或初始化数据表。
-证据来自 x64 Windows 驱动 2.0.3.102 的静态控制流分析；
-样本 SHA-256 为
-`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`。
-所有 RVA 均相对此样本的映像基址，不是文件偏移。
-包来源、跨版本核查及固件哈希见 [硬件清单](windows-hardware-inventory.json)。
-**静态协议证据不代替实机验证，也不证明所有 OEM 版本都一致。**
+[Documentation index](README.md)
 
-## 可以共用的 FT9348 / FT9361 A8 协议
+<a id="fte3600-多芯片实现所需的协议证据"></a>
 
-两种芯片具有相同的 19 个非析构操作入口，这只是查找线索。
-下面另外核查了构造参数、实际 MCU 配置、SPI 读图、复位和通用工作模式流程，
-以此支持一个带能力参数的 A8 后端，而不是依据方法表相同就开放采集。
+Verification date: 2026-10-04. This document records wire-protocol facts suitable for independent
+implementation and their limits. It contains no vendor code, disassembly, firmware bytes, or
+initialization-data tables. Evidence comes from static control-flow analysis of the x64 Windows
+package version 2.0.3.102; the sample SHA-256 is
+`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`. All RVAs are relative to this
+sample's image base, not file offsets. Package provenance, cross-version checks, and firmware hashes
+are in the [hardware inventory](windows-hardware-inventory.json). **Static protocol evidence does
+not replace hardware validation or establish uniform behavior across every OEM version.**
 
-| 参数 | FT9348 | FT9361 | 证据 RVA |
+<a id="可以共用的-ft9348--ft9361-a8-协议"></a>
+
+## Shared FT9348 / FT9361 A8 protocol
+
+The chips share the same 19 non-destructor operation entries. That is only a research lead.
+Constructor parameters, actual MCU configuration, SPI image reads, reset, and common work-mode
+control flow were checked separately. Those findings support a parameterized A8 backend;
+method-table equality alone would not justify enabling capture.
+
+| Parameter | FT9348 | FT9361 | Evidence RVA |
 | --- | --- | --- | --- |
-| 运行时 `14/15` 响应 | `60 60` | `40 50` | `0x27290`；构造参数见下 |
-| 图像宽 × 高 | 96 × 96 | 64 × 80 | `0x35834`、`0x35914`；字段方向由 `0x2D4A0` 确认 |
-| 期望 FW 版本 | `30` | `30` | 同上，对象参数；读取寄存器 `1A` |
-| 期望 AGC 版本 | `31` | `31` | 同上；读取寄存器 `3C` |
-| 工作模式寄存器 | `76` | `76` | 公共构造 `0x392B8`、模式访问 `0x285CC` |
-| 复位后对象等待参数 | 160 ms | 160 ms | `0x35834`、`0x35914`；使用处 `0x39C50` |
-| 固件大小 | 10312 字节 | 10396 字节 | 各自构造和下载入口 `0x39730` |
-| 完整图像 SPI 交易长度 | 9224 字节 | 5128 字节 | `0x2E990` → `0x2F020` |
-| 图像数据在完整 SPI 响应中的偏移 | 8 字节 | 8 字节 | 同上 |
+| Runtime `14/15` response | `60 60` | `40 50` | `0x27290`; constructor parameters below |
+| Image width × height | 96 × 96 | 64 × 80 | `0x35834`, `0x35914`; field orientation confirmed by `0x2D4A0` |
+| Expected FW version | `30` | `30` | Same constructor parameters; read register `1A` |
+| Expected AGC version | `31` | `31` | Same constructors; read register `3C` |
+| Work-mode register | `76` | `76` | Shared constructor `0x392B8`, mode access `0x285CC` |
+| Object wait parameter after reset | 160 ms | 160 ms | `0x35834`, `0x35914`; used at `0x39C50` |
+| Firmware size | 10312 bytes | 10396 bytes | Respective constructors and download entry `0x39730` |
+| Complete image SPI transaction | 9224 bytes | 5128 bytes | `0x2E990` → `0x2F020` |
+| Image-data offset in complete SPI response | 8 bytes | 8 bytes | Same call chain |
 
-对象中几何字段的内存顺序不是宽、高顺序。`0x2D4A0` 的图像尺寸使用和输出
-确认 `+9` 是宽、`+8` 是高；不能直接按小端整数的低字节当宽。
-上述 FW/AGC 是本次已分析固件的版本，不能据此自动认可未知固件版本。
+Geometry fields are not stored in width-then-height order. Image-size use and output at `0x2D4A0`
+establish that `+9` is width and `+8` is height; the low byte of a little-endian integer must not
+simply be treated as width. FW/AGC values above describe the analyzed firmware and do not authorize
+unknown versions automatically.
 
-### 寄存器与帧格式
+<a id="寄存器与帧格式"></a>
 
-本节所有示例中的数值均为十六进制字节，除明确写成十进制的长度、时间之外。
-SPI 命令映射位于 `0x22C78`，寄存器读写封装位于 `0x2F1B0`、`0x2FC30`。
+### Registers and frame format
 
-- 运行时单字节寄存器读：`10 EF reg 00` 后时钟出所需返回字节。
-- 运行时单字节寄存器写：`11 EE reg value 00`。
-- MCU 空闲检查：从 `20` 连读两字节；只有 `A5 5A` 是空闲。
-  证据 `0x2853C`。其他响应只能视为忙或协议异常，不能据此判定具体芯片。
-- 手指状态：从 `1D` 读一字节，`01` 或 `A0` 是可采集状态。
-  证据 `0x2841C`，且该检查以 MCU 空闲为前提。
+All example values in this section are hexadecimal bytes, except lengths and times explicitly
+expressed in decimal. SPI command mapping is at `0x22C78`; register wrappers are at `0x2F1B0` and
+`0x2FC30`.
 
-正常 SPI 图像读取的精确格式为：
+- Runtime one-byte register read: `10 EF reg 00`, then clock out the required response bytes.
+- Runtime one-byte register write: `11 EE reg value 00`.
+- MCU idle check: read two consecutive bytes from `20`; only `A5 5A` indicates idle. Evidence:
+  `0x2853C`. Other responses mean busy or a protocol anomaly, not a specific chip identity.
+- Finger status: read one byte from `1D`; `01` or `A0` permits capture. Evidence: `0x2841C`,
+  conditional on the MCU being idle.
 
-1. 令 `N = width × height`，以不溢出的主机整数运算计算长度。
-2. 发送 `04 FB 34 00 total_hi total_lo`，其中 `total = N + 8`，
-   其后补零并保持同一交易，整个交易长度也是 `N + 8`。
-3. 响应前 6 字节是交易头，对后续数据再跳过 2 字节；
-   从完整响应偏移 8 处恰好取 N 字节，每字节按位反相。
-4. 不把头部或那 2 个非像素字节交给图像处理。
+Normal SPI image reads use this exact format:
 
-因此 FT9348 的请求头是 **`04 FB 34 00 24 08`**，
-FT9361 是 **`04 FB 34 00 14 08`**。
-`0x2E990` 对底层读函数传入 `N + 2`；`0x2F020` 再加 6，
-并将这个总长度写入头部第 4、5 字节。这一点排除了把 FT9348 长度误写为 `24 02`。
-普通读取入口 `0x2E990` 不会先发送 resume 预读操作；
-`0x26F70` 是另一条预读流程，不应无条件加入普通 capture。
+1. Let `N = width × height`, using overflow-safe host integer arithmetic.
+2. Send `04 FB 34 00 total_hi total_lo`, where `total = N + 8`, followed by zero padding within the
+   same transaction. The entire transaction is also `N + 8` bytes.
+3. The first 6 response bytes form the transaction header. Skip a further 2 bytes and take exactly N
+   bytes from complete-response offset 8, bitwise-inverting each byte.
+4. Neither the header nor the 2 additional non-pixel bytes enter image processing.
 
-### MCU 配置
+The FT9348 request header is therefore **`04 FB 34 00 24 08`**; FT9361 uses **`04 FB 34 00 14 08`**.
+`0x2E990` passes `N + 2` to the lower-level reader, and `0x2F020` adds 6 and writes that total into
+header bytes 4 and 5. This rules out an FT9348 length of `24 02`. The normal reader at `0x2E990`
+does not first send a resume preread. `0x26F70` is a separate preread path and must not be added
+unconditionally to normal capture.
 
-FT9348 与 FT9361 的同一入口 `0x399F0` 执行以下协议：
+<a id="mcu-配置"></a>
 
-1. 读寄存器 `30`。若已为 `BB`，该入口不重新写配置。
-2. 否则依次写 `01 = 01`、`41 = 0F`、`30 = BB`，每次写后等待 2 ms。
-3. 回读 `30`；Linux 应要求确实为 `BB`，失败即退出。
-4. 写 `22 = 00`，等 2 ms；写 `23 = 0E`，等 2 ms。
-5. Linux 在对外宣告就绪前还应验证 MCU 空闲状态。
+### MCU configuration
 
-Windows 在配置标记回读失败时记录日志后继续；这是可以收紧的失败处理，
-不构成继续采集的协议要求。这里列出的少量独立寄存器操作是配置协议，
-不是复制的厂商初始化表。
+Shared FT9348/FT9361 entry `0x399F0` performs this protocol:
 
-### 采集、重置与重新布防
+1. Read register `30`. If it is already `BB`, this entry does not rewrite configuration.
+2. Otherwise write `01 = 01`, `41 = 0F`, and `30 = BB` in order, waiting 2 ms after each write.
+3. Read back `30`. Linux should require `BB` and fail otherwise.
+4. Write `22 = 00`, wait 2 ms; write `23 = 0E`, wait 2 ms.
+5. Linux should also verify MCU idle before reporting readiness.
 
-以下操作对 FT9348、FT9361 进入相同通用控制流，参数均由对象提供：
+Windows logs a failed configuration-marker readback and continues. Tightening that failure handling
+is permissible; continuing capture is not a protocol requirement. These individually verified
+register operations are configuration facts, not a copied vendor initialization table.
 
-| 状态或操作 | 线协议行为 | 证据 RVA |
+<a id="采集重置与重新布防"></a>
+
+### Capture, reset, and rearming
+
+FT9348 and FT9361 enter the same common control flow for the following operations, with parameters
+supplied by the object:
+
+| State or operation | Wire behavior | Evidence RVA |
 | --- | --- | --- |
-| 正常布防 | MCU 空闲后，工作模式寄存器写 `01`，`1F = 01`，`1E = 01`；等 10 ms，读 `1D` | `0x287D4`、`0x28A14` |
-| 快速再次采集 | 空闲后工作模式写 `02`，`54 = 01`，再检查 MCU 状态 | 同上 |
-| 停止正常采集 | 已知 mode 1 或未知 mode：`1E = 00`，`1F = 00`，SPI 等 10 ms | `0x28668` |
-| mode 2/3/4 退出 | 通用流程不重复上述两次停止寄存器写；复位后进入下一模式 | `0x28668` |
-| 软件复位 | 单字节命令 `70` 分两次交易发送，SPI 间隔 5 ms | `0x28C54`、`0x22C78`、`0x2FC30` |
-| 手指触发后 | 先确认 MCU 空闲，再确认 `1D` 是 `01/A0`，再读完整图像帧 | IRQ `0x2DC20` → `0x2841C` → `0x2E990`；另见 `0x2D140`、`0x2F660` |
-| 读图后的选择 | FT9348、FT9361 均走正常 mode 1 重新布防；FT9338 的分支不同 | `0x2E990`、`0x2D140` |
+| Normal arming | After MCU idle, write work mode `01`, `1F = 01`, `1E = 01`; wait 10 ms and read `1D` | `0x287D4`, `0x28A14` |
+| Quick recapture | After idle, write work mode `02`, `54 = 01`, then check MCU status again | Same entries |
+| Stop normal capture | For known mode 1 or unknown mode: `1E = 00`, `1F = 00`, then wait 10 ms on SPI | `0x28668` |
+| Exit modes 2/3/4 | The common flow omits those two stop-register writes and enters the next mode after reset | `0x28668` |
+| Software reset | Send single-byte command `70` in two separate transactions, 5 ms apart on SPI | `0x28C54`, `0x22C78`, `0x2FC30` |
+| After finger trigger | Confirm MCU idle, then `1D` = `01/A0`, then read the complete image frame | IRQ `0x2DC20` → `0x2841C` → `0x2E990`; also `0x2D140`, `0x2F660` |
+| Choice after image read | FT9348 and FT9361 both rearm in normal mode 1; FT9338 takes a different branch | `0x2E990`, `0x2D140` |
 
-mode 3 是低功耗路径，工作模式写 `03` 后还会写 `00 = 20`，
-不是通常采集所需的 mode 1/2 操作。Linux 不需要为了复制 Windows 电源策略而引入它。
+Mode 3 is a low-power path: after writing work mode `03`, it also writes `00 = 20`. This is separate
+from mode 1/2 used for normal capture. Linux need not introduce it merely to reproduce Windows power
+policy.
 
-中断资源来自 ACPI。静态主机代码没有给出“所有板卡固定上升沿/下降沿”的依据；
-其极性应由资源桥接处理。Linux 必须防止旧 IRQ 跨操作复用，
-并在取消、超时、读取失败后复位或证明设备回到可用状态。
+Interrupt resources come from ACPI. Static host code does not establish one fixed rising/falling
+edge for every board; resource handling must preserve the described polarity. Linux must prevent
+stale IRQs from crossing operations and, after cancellation, timeout, or read failure, reset the
+device or prove it has returned to a usable state.
 
-硬件复位还有一个需要区别的事实：Windows GPIO 辅助入口 `0x2F5E0`
-写原始缓冲值 `01`，等 10 ms，写 `00` 保持 20 ms，再写 `01`；`0x39C50` 调用该脉冲两次，
-中间等 10 ms，第二次后等待对象的 160 ms，再做软件复位。
-原始值到物理电平、再到 Linux 逻辑断言值的关系必须分别确认；
-完整写入链和资源解析证据见 [GPIO 极性核查](gpio-polarity.md)。
-这是样本中的等待值，不是通过示波器确认的芯片最短脉宽。
-已有 FT9361 Linux 实机记录中的不同脉宽不能自动推广为 FT9348 的最短时序保证。
+Hardware reset has a separate timing contract: Windows GPIO helper `0x2F5E0` writes raw buffer `01`,
+waits 10 ms, writes `00` for 20 ms, then writes `01`. `0x39C50` calls this pulse twice, with 10 ms
+between calls, waits the object's 160 ms after the second pulse, then performs software reset. Raw
+values, physical levels, and Linux logical assertion values must be distinguished; the full write
+chain and resource evidence are in the [GPIO polarity analysis](gpio-polarity.md). These are waits
+in the sample, not oscilloscope-confirmed minimum pulse widths. Different pulse widths in existing
+FT9361 Linux hardware reports cannot automatically establish minimum timing guarantees for FT9348.
 
-### 冷启动与固件选择
+<a id="冷启动与固件选择"></a>
 
-A8 ROM 家族判别及 OTP 来源见 [动态发现说明](dynamic-discovery.md)
-和 [运行时适配研究](windows-runtime-adaptation.md)。本次再次确认：
+### Cold start and firmware selection
 
-- 家族响应 `2B50`、`95A8`、`23DD` 进入 A8 OTP 分支，入口 `0x278F4`。
-- SPI OTP 值的低 4 位：`1/2/3` 对应 FT9348，`4/E/F` 对应 FT9361。
-  USB 有单独位移处理，不能直接套入 SPI。
-- 两种 A8 芯片共用下载入口 `0x39730`：进入下载态后，
-  通过 `0x2FD80` 向地址 0 写入各自的整段固件，等 2 ms，再复位进入应用。
-  `0x2FAB0` 的写帧为 `05 FA 00 00 size_hi size_lo`、固件内容、一个末尾零字节，
-  头部长度是固件大小，完整交易长度为大小加 7。
-  FT9348 的写帧头为 `05 FA 00 00 28 48`，完整交易 10319 字节；
-  FT9361 为 `05 FA 00 00 28 9C`，完整交易 10403 字节。
-- 文件大小、哈希、芯片身份必须一一对应；同一协议不允许替换成另一芯片固件。
-- 应用启动后重新检查几何、FW、AGC 和 MCU 状态。不能仅凭下载交易成功就继续采集。
+A8 ROM-family classification and OTP sources are documented in
+[dynamic discovery](dynamic-discovery.md) and [runtime adaptation](windows-runtime-adaptation.md).
+This review reconfirmed:
 
-下载入口的 GPIO 时序有直接调用链证据，不能仅根据应用复位类比：
-`0x39730` → SPI 下载态入口 `0x2EAD0` → GPIO 重开 `0x30ABC`
-→ GPIO 脉冲 `0x2F5E0` → `55 AA` → 固件写入 `0x2FD80` / `0x2FAB0`。
-两种 A8 对象使用同一入口。
+- Family responses `2B50`, `95A8`, and `23DD` enter the A8 OTP branch at `0x278F4`.
+- For SPI, the low 4 OTP bits `1/2/3` identify FT9348; `4/E/F` identify FT9361. USB uses a separate
+  shift and must not be treated identically to SPI.
+- Both A8 chips share download entry `0x39730`. After entering download state, `0x2FD80` writes the
+  respective complete firmware to address 0, waits 2 ms, then resets into the application. The
+  `0x2FAB0` write frame is `05 FA 00 00 size_hi size_lo`, firmware contents, and one trailing zero
+  byte. Header length is firmware size; complete transaction length is size plus 7. FT9348 uses
+  header `05 FA 00 00 28 48`, total 10319 bytes; FT9361 uses `05 FA 00 00 28 9C`, total 10403 bytes.
+- File size, hash, and chip identity must match exactly. Sharing a protocol does not authorize
+  substituting another chip's firmware.
+- After application startup, recheck geometry, FW, AGC, and MCU status. A successful download
+  transaction alone does not permit capture.
 
-| 下载阶段 | GPIO / SPI 行为 | 显式等待 |
+Download-entry GPIO timing is supported by a direct call chain, not an analogy with application
+reset: `0x39730` → SPI download entry `0x2EAD0` → GPIO reopen `0x30ABC` → GPIO pulse `0x2F5E0` →
+`55 AA` → firmware write `0x2FD80` / `0x2FAB0`. Both A8 objects use this entry.
+
+| Download stage | GPIO / SPI behavior | Explicit wait |
 | --- | --- | --- |
-| 下载前释放 | GPIO raw `01`，控制器目标高 | 10 ms |
-| 下载前复位 | GPIO raw `00`，控制器目标低 | 20 ms |
-| 释放并同步 | GPIO raw `01`，随后发送恰好两字节 `55 AA` | 两者之间未见额外 Sleep |
-| 上传 | 发送上面定义的完整 `05 FA` 固件写帧 | 写成功后 2 ms |
-| 启动应用 | 调用 A8 双硬件复位流程：每个脉冲均为高 10 ms、低 20 ms、释放，两次调用间另等 10 ms | 最后释放后等 160 ms |
-| 应用软件复位 | 单字节 `70`，5 ms，再单字节 `70` | 第二次之后 2 ms |
-| 验证 | 查询 MCU 空闲，并重新读取运行时参数 | 有界检查；不能仅凭上传成功认定就绪 |
+| Release before download | GPIO raw `01`, controller target high | 10 ms |
+| Reset before download | GPIO raw `00`, controller target low | 20 ms |
+| Release and synchronize | GPIO raw `01`, then exactly two bytes `55 AA` | No additional Sleep observed between them |
+| Upload | Send the complete `05 FA` firmware frame defined above | 2 ms after a successful write |
+| Start application | A8 double hardware reset: each pulse is high for 10 ms, low for 20 ms, then released; another 10 ms between calls | 160 ms after final release |
+| Application software reset | Single byte `70`, 5 ms, then another single byte `70` | 2 ms after the second command |
+| Verification | Query MCU idle and reread runtime parameters | Bounded checks; successful upload alone is insufficient |
 
-下载前**没有**应用复位的 160 ms 等待，不能把两个子流程混用。
-双脉冲间的控制器目标高电平持续时间合计为 20 ms：外层间隔 10 ms，
-加第二个脉冲辅助入口自己的高电平 10 ms；这与两个独立调用的参数分解是一致的。
-这些都是程序中的显式等待值，实际调度和总线延迟会增加间隔，未声明为电气最短/最长时限。
+Download entry has **no** 160 ms application-reset wait. The two subflows must not be confused. The
+controller target stays high for 20 ms between the two low pulses: 10 ms from the outer gap plus the
+second helper's own initial 10 ms. These are explicit program waits; scheduling and bus latency add
+time. They are not stated electrical minimum or maximum limits.
 
-**Linux 的独立一致性规则**：已观察的运行时身份与之后 ROM/OTP 身份若冲突，
-拒绝该次打开，不加载任一固件；仅有 `0000/FFFF` 这种无有效运行时身份的场景
-可以由可靠的 ROM 结果建立初始身份。运行时几何是应用响应，不能替代烧录前的 ROM 身份。
-这是比样本宽松回退更严格的实现约束，不声称 Windows 已经如此处理。
+**Independent Linux consistency rule:** if an observed runtime identity conflicts with later ROM/OTP
+identity, reject that open without loading either firmware. Only a response such as `0000/FFFF`,
+carrying no valid runtime identity, may acquire an initial identity from a reliable ROM result.
+Runtime geometry is an application response and cannot replace pre-download ROM identity. This is
+stricter than the sample's permissive fallback, not a claim that Windows already enforces the same
+rule.
 
-## FT9338 / FT9536 的已确认差异
+<a id="ft9338--ft9536-的已确认差异"></a>
 
-| 参数 | FT9338 | FT9536 | 证据 RVA |
+## Confirmed FT9338 / FT9536 differences
+
+| Parameter | FT9338 | FT9536 | Evidence RVA |
 | --- | --- | --- | --- |
-| 宽 × 高 | 88 × 88 | 64 × 128 | `0x3574C`、`0x35C44`、字段方向 `0x2D4A0` |
-| 运行时 `14/15` | `58 58` | `40 80` | 运行时分派 |
-| FW / AGC | `40 / 10` | `23 / 13` | 构造对象参数 |
-| 工作模式寄存器 | `76` | `47` | 同上、访问 `0x285CC` |
-| 对象复位后等待 | 80 ms | 180 ms | 同上、使用 `0x36BD0` |
-| 已关联固件大小 | 14184 | 11934 | 同上 |
+| Width × height | 88 × 88 | 64 × 128 | `0x3574C`, `0x35C44`; field orientation `0x2D4A0` |
+| Runtime `14/15` | `58 58` | `40 80` | Runtime dispatch |
+| FW / AGC | `40 / 10` | `23 / 13` | Constructor parameters |
+| Work-mode register | `76` | `47` | Same constructors; access at `0x285CC` |
+| Object wait after reset | 80 ms | 180 ms | Same constructors; used at `0x36BD0` |
+| Associated firmware size | 14184 | 11934 | Same constructors |
 
-这一组共用 `0x36A30` 的 MCU 配置，与 A8 明确不同：
-它无条件写 `01 = 01`、`41 = 0F`、`30 = BB`，每次间隔 1 ms，再读 `30`；
-该入口没有 A8 的 `22/23` 配置步骤。
-其下载入口 `0x365C0` 还包含下载态寄存器配置、固件读回验证，
-而 A8 的对应入口不做同样的读回步骤。
-普通 SPI 读取仍可经过 `0x2E990` 的几何相关帧操作，
-但 FT9338 在读图后选择 mode 2，其他传统类型选择 mode 1。
-这些差异说明“已有通用帧格式”不足以直接启用整套 A8 生命周期。
+This group shares MCU configuration `0x36A30`, which differs explicitly from A8: it unconditionally
+writes `01 = 01`, `41 = 0F`, and `30 = BB`, waiting 1 ms after each, then reads `30`. It has none of
+A8's `22/23` configuration steps. Its download entry `0x365C0` additionally configures
+download-state registers and verifies firmware readback; the corresponding A8 entry does not perform
+that readback. Normal SPI images still use the geometry-dependent framing at `0x2E990`, but FT9338
+selects mode 2 after reading an image while other legacy types select mode 1. A common frame format
+alone is therefore insufficient to enable the full A8 lifecycle.
 
-本次未完成这一组全部 boot-A/boot-B 下载、升级分支和失败恢复路径的规范化，
-因此不应冒用 A8 冷启动生命周期。进一步核查已有固件运行的入口后，
-可将下面的最小运行时采集协议与冷启动能力分别实现。
+At the time of this initial analysis, this group's complete boot-A/boot-B download, update, and
+failure-recovery paths had not been specified. The following minimal runtime capability was
+deliberately separated from cold start instead of borrowing A8's lifecycle. Subsequent cold-recovery
+work is documented in [legacy38 recovery](legacy38-recovery.md); the historical warm-only scope
+below is not the current overall support limit.
 
-### FT9338 / FT9536 最小运行时采集协议
+<a id="ft9338--ft9536-最小运行时采集协议"></a>
 
-这是一个**要求已有指定版本应用固件正在运行**的能力，
-并非完整的冷启动支持。以下事实来自实际调用链，而非仅由公共方法表推断：
+### Minimal FT9338 / FT9536 runtime capture protocol
 
-`0x2C754` 先通过 `0x28668` 返回空闲，接着调用 `0x2C8BC` 读版本，
-版本一致时直接调用本组的 `0x36A30` 配置，最后以 mode 1 首次布防。
-版本检查真实比较寄存器 `1A`、`3C` 与对象参数；其失败分支才进入固件处理。
-Linux 最小运行时能力可以明确拒绝该失败分支，不需要实现未知冷启动动作才能采集。
+This capability **requires the specified application firmware to be running already**; it does not
+by itself provide complete cold-start support. The facts below come from actual call chains, not
+merely a shared method table.
 
-| 步骤 | FT9338 | FT9536 | 控制流证据 |
+`0x2C754` first returns to idle through `0x28668`, then reads versions through `0x2C8BC`. Matching
+versions lead directly to this group's `0x36A30` configuration and initial arming in mode 1. Version
+checks actually compare registers `1A` and `3C` with object parameters; only the failure branch
+enters firmware handling. A minimal Linux runtime capability may explicitly reject that branch
+without implementing unknown cold-start actions.
+
+| Step | FT9338 | FT9536 | Control-flow evidence |
 | --- | --- | --- | --- |
-| 读取运行时身份 | `14/15 = 58 58` | `14/15 = 40 80` | `0x27290` |
-| 读取固件版本 | `1A = 40`、`3C = 10` | `1A = 23`、`3C = 13` | `0x2C8BC` 与各自构造参数 |
-| 返回空闲 | 两次单字节 `70`，SPI 间隔 5 ms；按当前 mode 停止控制 | 相同，但 mode 地址不同 | `0x28668` → `0x28C54` / `0x285CC` |
-| mode 寄存器 | `76` | **`47`** | `0x3574C`、`0x35C44`、`0x285CC` |
-| mode 1 或未知 mode 的停止 | `1E = 00`、`1F = 00`，SPI 等 10 ms | 相同 | `0x28668` |
-| 当前 mode 2/3/4 的停止 | 软件复位后跳过上述 `1E/1F` 写 | 相同 | `0x28668` |
-| MCU 初始化 | 无条件 `01 = 01`，等 1 ms；`41 = 0F`，等 1 ms；`30 = BB`，等 1 ms；回读 `30` | 相同 | `0x36A30` |
-| 首次正常布防 | mode `01`，`1F = 01`，`1E = 01`，10 ms 后读 `1D` | 相同，mode 写 `47` | `0x2C754` → `0x287D4` |
-| IRQ 后数据就绪 | MCU `20/21 = A5 5A`，手指 `1D = 01` 或 `A0` | 相同 | `0x2DC20` → `0x2841C` |
-| 图像 SRAM 地址 | `3400` | `3400` | `0x2E990` |
-| 宽 × 高、像素字节数 | 88 × 88，7744 | 64 × 128，8192 | 构造参数、`0x2D4A0`、`0x2E990` |
-| 完整图像请求头 | `04 FB 34 00 1E 48` | `04 FB 34 00 20 08` | `0x2E990` → `0x2F020` |
-| 完整交易长度 | 7752 字节 | 8200 字节 | 同上 |
-| 数据提取 | 从响应偏移 8 处取 N 字节，每字节反相 | 相同 | `0x2E990` |
-| 成功读图后的模式 | **mode 2** | **mode 1** | `0x2E990` 尾部分支只对内部类型 1 选择 mode 2 |
+| Runtime identity read | `14/15 = 58 58` | `14/15 = 40 80` | `0x27290` |
+| Firmware version read | `1A = 40`, `3C = 10` | `1A = 23`, `3C = 13` | `0x2C8BC` and respective constructor parameters |
+| Return to idle | Two single-byte `70` commands, 5 ms apart on SPI; stop controls according to current mode | Same, with a different mode address | `0x28668` → `0x28C54` / `0x285CC` |
+| Mode register | `76` | **`47`** | `0x3574C`, `0x35C44`, `0x285CC` |
+| Stop mode 1 or unknown mode | `1E = 00`, `1F = 00`, wait 10 ms on SPI | Same | `0x28668` |
+| Stop current mode 2/3/4 | Skip the `1E/1F` writes after software reset | Same | `0x28668` |
+| MCU initialization | Unconditionally write `01 = 01`, wait 1 ms; `41 = 0F`, wait 1 ms; `30 = BB`, wait 1 ms; read back `30` | Same | `0x36A30` |
+| First normal arming | Mode `01`, `1F = 01`, `1E = 01`; read `1D` after 10 ms | Same, writing mode at `47` | `0x2C754` → `0x287D4` |
+| Data ready after IRQ | MCU `20/21 = A5 5A`, finger `1D = 01` or `A0` | Same | `0x2DC20` → `0x2841C` |
+| Image SRAM address | `3400` | `3400` | `0x2E990` |
+| Width × height, pixel bytes | 88 × 88, 7744 | 64 × 128, 8192 | Constructors, `0x2D4A0`, `0x2E990` |
+| Complete image-request header | `04 FB 34 00 1E 48` | `04 FB 34 00 20 08` | `0x2E990` → `0x2F020` |
+| Complete transaction length | 7752 bytes | 8200 bytes | Same call chain |
+| Pixel extraction | Take N bytes at response offset 8 and invert each byte | Same | `0x2E990` |
+| Mode after successful image read | **Mode 2** | **Mode 1** | The final branch of `0x2E990` selects mode 2 only for internal type 1 |
 
-读图后的 FT9338 mode 2 具体为：先确认 MCU 空闲；工作模式寄存器 `76 = 02`，
-`54 = 01`；再查询 MCU，期望离开空闲进入工作状态。
-FT9536 选择正常 mode 1，因此向 `47 = 01`、`1F = 01`、`1E = 01` 写入，
-而不是向 `76` 写 mode。证据同为 `0x287D4`；
-`0x2D140` 的无有效手指重试选择也使用这一类型差异。
-这里没有据实际 FT9536 调用点确认 mode 2 优化的证据，
-不能因为通用函数接受参数 2 就宣称 FT9536 快速模式已验证。
+FT9338's post-read mode 2 sequence first confirms MCU idle, writes work-mode register `76 = 02` and
+`54 = 01`, then queries the MCU, expecting it to leave idle for an active state. FT9536 chooses
+normal mode 1, writing `47 = 01`, `1F = 01`, and `1E = 01`; it does not write mode to `76`. Both
+paths are evidenced at `0x287D4`. The retry selection for an invalid finger at `0x2D140` uses the
+same type distinction. No actual FT9536 call site here confirms mode 2 optimization; a common
+function accepting argument 2 does not establish verified FT9536 quick mode.
 
-Linux 的一次性 capture 可以在完成后直接返回空闲，不再执行 Windows 连续采集的
-读图后自动布防；下一次 capture 从已确认的 mode 1 开始。
-无有效手指的 IRQ 也可以结束这次布防并从 mode 1 重试。
-这样无需引入 FT9536 的未证实快速模式，FT9338 的 mode 2 也只是可选优化。
+A single-shot Linux capture may return directly to idle after completion, omitting Windows'
+automatic rearming for continuous capture. The next capture begins from verified mode 1. An IRQ
+without a valid finger may likewise terminate the current arm and retry from mode 1. This avoids
+introducing unproven FT9536 quick mode; FT9338 mode 2 remains an optional optimization.
 
-`0x2DC20` 的中断分派先处理 4、9、11、12 这些特殊类型；
-FT9338 内部类型 1 与 FT9536 类型 6 均进入传统分支：
-调用 `0x2841C`，成功后经 SPI 方法偏移 `A0` 到 `0x2E990`。
-因此本组采用 `0x3400` 的 8 位图像格式有直接 IRQ → 读图调用证据。
+Interrupt dispatch `0x2DC20` handles special types 4, 9, 11, and 12 first. FT9338 internal type 1
+and FT9536 type 6 both take the legacy branch: call `0x2841C`, then, on success, reach `0x2E990`
+through SPI method offset `A0`. Thus this group's `0x3400` 8-bit image format has direct
+IRQ-to-image-read call evidence.
 
-### 本组取消、失败和重开边界
+<a id="本组取消失败和重开边界"></a>
 
-Windows 的通用返回空闲入口已用于固件版本检查前，并支持本组两种 mode 寄存器。
-Linux 可独立组织为有截止时间的状态机：取消/超时/传输失败后停止接收旧 IRQ，
-发送已确认的软件复位与必要的停止命令，再读 MCU 空闲状态；
-只有确认空闲才允许复用当前会话。GPIO 关闭时应维持释放状态。
-精确的软件时序为：单字节 `70` → 等 5 ms → 单字节 `70` → 立即读 mode；
-若需停止控制，再写 `1E/1F = 00` 并等 10 ms。
-此入口没有最后再等 2 ms 的要求，那是 A8 硬复位包装的额外步骤。
-如果传输持续失败或空闲不能成立，结束会话并将设备标为需重新打开，
-不能在 cleanup 中偷偷加载 A8 固件或宣告已经恢复。
+### Cancellation, failure, and reopen limits for this group
 
-最小运行时实现可以明确禁用所有硬件复位、ROM 发现和固件上传路径，
-版本不符、MCU 恢复失败时只报告错误并释放资源。
-下面的硬件复位事实用于区分协议，不能误解为该有限实现必须执行硬件复位。
+The Windows common return-to-idle entry is used before firmware-version checks and supports both
+mode registers. Linux can independently express it as a deadline-bounded state machine: stop
+accepting old IRQs after cancellation, timeout, or transfer failure, send the confirmed software
+reset and required stop commands, then read MCU idle. Only verified idle permits session reuse. GPIO
+release should leave reset deasserted.
 
-需要硬件复位时，本组 `0x36BD0` 也调用两次 GPIO 复位辅助入口，
-两次间隔 10 ms，结束后分别等 **80 ms / 180 ms**；
-它与 A8 的 `0x39C50` 不同，**该入口末尾没有 A8 的额外软件复位和 2 ms 等待**。
-硬件复位后必须重新检查运行时身份和版本；若应用已不存在，
-最小运行时能力应明确报告不支持此次冷启动，不能假设固件一定保留。
+Exact software timing: single byte `70` → wait 5 ms → single byte `70` → read mode immediately. If
+stop controls are needed, write `1E/1F = 00` and wait 10 ms. This entry has no final 2 ms
+requirement; that delay belongs to the A8 hardware-reset wrapper. Persistent transfer failure or
+failure to reach idle ends the session and requires reopen. Cleanup must not silently load A8
+firmware or claim recovery without evidence.
 
-开启这一有限能力必须覆盖以下回归：首次 mode 1、若启用则覆盖 FT9338 的 mode 2、
-FT9536 mode 地址 `47`、两种不同帧长度与像素边界、
-MCU 忙和错误手指状态不读取图像、短帧/传输容量不足拒绝、
-取消及错误清理、固件/AGC 不匹配和复位后身份变化拒绝。
-这是协议实现依据；未进行 FT9338 或 FT9536 实机采集验证。
+The original minimal runtime design could explicitly disable hardware reset, ROM discovery, and
+firmware upload, reporting an error and releasing resources on version mismatch or MCU-recovery
+failure. That was a limited implementation option, not a permanent restriction on the later
+[legacy38 recovery implementation](legacy38-recovery.md). The following hardware-reset facts
+distinguish protocols; they do not require every warm capture to reset the hardware.
 
-## 特殊芯片探测不是统一的无副作用只读操作
+When hardware reset is needed, this group's `0x36BD0` calls the GPIO pulse helper twice, 10 ms
+apart, then waits **80 ms / 180 ms** respectively. Unlike A8's `0x39C50`, **this entry has no final
+A8 software reset and 2 ms wait**. Runtime identity and versions must be rechecked afterward. If the
+application is absent, the minimal runtime capability must report unsupported cold start rather than
+assume firmware survived; any implemented recovery requires its own confirmed identity and protocol.
+
+Regression requirements for this limited capability include initial mode 1; FT9338 mode 2 if
+enabled; FT9536 mode address `47`; both frame lengths and pixel boundaries; no image read while MCU
+is busy or finger status is invalid; short-frame/capacity rejection; cancellation and error cleanup;
+firmware/AGC mismatch; and identity changes after reset. These are implementation requirements, not
+physical FT9338/FT9536 capture validation.
+
+<a id="特殊芯片探测不是统一的无副作用只读操作"></a>
+
+## Special-chip probing is not uniformly read-only or side-effect-free
 
 ### FT9368
 
-`0x26D9C` 通过专用传输入口 `0x2E200` 先发 `FF 00 00 00`，等待 5 ms；
-随后用 `91 80 00 20 00 00 00` 请求 32 字节块，总交易 39 字节，
-块数据从完整响应偏移 7 开始。
-块内偏移 19、20 的两个字节组成大端芯片 ID，目标为 `9368`；
-对应完整响应偏移是 26、27。
-同一块还提供版本、制造方和几何信息，但不能只依靠日志名称推导完整采集格式。
-首条命令改变了设备协议状态，未证明可安全施加于任意未识别的传统芯片。
+`0x26D9C` sends `FF 00 00 00` through dedicated transport entry `0x2E200`, then waits 5 ms. It
+requests a 32-byte block with `91 80 00 20 00 00 00`, a 39-byte total transaction, with block data
+at complete-response offset 7. Block offsets 19 and 20 form the big-endian chip ID, expected to be
+`9368`; their complete-response offsets are 26 and 27. The same block supplies version,
+manufacturer, and geometry information, but log names alone cannot establish the complete capture
+format. The initial command changes protocol state and has not been proven safe for every
+unidentified legacy chip. The subsequent dedicated implementation is described in
+[FT9368 protocol](ft9368-protocol.md).
 
-### FT9369 / FT9365 / FT9769 相关入口
+<a id="ft9369--ft9365--ft9769-相关入口"></a>
 
-主探测路径 `0x10A74` 经过 `0xFD94` 写内部寄存器 `C6 = 01`、等待并回读，
-随后 `0x10D70` 从内部地址 `1A8B` 读取芯片 ID。
-内部寄存器封装 `0x1830C/0x18368` 使用 `08 F7` / `09 F6`，
-与运行时 `10 EF` / `11 EE` 不同；16 位内部地址读取还包含地址标志及不同响应封装。
-这不是可以替代传统 `14/15` 的通用只读查询。
+### Entries related to FT9369 / FT9365 / FT9769
 
-后续 `ft93xx` 路径 `0x19978` 另有复位、SPI 模式设置、ID 接受表、
-校验与子型号细分：例如 `9391` 还可能根据 `1816` 的结果细分为 `9395`。
-其存在不能证明所有这类 ID 的 capture、GPIO 时序和恢复流程已经完整支持。
-在识别前允许哪些写操作、错误后如何恢复，需要单独形成后端规范；
-不能通过给未知设备遍历所有初始化序列来补足证据。
+The main probe at `0x10A74` goes through `0xFD94` to write internal register `C6 = 01`, wait, and
+read it back, then reads chip ID at internal address `1A8B` through `0x10D70`. Internal-register
+wrappers `0x1830C/0x18368` use `08 F7` / `09 F6`, unlike runtime `10 EF` / `11 EE`. Reads of 16-bit
+internal addresses also carry an address flag and use different response framing. This is not a
+universal read-only substitute for legacy `14/15` queries.
 
-## 本轮 Linux 实现和测试边界
+The subsequent `ft93xx` path at `0x19978` additionally includes reset, SPI-mode setup, an ID
+acceptance table, validation, and variant classification: for example, `9391` may become `9395`
+according to `1816`. Its existence does not prove that capture, GPIO timing, and recovery are fully
+supported for every such ID. Permitted writes before identification and recovery after errors need a
+separate backend specification; trying every initialization sequence on unknown devices cannot fill
+an evidence gap. Subsequent specifications are in [special probing](special-probe.md),
+[FW9369 protocol](fw9369-protocol.md), and [ft93xx protocol](ft93xx-protocol.md).
 
-本报告为 FT9348 与 FT9361 共用 A8 初始化、采集和按芯片选择固件提供静态证据。
-新增实现应至少覆盖：两种帧长度和像素边界、容量不足拒绝、版本不符、
-ROM/运行时冲突、错误固件拒绝、取消/超时后的复位、关闭重开和中断清理。
-数学合成图像可以验证内存和状态机，不得用真实指纹材料作仓库测试夹具。
+<a id="本轮-linux-实现和测试边界"></a>
 
-FT9348 图像几何不同，旧 FT9361 模板与匹配阈值的有效性不能自动推广；
-复用采集代码不等于已有跨芯片认证质量验证。上述新芯片路径尚无实机验证。
+## Linux implementation and test scope of this analysis
+
+This report provides static evidence for shared A8 initialization and capture on FT9348/FT9361, with
+chip-specific firmware selection. Implementation tests must at least cover both frame lengths and
+pixel boundaries, capacity rejection, version mismatches, ROM/runtime conflicts, incorrect firmware
+rejection, reset after cancellation/timeout, close/reopen, and interrupt cleanup. Mathematical
+synthetic images can validate memory and state-machine behavior; real fingerprints must not become
+repository fixtures.
+
+FT9348 has different geometry. The validity of historical FT9361 templates and matching thresholds
+does not transfer automatically; reusing capture code is not evidence of authentication quality on
+another chip. Current parameterized matching is documented separately in
+[family authentication](family-authentication.md). The new-chip paths described by this original
+analysis lacked physical-device validation; current implementation and hardware evidence are tracked
+in the [support matrix](status.md#implemented-functions-and-test-limits).

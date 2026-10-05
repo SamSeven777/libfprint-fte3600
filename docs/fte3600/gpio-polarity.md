@@ -1,120 +1,150 @@
-# Windows GPIO 写值与 Linux reset 语义
+# Windows GPIO writes and Linux reset semantics
 
-静态核查日期：2026-10-04。样本为 2.0.3.102 x64 主驱动，
-SHA-256：`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`。
-本文仅记录接口事实和独立分析，不包含反汇编或厂商实现。
+[Documentation index](README.md)
 
-## 已确认的原始写值链
+<a id="windows-gpio-写值与-linux-reset-语义"></a>
 
-| 层次 | RVA | 已确认事实 |
+Static verification date: 2026-10-04. Sample: the x64 main driver from package 2.0.3.102, SHA-256
+`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`. This document records interface
+facts and independent analysis, without disassembly or vendor implementation code.
+
+<a id="已确认的原始写值链"></a>
+
+## Confirmed raw-value call chain
+
+| Layer | RVA | Confirmed fact |
 | --- | --- | --- |
-| 复位辅助入口 | `0x2F5E0` | 一个单字节缓冲依次设置为 `01`、`00`、`01`；第一次后等待 10 ms，第二次后等待 20 ms |
-| GPIO 包装 | `0x31414` | 获取锁，原样传递上述缓冲指针，调用 GPIO 写入口，释放锁；不修改缓冲 |
-| GPIO 写入口 | `0x3106C` | 检查指针和 GPIO 目标句柄，创建 WDF 请求 |
-| 预分配内存包装 | `0x31202` 附近 | `WdfMemoryCreatePreallocated` 使用原始缓冲指针，`BufferSize = 1`；没有复制或转换数值 |
-| 请求格式化 | `0x31285` 附近 | `WdfIoTargetFormatRequestForIoctl` 的 IOCTL 数值为 **`0x00480004`**；同一 WDFMEMORY 作为输入和输出内存参数，两个偏移参数均为空 |
-| 请求发送 | `0x3130E` 附近 | 向该 GPIO I/O target 发出请求；该路径没有逻辑反相、按位翻转、根据机型或极性查表 |
+| Reset helper | `0x2F5E0` | A one-byte buffer is set successively to `01`, `00`, `01`; the first write is followed by 10 ms and the second by 20 ms |
+| GPIO wrapper | `0x31414` | Acquires a lock, passes the original buffer pointer to the GPIO writer, and releases the lock; it does not alter the buffer |
+| GPIO writer | `0x3106C` | Checks the pointer and GPIO target handle, then creates a WDF request |
+| Preallocated-memory wrapper | Near `0x31202` | `WdfMemoryCreatePreallocated` uses the original buffer pointer with `BufferSize = 1`; the value is neither copied nor converted |
+| Request formatting | Near `0x31285` | `WdfIoTargetFormatRequestForIoctl` receives IOCTL **`0x00480004`**; the same WDFMEMORY is passed as input and output memory, with both offset arguments null |
+| Request submission | Near `0x3130E` | Sends to that GPIO I/O target; this path has no logical inversion, bitwise inversion, or model/polarity lookup |
 
-因此可以确定：**厂商上层传入的 1/0 没有在这条调用链内被转换成另一组值。**
-结合下面的官方接口核对，这些值描述 GPIO 控制器引脚的输出电平，
-不是 reset 的逻辑断言值。
+Therefore, **the vendor's upper-layer 1/0 values are not converted into different values in this
+call chain**. Together with the official interface contract below, they describe GPIO-controller pin
+output levels, not logical reset assertion values.
 
-这里的“一字节”是整个 GPIO 连接的 pin 位图缓冲长度，
-不是 Windows 为 reset 提供的单独布尔语义。
-单针连接时关注第 0 位；多针连接还需根据官方接口的 pin 顺序解释其他位。
-样本上层没有传入单独的 reset active-low 标志。
+“One byte” is the length of the pin-bitmap buffer for the entire GPIO connection. It is not a
+separate Windows boolean reset semantic. For a one-pin connection, bit 0 is relevant; a multi-pin
+connection also requires interpreting the other bits according to the official pin order. The
+sample's upper layer does not supply a separate reset active-low flag.
 
-## GPIO 连接如何选择
+<a id="gpio-连接如何选择"></a>
 
-资源解析入口 `0x2EB20` 枚举 WDF 提供的翻译后资源：
+## GPIO connection selection
 
-- SPI 连接按连接资源的 class 2、type 2 识别。
-- GPIO I/O 连接按 class 1、type 2 识别；读取 64 位 connection ID。
-- 第一个 GPIO I/O 连接经 `0x2EDB4` 交给 `0x2FF10` 打开；
-  重复 GPIO 连接只记录日志，没有基于整机型号分配另一套极性。
-- `0x2FF10` 通过 `\\.\RESOURCE_HUB\<connection ID>` 创建 I/O target，
-  以 `GENERIC_WRITE` 打开；未设置“逻辑断言”参数。
-- 下载模式的重开入口 `0x30ABC` 继续使用保存的同一个 connection ID。
-- IRQ 则按独立中断资源创建；没有证据表明 reset I/O 值取反由 IRQ 极性控制。
+Resource-parser entry `0x2EB20` enumerates the translated resources supplied by WDF:
 
-此 GPIO 资源分支在已核查路径中没有读取一个 reset 极性字段，
-也没有从注册表、DMI 机型或资源 flags 得出 1/0 的转换。
-这不等于已经获得每台机器的实际 ACPI 表或板级电气测量。
+- The SPI connection is identified by connection resource class 2, type 2.
+- A GPIO I/O connection is identified by class 1, type 2; its 64-bit connection ID is read.
+- The first GPIO I/O connection is passed from `0x2EDB4` to `0x2FF10` for opening. Additional GPIO
+  connections are only logged; they do not select a different model-specific polarity.
+- `0x2FF10` creates an I/O target through `\\.\RESOURCE_HUB\<connection ID>` and opens it with
+  `GENERIC_WRITE`; there is no logical-assertion parameter.
+- Download-mode reopen entry `0x30ABC` reuses the same saved connection ID.
+- The IRQ is created from a separate interrupt resource. There is no evidence that IRQ polarity
+  controls inversion of reset I/O values.
 
-## A8 的完整时序组合
+In the examined path, this GPIO-resource branch neither reads a reset-polarity field nor derives a
+1/0 conversion from registry values, DMI model names, or resource flags. This does not supply the
+actual ACPI tables or board-level electrical measurements for every computer.
 
-FT9348 和 FT9361 共用的 `0x39C50`：
+<a id="a8-的完整时序组合"></a>
 
-1. 执行上述 GPIO 辅助入口一次：原始值 `01`，10 ms，`00`，20 ms，`01`。
-2. 等待 10 ms，再执行同样的 GPIO 辅助入口一次。
-3. 等待对象参数 160 ms。
-4. 经 `0x28C54` 发送单字节 SPI `70`，等 5 ms，再发一次 `70`；随后等 2 ms。
+## Complete A8 timing sequence
 
-由此不能把“原始 GPIO 值 1”直接传给语义为 `asserted` 的 Linux ioctl。
-Linux `gpiod_set_value*()` 若使用 active-low 描述符会进行逻辑到物理的转换，
-必须先确定希望产生的物理波形，再设置描述符极性与调用值。
-驱动也应区分 reset 的输出电平与 IRQ 的输入触发极性。
+FT9348 and FT9361 share `0x39C50`:
 
-## Windows 官方接口核对
+1. Execute the GPIO helper once: raw `01`, wait 10 ms, `00`, wait 20 ms, `01`.
+2. Wait 10 ms and execute the same GPIO helper again.
+3. Wait the object parameter of 160 ms.
+4. Through `0x28C54`, send single-byte SPI `70`, wait 5 ms, then send another `70`; wait a further 2
+   ms afterward.
 
-Microsoft 公布的 [gpio.h](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/gpio.h)
-将 `IOCTL_GPIO_WRITE_PINS` 定义为 GPIO 设备类型、功能号 1、buffered 方式和 any-access。
-结合 [devioctl.h](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/devioctl.h)
-中的设备类型 `0x48` 和控制码字段布局，得到 `(0x48 << 16) | (1 << 2) = 0x00480004`，
-与样本常量精确一致。
+Raw GPIO value 1 must therefore not be passed unchanged to a Linux interface whose value means
+`asserted`. With an active-low descriptor, Linux `gpiod_set_value*()` converts logical values to
+physical levels. Establish the intended physical waveform before choosing descriptor polarity and
+call values. Reset output level and IRQ input trigger polarity are separate concepts.
 
-[IOCTL_GPIO_WRITE_PINS 官方说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/gpio/ni-gpio-ioctl_gpio_write_pins)
-规定输入缓冲每一位写到连接中相应的 GPIO 引脚：第 0 位对应连接中的第一个 pin，
-并且请求作用于连接中的所有输出 pin。这解释了样本的一字节缓冲及相同的输入/输出内存。
-[GPIO_WRITE_PINS_PARAMETERS 官方说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/gpioclx/ns-gpioclx-_gpio_write_pins_parameters)
-进一步说明回调将这些位写入 pin，并且该写操作没有已定义的 flags；
-这里没有 reset active-low 的逻辑转换参数。
+<a id="windows-官方接口核对"></a>
 
-据此，单针连接的 **raw `01 → 00 → 01` 是控制器引脚高 → 低 → 高的输出命令**，
-其等待为高 10 ms、低 20 ms。这个结论来自程序参数与 GPIO 接口合同，
-不是已经在板端用示波器测量到相同电压。
-板级反相器、供电域或未取得的 ACPI/OEM 特性仍不能由一个公开包排除。
+## Verification against official Windows interfaces
 
-## Linux 逻辑值与物理电平的对应
+Microsoft's
+[gpio.h](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/gpio.h)
+defines `IOCTL_GPIO_WRITE_PINS` with the GPIO device type, function number 1, buffered method, and
+any-access. Combining the device type `0x48` and control-code layout in
+[devioctl.h](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/devioctl.h)
+gives `(0x48 << 16) | (1 << 2) = 0x00480004`, exactly matching the sample constant.
 
-[Linux GPIO consumer 官方说明](https://docs.kernel.org/driver-api/gpio/consumer.html#the-active-low-and-open-drain-semantics)
-明确 `gpiod_set_value*()` 以及获取描述符时的输出初始值使用逻辑 active/inactive 语义。
-active-low 描述符下，逻辑 1 输出物理低，逻辑 0 输出物理高。
+The
+[IOCTL_GPIO_WRITE_PINS documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/gpio/ni-gpio-ioctl_gpio_write_pins)
+specifies that each input-buffer bit is written to the corresponding GPIO pin in the connection: bit
+0 corresponds to its first pin, and the request applies to all output pins in the connection. This
+explains the sample's one-byte bitmap and use of the same input/output memory. The
+[GPIO_WRITE_PINS_PARAMETERS documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/gpioclx/ns-gpioclx-_gpio_write_pins_parameters)
+further states that the callback writes those bits to the pins and that the write operation has no
+defined flags. There is no reset active-low conversion parameter here.
 
-| 操作意图 | Windows 写入位 | GPIO 控制器目标电平 | Linux active-low 描述符逻辑值 |
+For a one-pin connection, **raw `01 → 00 → 01` commands the controller pin high → low → high**, with
+10 ms high and 20 ms low. This conclusion follows from program arguments and the GPIO interface
+contract; it is not an oscilloscope measurement of the board's voltage. Board-level inverters, power
+domains, or unavailable ACPI/OEM characteristics cannot be excluded by one public package.
+
+<a id="linux-逻辑值与物理电平的对应"></a>
+
+## Linux logical values and physical levels
+
+The
+[Linux GPIO consumer documentation](https://docs.kernel.org/driver-api/gpio/consumer.html#the-active-low-and-open-drain-semantics)
+states that `gpiod_set_value*()` and initial output values used when acquiring descriptors have
+logical active/inactive semantics. With an active-low descriptor, logical 1 outputs physical low and
+logical 0 outputs physical high.
+
+| Intent | Windows bit | Target controller level | Linux active-low descriptor value |
 | --- | ---: | --- | ---: |
-| 复位前/后的释放状态 | 1 | 高 | 0 |
-| 复位脉冲 | 0 | 低 | 1 |
+| Released before/after reset | 1 | High | 0 |
+| Reset pulse | 0 | Low | 1 |
 
-因此使用 active-low reset 描述符的 Linux 复位接口应该接收“是否断言 reset”，
-以 `0 → 1 → 0` 产生样本对应的物理 `高 → 低 → 高`，
-而不是把 Windows 的原始 `1 → 0 → 1` 直接当逻辑断言值传入。
-`GPIOD_OUT_LOW` 请求初始逻辑 0；在已正确配置的 active-low 输出上，这对应物理高。
-但这个参数本身不足以证明描述符获取期间已经保持高电平，不能按宏名推断物理低，
-也不能只凭调用参数宣称无毛刺。
+A Linux reset interface using an active-low descriptor should accept whether reset is asserted.
+Logical `0 → 1 → 0` then produces the sample's physical high → low → high. Passing the Windows raw
+`1 → 0 → 1` directly as logical assertion values would invert the sequence. `GPIOD_OUT_LOW` requests
+initial logical 0, which is physical high on a correctly configured active-low output. That argument
+alone does not prove the line stays high throughout descriptor acquisition. Its macro name does not
+imply physical low, and the call arguments alone cannot establish glitch-free behavior.
 
-[Linux 6.8 的 ACPI GPIO 实现](https://raw.githubusercontent.com/torvalds/linux/v6.8/drivers/gpio/gpiolib-acpi.c)
-中，`acpi_gpio_to_gpiod_flags()` 可根据 `OutputOnly`、pull 配置与极性推导初值，
-`acpi_gpio_update_gpiod_flags()` 可将调用者传入的方向/初始值覆盖；
-`GPIOD_ASIS` 也不能自动绕开该规则。
-例如 `OutputOnly + PullDown` 在 active-low reset 上可能要求初始逻辑 1，
-与目标释放电平冲突。获取后再修改方向不能消除获取阶段可能发生的错误脉冲。
-正常 `_DSD` 属性又先于 driver mapping 处理，不能假设 mapping 的
-`NO_IO_RESTRICTION` 标志可以覆盖所有命名属性路径。
+In the
+[Linux 6.8 ACPI GPIO implementation](https://raw.githubusercontent.com/torvalds/linux/v6.8/drivers/gpio/gpiolib-acpi.c),
+`acpi_gpio_to_gpiod_flags()` can derive an initial value from `OutputOnly`, pull configuration, and
+polarity. `acpi_gpio_update_gpiod_flags()` can override the caller's direction/initial-value flags;
+`GPIOD_ASIS` does not automatically bypass this rule. For example, `OutputOnly + PullDown` on an
+active-low reset can require initial logical 1, conflicting with the intended released level.
+Changing direction after acquisition cannot undo an incorrect pulse during acquisition. Normal
+`_DSD` properties also take precedence over driver mappings, so a mapping's `NO_IO_RESTRICTION` flag
+cannot be assumed to override every named-property path.
 
-因此桥接驱动必须在获取 GPIO 前检查资源、命名 reset 属性和 bias 的一致性，
-拒绝与目标物理波形冲突或无法无歧义解释的配置。
-此源代码核查说明了需要处理的初始化风险；最终是否无毛刺仍需电气验证。
+The glue must therefore check consistency of the resource, named reset property, and bias before
+acquiring the GPIO, rejecting configurations that conflict with the intended waveform or cannot be
+interpreted unambiguously. This source review establishes an initialization risk that must be
+handled; electrical validation is still required to demonstrate glitch-free behavior.
 
-本轮桥接实现采用以下一致性规则：获取 GPIO 前拒绝 PullDown 和未知 bias；
-命名 `reset-gpios` / `reset-gpio` 属性若存在，必须唯一、只有一个引用、
-active-low，并引用本设备唯一的 GPIO I/O 资源的 pin 0。
-没有命名属性时才注册 active-low driver mapping。
-获取后检查 active-low 并显式配置逻辑释放输出，不使用 raw 接口掩盖属性冲突。
-Linux 6.8 下允许的 PullUp/None/Default 不会把上述初始值改为逻辑断言。
-因此具有矛盾固件描述的板卡会拒绝 probe；这是明确的兼容性边界，不是已经实测无毛刺。
+The current glue rejects PullDown and unknown bias before acquisition. If `reset-gpios` /
+`reset-gpio` is present, exactly one property with one reference is required; it must be active-low
+and reference pin 0 of this device's unique GPIO I/O resource. An active-low driver mapping is
+registered only when no named property exists. After acquisition, the underlying descriptor's
+active-low setting is checked and logical released output is explicitly configured. Under Linux 6.8,
+the accepted PullUp/None/Default cases do not change this intended initial value into logical
+assertion. Conflicting firmware descriptions therefore cause probe rejection; this is an explicit
+compatibility boundary, not a claim of measured glitch-free operation.
 
-这是支持 ACPI 资源、清晰 reset 语义的实现方案。默认 active-low 必须记录为
-该 FTE3600 协议的已分析物理波形依据，而不是声称由 `GpioIo` 自带极性字段推导。
-若命名 reset 属性明确给出不同极性，必须处理它与期望物理波形的矛盾，
-不能在报告中继续声称产生了同一波形。IRQ 触发极性独立取其 ACPI 中断资源。
+The exported reset-only GPIO chip is a separate interface. Its callbacks forward **raw physical
+values** to the underlying GPIO so that the userspace line's active-low conversion is applied only
+once. This raw forwarding does not bypass validation of the underlying ACPI resource or conceal a
+conflicting reset property. See the [current transport architecture](acpi-spidev.md) for the
+exported interface.
+
+The active-low default is justified by the analyzed FTE3600 waveform, not by a polarity field in
+`GpioIo`, which has none. A named reset property specifying a conflicting polarity must be handled
+explicitly; the report must not continue to claim the same waveform. IRQ trigger polarity is
+independently obtained from its ACPI interrupt resource.

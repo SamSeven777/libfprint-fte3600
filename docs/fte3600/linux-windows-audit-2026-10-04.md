@@ -1,126 +1,188 @@
-# Linux / Windows 行为核对 — 2026-10-04
+<a id="linux--windows-行为核对--2026-10-04"></a>
 
-原始核对基线为 `main` 的 `e8ab02e`，Windows 证据来自已分析的
-`ftWbioUmdfDriverV2.dll` 2.0.3.102。随后整合 `host-matcher` 的 `eacf7bc`
-A1 修复；当前流程保留实机已验证的快路径，再补充有界慢启动回退。
-代码审查和模拟测试不代表 Medion 或 GPD 实机已通过。
+# Linux/Windows behavior audit — 2026-10-04
 
-后续再次对照原始 Windows 反汇编，修复了 38 家族恢复失败仍启动应用、
-专用身份确认失败仍继续探测两项问题；见 [本轮复查与验证](windows-recheck-2026-10-04.md)。
+[Documentation index](README.md)
 
-## 已确认并修复：legacy 识别前遗漏唤醒
+**Historical record of the custom SPI bridge.** The original Linux baseline
+was main `e8ab02e`, later incorporating the A1 fixes from host-matcher
+`eacf7bc` and the CS-cleanup changes described below. Windows evidence came
+from the package identified as 2.0.3.102. The DLL's actual file version is
+clarified in [lifecycle coverage](windows-lifecycle-coverage.md).
 
-旧流程仅在选中后端之后执行 legacy 软件复位。需要唤醒才能返回
-运行时几何的芯片可能在选择后端前就被拒绝，或者被误送入 ROM 探测。
+The observations and test counts below describe those successive historical
+checkpoints, not current main. In particular, the old kernel bridge's
+last-reference CS restoration and GpioInt-only restriction do **not** describe
+the current stock-spidev/ACPI-glue transport. Use
+[the current transport contract](acpi-spidev.md) for those guarantees and limits.
 
-Windows 的 legacy 运行固件检查顺序是：
+The merged discovery flow retained the hardware-tested A1 fast path and added
+bounded slow-start fallback. Code review and simulated tests did not establish
+successful operation on Medion or GPD hardware.
 
-`单字节 70 → 5 ms → 单字节 70 → 读 20/21 → A5 5A → 350 ms → 读 14/15`
+A subsequent comparison with original Windows disassembly found and fixed
+startup after failed legacy38 recovery and continued probing after conflicting
+special-family identity. See the
+[follow-up audit and validation](windows-recheck-2026-10-04.md).
 
-Windows 最多六轮，失败轮之间等 5 ms。合并后的 Linux 在普通应用探测
-未命中后、C6 工厂协商之前发送一对 `70`，保留 A1 实测路径的尾部 2 ms，
-先重复读取几何。正向结果直接选择后端；只有几何为空才进入 MCU 状态检查、
-350 ms 等待及最多六轮的回退。非空未知结果仍阻止 ROM 固件回退，
-但唤醒前的旧数据不会阻止尝试唤醒。正向身份不一致和传输失败立即终止；
-已开始的一对命令完成后响应取消，不再读寄存器或继续其他协议。
-不在 C6 协商后再串联第二套 legacy 唤醒。
+<a id="已确认并修复legacy-识别前遗漏唤醒"></a>
 
-Windows Detect 第二次 `70` 后没有 2 ms；该值也存在于它的 A8 下载后包装，
-Linux 此处保留它的理由是 A1 已验证路径，不能写成 Windows Detect 要求。
-见 [Windows 调用链](windows-runtime-adaptation.md#已有运行固件的路径)及
-[Linux 探测设计](dynamic-discovery.md)。
+## Confirmed and fixed: missing wake before legacy identification
 
-## 对外部审计各项说法的核对
+The earlier flow performed the legacy software reset only after selecting a
+backend. A sensor that needed wake before reporting runtime geometry could
+therefore be rejected before backend selection or sent into ROM probing.
 
-| 审计说法 | 当前结论 |
+The Windows running-firmware check follows this order:
+
+`one-byte 70 → 5 ms → one-byte 70 → read 20/21 → A5 5A → 350 ms → read 14/15`
+
+Windows makes at most six attempts, waiting 5 ms between unsuccessful rounds.
+The merged Linux flow sends one pair of `70` commands after normal application
+probes fail and before C6 factory negotiation. It retains the hardware-tested
+A1 path's final 2 ms delay and first repeats the geometry read. A positive
+result selects the backend; only blank geometry enters the MCU-status check,
+350 ms wait and bounded fallback of at most six rounds. An unknown nonempty
+result still blocks ROM firmware fallback, but stale pre-wake data does not
+prevent trying wake. Conflicting positive identity or a transfer failure ends
+discovery immediately. Cancellation completes an already-started command pair,
+then sends no more register reads or protocol probes. There is no second
+legacy-wake sequence after C6 negotiation.
+
+Windows Detect does not wait 2 ms after its second `70`. That delay also exists
+in its A8 post-download wrapper, but Linux retains it here because of the
+validated A1 path, not because Windows Detect requires it. See the
+[Windows call chain](windows-runtime-adaptation.md) and
+[Linux discovery design](dynamic-discovery.md).
+
+<a id="对外部审计各项说法的核对"></a>
+
+## Review of external audit claims at that checkpoint
+
+| Claim | Historical finding |
 | --- | --- |
-| 严格 ACPI 资源计数和 bias 检查可能拒绝 OEM 布局 | 属实，是兼容性边界；没有足够证据把历史 Medion 全零归因于它，更没有“最高频原因”的统计依据。 |
-| reset / IRQ 交错或分属不同控制器会让 IRQ 索引 0 取错 | 不成立。索引只计 GpioInt，资源各自携带控制器引用；当前只接受一个 GpioInt。仅有普通 Interrupt 的布局确实不支持。 |
-| Linux active-low 会与 Windows 的物理 H/L/H 相反 | 不成立。逻辑 0/1/0 经 active-low 转换正是物理 H/L/H；固定板内反相器也会同样作用于两者。引脚、供电和实际波形仍需实测。 |
-| Windows 在所有芯片识别之前统一双硬复位 | 现有证据不支持。Windows 先做专用家族探测，失败重试及下载后启动才有相应硬复位。 |
-| CS 切换依赖桥接 capability | 属实，但当前桥接已公布该能力，而且普通 legacy 探测也会尝试两种极性。旧桥接不提供能力时，用户态不会强行切换。 |
-| 先读专用 ID、失败后配置 C6 必然使芯片挂起 | C6 协商已实现；首轮直接读是探测优化。尚无证据证明这些读操作导致芯片挂起。 |
-| A8 上传后的 2 ms、双硬复位、160 ms 等待缺失 | 这些状态及延迟常量均已实现。但 A1 修复另查明：旧的主循环缓存时间可能缩短实际等待，现已改用请求时的单调时钟。不能仅凭存在延迟调用就保证实际时长。 |
-| FT9338 / FT9536 完全没有冷恢复 | 已过时。已有独立的上传、完整回读和启动路径，但授权条件有明确边界，见下文。 |
-| 非手指 IRQ 上限、38 家族不采用连续 mode 2 必然导致失败 | 属于有界重试及单次采集策略差异，尚未证明是实机故障。A8 自身已有快速模式分支。 |
-| FW9369 打开设备时有手指会污染基线 | 是已知限制；已要求打开设备时无遮挡。采样稳定不能证明没有静止手指。 |
+| Strict ACPI resource counts and bias checks can reject OEM layouts | True as a compatibility boundary. There was insufficient evidence to attribute historical Medion zero responses to it, and no statistics supporting a “most frequent cause” claim. |
+| Interleaved reset/IRQ resources or different controllers make IRQ index 0 select the wrong resource | Not established. That index counts GpioInt resources, each of which carries its controller reference. The old bridge accepted one GpioInt; a layout using only ordinary Interrupt was unsupported at this checkpoint. |
+| Linux active-low produces the opposite waveform from Windows physical H/L/H | False for the requested levels: logical 0/1/0 through active-low produces physical H/L/H. A fixed board inverter would affect both implementations. Pin identity, supply and actual waveform still required measurement. |
+| Windows always performs a double hardware reset before identifying any chip | Not supported by the checked paths. Windows first probes special families; failed retries and post-download startup have their own resets. |
+| CS switching depends on bridge capability | True for the old bridge. It advertised the capability and normal legacy probing tried both polarities; userspace did not force switching when an older bridge lacked it. |
+| Reading special IDs before configuring C6 necessarily hangs the chip | C6 negotiation was implemented; the initial direct read was an optimization. No evidence established that those reads hung the sensor. |
+| A8 upload lacks the 2 ms delay, double hardware reset and 160 ms wait | Those states and timing constants existed. The A1 fixes separately found that cached main-loop time could shorten real waits; delays were changed to use monotonic time at the request. A delay call alone was not proof of actual duration. |
+| FT9338/FT9536 have no cold recovery at all | Already outdated: independent upload, full readback and startup existed, subject to the identity gates below. |
+| The unrelated-IRQ limit or not using continuous mode 2 on legacy38 necessarily causes failure | These were bounded-retry and single-capture policy differences, without proof of a hardware failure. A8 itself has a fast-mode branch. |
+| A finger present during FW9369 open can contaminate the baseline | A known limitation. Open requires an uncovered sensor; stable samples do not prove that a stationary finger is absent. |
 
-GPIO 对照见 [物理与逻辑极性](gpio-polarity.md)。IRQ 索引语义见
-[Linux 6.8 的官方实现](https://github.com/torvalds/linux/blob/v6.8/drivers/gpio/gpiolib-acpi.c#L1035)。
-运行路径分别见 [legacy 恢复](legacy38-recovery.md)、
-[专用家族协商](special-probe.md)、[FW9369 基线](fw9369-protocol.md)
-及 [传感器协议证据](sensor-protocol-evidence.md)。
+See [physical/logical polarity](gpio-polarity.md) and
+[Linux 6.8 IRQ indexing](https://github.com/torvalds/linux/blob/v6.8/drivers/gpio/gpiolib-acpi.c#L1035).
+Protocol details are in [legacy recovery](legacy38-recovery.md),
+[special-family negotiation](special-probe.md), [FW9369 baseline](fw9369-protocol.md)
+and [sensor evidence](sensor-protocol-evidence.md).
 
-## 已确认并修复：进程退出后 CS 遗留
+<a id="已确认并修复进程退出后-cs-遗留"></a>
 
-此前只有用户态探测失败路径恢复 CS，内核关闭设备只释放 reset。
-现在内核记录成功打开时的 CS 极性，在最后一个文件引用释放时恢复，
-覆盖正常关闭与进程终止。若还有 `dup` / `fork` 留下的引用，等最后一个
-引用释放才清理；只恢复 `SPI_CS_HIGH`，不会固定为低有效或改动其他 SPI 参数。
+## Confirmed and fixed in the old bridge: CS retained after process exit
 
-休眠前趁控制器仍可用尝试恢复；休眠期间关闭不访问 GPIO 或 SPI。
-未完成的恢复在 resume 和下次 open 时重试。失败会保留原目标和配置失效状态，
-即使软件中的 mode 已写回原值，也必须重新配置成功才能打开设备。
-睡眠使旧会话失效的规则保持不变。移除时仅在控制器仍可用时尝试恢复，
-之后关闭文件不会访问已移除的资源。
+Previously, only userspace discovery failures restored CS; kernel close
+released reset without restoring mode. The old bridge was changed to record
+CS polarity at successful open and restore it when the last file reference was
+released, covering normal close and process termination. A surviving
+`dup`/`fork` reference delayed cleanup until its last release. Only
+`SPI_CS_HIGH` was restored; CS was not forced low and other SPI parameters
+were preserved.
 
-恢复的是会话原始配置，不代表证明 ACPI 的极性正确，也不提供探测期间的
-共享总线隔离。生产 CS helper 的 49 个测试场景覆盖原始高/低、其他 mode 位、
-切换失败和回滚失败、恢复失败后的重试；Linux 6.8 `W=1` 模块编译通过。
-生命周期 mock 同步关闭恢复约定，保留关闭前用户态失败清理断言，并新增
-两个相反极性的重复打开/识别/采集回归。本次完整生命周期测试在认证/IPA
-关闭配置通过 116 项、开启配置通过 119 项，均无失败或跳过。
-这些是本地逻辑与编译验证，实际进程终止和睡眠恢复仍需目标机器验证。
+Before suspend, the bridge attempted restoration while the controller remained
+available. Close during suspend did not access GPIO or SPI. An incomplete
+restore was retried at resume and the next open; failures retained the original
+target and invalid-configuration state. Even when the software mode already
+contained the original bit, setup had to succeed before opening again.
+Suspend still invalidated old sessions. Removal attempted restoration only
+while the controller remained accessible; later closes did not touch removed
+resources.
 
-## 仍然存在的边界
+This restored the session's original configuration, not a proven correct ACPI
+polarity, and did not isolate a shared bus during probing. Production helper
+tests covered 49 cases: original high/low CS, other mode bits, failed changes
+and rollbacks, and retry after failed restoration. A Linux 6.8 `W=1` module
+build passed. Lifecycle fixtures added opposite-polarity reopen/discover/capture
+cases while retaining userspace failure-cleanup checks. This later checkpoint
+passed 116 lifecycle cases with authentication/IPA off and 119 with them on,
+with no failures or skips. Actual process termination and suspend/resume still
+needed target-hardware verification.
 
-- `main` 的 FT9536 支持正向 boot-A 首次冷识别；B38 恢复要求本次会话
-  已有 FT9338 / FT9536 的运行时几何，并与 OTP 相符。没有身份、始终全空白
-  的 FT9338 不能自动选择固件。`medion-spidev` 的显式候选启动是另一个实验路径。
-- 桥接仍只接受明确的单 SPI / 单 reset GpioIo / 单边沿 GpioInt 布局。
-  放宽资源数量必须先确定资源用途，不能随意选择额外引脚。
-- 整段探测仍没有共享 SPI 总线隔离；会话结束时恢复 CS 不会解决该问题。
-  尚无证据将它认定为历史 Medion 全零的原因。
-- FW9369 每次初始化需要无遮挡参考基线；采样稳定不足以判断有没有静止手指。
-  污染可能影响后续图像，但不能据此断言每次都会全零或识别全部失败。
-- 缺失唤醒是软件缺陷，但是否解释某一台机器的历史 `00 00`，仍需要该机器
-  唤醒前后 MCU 状态、运行时几何及实际 CS 的对照日志。
+**This mechanism belonged to the custom bridge.** Current stock spidev cannot
+guarantee immediate native-CS restoration after abnormal process exit; see the
+[current contract](acpi-spidev.md).
 
-## 合并范围与本地验证
+<a id="仍然存在的边界"></a>
 
-合并保留 `main` 的安装与 SELinux 修复，以及 `host-matcher` 的算法分层、
-IPA 接入、A1 唤醒、单调时钟、V3 大模板录入上限和 `.llseek = NULL` 兼容修改。
-唤醒命令使用严格校验长度的单字节全双工交易；没有新增时钟字节，短传输立即失败。
-V3 按现有 IPA 适配范围只接受 FT9361，拒绝其他芯片被解码成 FT9361；
-同时保留 V3 原始处理版本字段，确保新旧元数据重新编码后逐字节一致。
-其他芯片仍使用各自的 BRISK/V2 设置。
+## Boundaries recorded at the time
 
-认证判定沿用 `host-matcher` 的策略。该分支的 practical BRISK 规则不同于
-原 `main` 的严格判定，本次没有重新调整门槛、策略版本或进行 FAR/FRR 标定。
+- Main supported positively identified boot-A cold discovery for FT9536.
+  Boot-B recovery required runtime FT9338/FT9536 geometry already observed in
+  the same open and consistent OTP. An unidentified, entirely blank FT9338 did
+  not authorize automatic firmware selection. Explicit candidate boot in the
+  separate Medion diagnostic was another experiment.
+- The old bridge required a single SPI connection, a single reset GpioIo and
+  a single edge-sensitive GpioInt. Additional resources could not be accepted
+  by choosing arbitrary pins. Ordinary ACPI IRQ support arrived later.
+- Discovery did not isolate the shared SPI bus. Restoring CS at session end
+  did not fix that; there was no evidence identifying it as the cause of
+  historical Medion zero responses.
+- FW9369 initialization required an uncovered reference baseline. Stable
+  samples could not rule out a stationary finger. Contamination could affect
+  later images, but did not prove that every attempt would be blank or fail.
+- Missing wake was a software defect. Explaining a particular machine's
+  historical `00 00` still required its pre/post-wake MCU state, runtime
+  geometry and actual-CS logs.
 
-在 Ubuntu 24.04 / WSL、GCC 13.3、`werror=true` 下：
+<a id="合并范围与本地验证"></a>
 
-| 配置 | 通过套件 | 完整 lifecycle 通过用例 |
+## Merge scope and local validation
+
+The merge retained main's installer and SELinux fixes and host-matcher's
+algorithm separation, IPA integration, A1 wake, monotonic timing, V3 enrollment
+size limit and `.llseek = NULL` compatibility change. Wake used strictly
+length-checked, one-byte full-duplex transactions, without adding clocks;
+short transfers failed immediately.
+
+V3 remained restricted to the IPA adapter's FT9361 scope and rejected other
+chips being decoded as FT9361. It preserved original processing-version
+metadata so old and new encodings round-tripped byte-for-byte. Other chips
+retained their own BRISK/V2 settings.
+
+Authentication followed the host-matcher branch's policy. Its practical BRISK
+rules differed from the preceding main policy; this merge did not retune
+thresholds, change policy versions or perform FAR/FRR calibration.
+
+The earlier merge-validation checkpoint used Ubuntu 24.04/WSL, GCC 13.3 and
+`werror=true`:
+
+| Configuration | Passing suites | Complete lifecycle cases |
 | --- | ---: | ---: |
-| 个人认证关闭，IPA 关闭 | 26 | 114 |
-| 个人认证开启，IPA 开启 | 26 | 117 |
-| 个人认证开启，IPA 关闭，模板/家族模板/认证专项 | 3 | 本配置未重跑 |
-| 双算法，ASan + UBSan 核心及模板/认证/生命周期专项 | 10 | 117 |
+| Personal authentication off, IPA off | 26 | 114 |
+| Personal authentication on, IPA on | 26 | 117 |
+| Personal authentication on, IPA off; template/family/authentication targets | 3 | Not rerun in this configuration |
+| Dual algorithm; ASan + UBSan core/template/authentication/lifecycle targets | 10 | 117 |
 
-所有选定套件通过，无失败。两组普通完整矩阵各有一个依赖可选外部 FT9361
-固件文件的子用例跳过；生命周期、BRISK 专项和 sanitizer 专项没有跳过。
-26 个套件覆盖 `scripts/check-fte3600.sh` 列出的核心设备/状态机、协议、
-后端、匹配、模板、安装脚本测试；本地分开执行生命周期和其余套件。
-ASan/UBSan 的十套为核心设备、状态机、取消、SPI、BRISK、IPA、模板、
-家族模板、认证生命周期和设备生命周期。
+All selected suites passed. Each normal matrix skipped one optional case
+requiring an external FT9361 firmware file; lifecycle, BRISK and sanitizer
+targets had no skips. The 26 suites covered the core device/state-machine,
+protocol, backend, matcher, template and installer tests selected by
+`scripts/check-fte3600.sh`; lifecycle and the other suites were run separately.
+The ten sanitizer suites covered core device, state machine, cancellation,
+SPI, BRISK, IPA, template, family template, authentication lifecycle and device
+lifecycle.
 
-生命周期同时保留六项 A1 休眠/旧数据/重新打开测试，以及 17 项多芯片唤醒
-测试，覆盖快路径、慢启动、双 CS、真实延迟、重试上限、身份冲突、短传输
-及取消。已能直接识别的专用家族跳过 legacy 唤醒；需要 C6 协商的家族另有
-对应顺序检查。公共计时器新增“回调中先执行同步工作，再请求等待”的回归，
-同时检查截止时间与实际回调，防止机器负载掩盖被缩短的等待。
+Lifecycle retained six A1 sleep/stale-data/reopen cases and 17 multi-chip wake
+cases covering fast/slow paths, dual CS, real delays, attempt limits, identity
+conflicts, short transfers and cancellation. Immediately identifiable special
+families skipped legacy wake; C6-dependent families had separate ordering
+checks. A timer regression performed synchronous work inside a callback before
+requesting another wait, checking both the deadline and actual callback so
+machine load could not conceal shortened waits.
 
-内核策略测试及 Linux 6.8.0-146 头文件下的 `W=1` 模块编译通过；未加载模块。
-修改文件格式、脚本语法及 Git 差异检查通过。生命周期保留真实协议等待，
-套件超时为 60 秒。这里没有重新进行 A1、Medion 或其他目标设备的实机测试；
-A1 的既有实测记录来自 `eacf7bc`，不能冒称为合并后实测。
+Kernel policy tests and a Linux 6.8.0-146 `W=1` build passed; the module was not
+loaded. Formatting, shell syntax and diff checks passed. Lifecycle retained
+actual protocol waits and used a 60-second suite timeout. No new A1, Medion or
+other target-hardware test was performed. The previous A1 hardware evidence
+came from `eacf7bc`, not from the merged implementation.

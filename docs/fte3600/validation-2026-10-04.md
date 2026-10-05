@@ -1,5 +1,13 @@
 # Local validation — 2026-10-04
 
+[Documentation index](README.md)
+
+**Historical checkpoint.** This record covers the sensor-family implementation
+at the source revision below, using the former custom kernel SPI bridge. Its
+counts and transport observations are not results for current main. See the
+[later release validation](validation-release-2026-10-05.md) for the ACPI-glue /
+stock-spidev implementation. The original results are preserved here.
+
 Source: implementation commit `019161d3ad8c93562fc99e84d87fa3ca9691a2a5`, based on
 `22c51b2f5cf47546b01241af01d7a9b32c02a835`. The checks ran on the matching working
 tree before commit; committing introduced no runtime changes. These are local

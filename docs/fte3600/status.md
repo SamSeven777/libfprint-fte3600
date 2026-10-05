@@ -1,8 +1,16 @@
 # FTE3600 hardware and validation status
 
+[Documentation index](README.md)
+
+This page maintains the user-facing support matrix and the scope of cited
+hardware observations. Use [installation](install.md) to build and test, and
+[architecture](architecture.md) for internal contracts. Issue evidence below
+is dated; it is not a claim that no newer external report exists.
+
 The current implementation uses ACPI resources and runtime/ROM chip discovery;
 there is no DMI admission table. The current transport has compile and mock-test
-evidence, but no physical-device validation in this change.
+evidence in the [release validation record](validation-release-2026-10-05.md),
+but no physical-device validation in that record.
 
 The transport migrated from the custom SPI bridge; its details are described in
 [ACPI glue / stock spidev](acpi-spidev.md). ABI 2 supports both GpioInt and
@@ -34,14 +42,14 @@ the cause. Do not report either a proven sleep fix or an IRQ-polarity fault.
 
 The following table records **historical observations from the previous
 spidev/GPIO-profile implementation**, not current routing rules or evidence
-that the new bridge works on those devices.
+that the current transport works on those devices.
 
 | Platform | Evidence and scope | Reset route | IRQ route |
 | --- | --- | --- | --- |
 | One-Netbook A1 | Maintainer reports discovery, capture, enrollment, verification and cold-boot recovery on A1. Independent replication and a complete power/cancellation matrix remain needed. | `\_SB_.PCI0.GPI0`, 85 (`0x55`), active-low | Same controller, 86 (`0x56`), active-high |
-| GPD Pocket 3, Jasper Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT34C8`. | `\_SB_.GPI0`, 211, active-low | Same controller, 56, active-high |
-| GPD Pocket 3, Tiger Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT3455`. | `\_SB_.GPI0`, 179, active-low | Same controller, 24, active-high |
-| Medion E3224 | Separate experimental `medion-e3224` branch. Current implementation has not produced a successful identity/capture result on the reported machine. | `\_SB_.GPO1`, 39 (`0x27`); active-low is the current hypothesis, not a completed board-level validation | `\_SB_.GPO2`, 0; reported active-high IRQ |
+| GPD Pocket 3, Jasper Lake | Historical configured profile for controller `INT34C8`; no enrollment/verification success in the evidence cited here. | `\_SB_.GPI0`, 211, active-low | Same controller, 56, active-high |
+| GPD Pocket 3, Tiger Lake | Historical configured profile for controller `INT3455`; the later tested board uses the ordinary interrupt described above. | `\_SB_.GPI0`, 179, active-low | Same controller, 24, active-high |
+| Medion E3224 | Earlier `medion-e3224` diagnostic work; the cited responses do not establish chip identity or successful capture. | `\_SB_.GPO1`, 39 (`0x27`); active-low software convention, board waveform not measured | `\_SB_.GPO2`, 0; reported active-high IRQ |
 
 Those model strings and routes are retained as historical evidence only.
 The current driver obtains each controller/pin from ACPI. A shared ACPI ID does
@@ -61,20 +69,22 @@ not automatically to every Pocket 3 variant.
 
 **The reported GPD protocol and CS requirements are implemented; the newer
 patched-main test above provides limited physical capture evidence.** Discovery sends the factory's 12-byte ID query,
-tries both physical CS polarities if necessary, and requires two matching
+tries both native CS polarities if the controller/glue advertise polarity control,
+and requires two matching
 `9362` responses. The FW9369 backend performs AFE/FDT and image calibration,
 reads 16-bit samples, and independently constructs an 8-bit image. It requires
-an uncovered sensor during opening to establish its baseline. On this branch,
+an uncovered sensor during opening to establish its baseline. In the current transport,
 CS negotiation uses stock spidev and requires the matched ABI2 reset/UIO glue;
-old custom bridge interfaces are not accepted by this transport. Reset GPIO
+old custom bridge interfaces are not accepted. GPIO-controlled CS retains its
+current effective polarity and cannot be corrected by this negotiation. Reset GPIO
 active-low and SPI CS active-high are separate electrical signals.
 
-**Medion E3224 remains unconfirmed.** Separate reset/IRQ controllers are handled
-by the bridge, but [the last sensor-response test](https://github.com/SamSeven777/libfprint-fte3600/issues/1#issuecomment-5928567443)
+**Medion E3224 remains unconfirmed by the cited evidence.** Separate reset/IRQ
+controllers are handled by the glue, but [the cited sensor-response test](https://github.com/SamSeven777/libfprint-fte3600/issues/1#issuecomment-5928567443)
 still returned all zeroes before and after software reset with the SPI parent
 held in D0. The [newer baseline-tool report](https://github.com/SamSeven777/libfprint-fte3600/issues/1#issuecomment-5979436524)
 failed its isolated library ABI check before touching hardware; it is not a
-test of the new clean-room bridge and supplies no new chip identity. The old
+test of the current ACPI glue and supplies no new chip identity. The old
 Mint stack's reported success remains a useful reference. Do not extrapolate
 the GPD chip identity or required CS polarity to Medion without evidence.
 
@@ -92,6 +102,13 @@ firmware, transport, GPIO and power-management behavior with that stack before
 requesting another experiment. Do not ask the reporter to repeat an unchanged
 recovery sequence that already failed. See the [hardware discussion](https://github.com/SamSeven777/libfprint-fte3600/issues/1).
 
+The separate [`medion-spidev` diagnostic branch](https://github.com/SamSeven777/libfprint-fte3600/tree/medion-spidev)
+uses stock spidev and explicitly validated physical GPIO resources without the
+custom glue. Its identification and explicit candidate-RAM-boot experiments
+are separate from main's identity-gated discovery. They do not establish a
+Medion chip identity or relax main's firmware authorization rules. Follow that
+branch's own guide; its commands are not the main installation route.
+
 ## Implemented functions and test limits
 
 The current catalog contains eight chip profiles, six Windows protocol families
@@ -100,16 +117,16 @@ eight-sample enrollment and verification in the experimental opt-in build.
 The default build exposes capture only. Sharing a protocol or image size does
 not make templates or firmware interchangeable.
 
-| Chip | Native image | Initialization and recovery boundary |
-| --- | --- | --- |
-| FT9338 | 88 × 88 | Running-application capture; RAM recovery needs current-open runtime identity plus matching boot-B OTP. First unidentified cold boot is unsupported. |
-| FT9348 | 96 × 96 | A8 runtime or matching ROM/SPI-OTP identity; its own external RAM firmware. |
-| FT9361 | 64 × 80 | A8 runtime or matching ROM/SPI-OTP identity; its own external RAM firmware. |
-| FT9536 | 64 × 128 | Running application, positive boot-A identity or current-open runtime plus boot-B OTP; its own RAM firmware and complete readback. |
-| FT9365 | 64 × 80 | Positive silicon identity and host AFE/DAC configuration; no application firmware upload. |
-| FT9368 | 64 × 80 | Healthy identified application; persistent update is separate and explicit. Blank/unresponsive recovery remains unsupported. |
-| FW9369 / raw ID 9362 | 64 × 80 | Positive silicon identity, host FDT/image calibration; uncover the sensor while opening. No application firmware upload. |
-| FT9769 / raw IDs 9391, 9392 | 40 × 196 | Positive identity and variant check, host AFE/DAC configuration; extra raw rows are drained and excluded from the image. |
+| Chip | Native image | Capture implementation | Initialization and recovery boundary |
+| --- | --- | --- | --- |
+| FT9338 | 88 × 88 | Legacy application | RAM recovery needs current-open runtime identity plus matching boot-B OTP and full readback. First unidentified cold boot is unsupported. |
+| FT9348 | 96 × 96 | A8 application | Runtime or matching ROM/SPI-OTP identity; its own verified external RAM firmware. |
+| FT9361 | 64 × 80 | A8 application | Runtime or matching ROM/SPI-OTP identity; its own verified external RAM firmware. |
+| FT9536 | 64 × 128 | Legacy application | Running application, positive boot-A identity or current-open runtime plus boot-B OTP; its own RAM firmware and full readback. |
+| FT9365 | 64 × 80 | Host AFE/DAC calibration, 16-bit FIFO | Positive silicon identity; no application firmware upload. |
+| FT9368 | 64 × 80 | Application wake/info, native 8-bit image | Healthy identified application; persistent update is separate and explicit. Blank/unresponsive recovery remains unsupported. |
+| FW9369 / raw ID 9362 | 64 × 80 | FDT/image calibration, baseline subtraction, 16-bit FIFO | Positive silicon identity; uncover the sensor while opening. No application firmware upload. |
+| FT9769 / raw IDs 9391, 9392 | 40 × 196 | Host AFE/DAC calibration, chunked 16-bit FIFO | Positive identity and variant check; extra raw rows are drained and excluded from the image. No application firmware upload. |
 
 The [firmware installer](install.md#2-install-the-firmware-for-the-identified-chip)
 can validate and install all six catalogued payloads for FT9338, FT9348, FT9361,
@@ -118,8 +135,9 @@ recovery or enable persistent updates. Installing FT9338 firmware cannot
 replace the missing first-cold-identity evidence, and installing the FT9368
 pair cannot establish a blank-chip recovery route. No vendor payload is bundled.
 
-The bridge bounds transactions by the SPI controller limit and a 32,768-byte
-ceiling. Each backend checks its actual largest transaction before starting;
+Userspace bounds transactions by the running spidev buffer and a 32,768-byte
+ceiling. It cannot query all controller limits in advance. Each backend checks
+its largest transaction against that buffer bound before starting;
 the FT9365/9769 FIFO is deliberately chunked, while legacy image/RAM-readback
 transactions remain continuous. See [transport limits](dynamic-discovery.md#electrical-and-protocol-limits).
 Legacy application idle is `a5 5a`; `00 00` means that the expected response was
@@ -127,10 +145,11 @@ not obtained and is not a diagnosis by itself.
 
 ACPI resource discovery removes the computer-model whitelist, but it does not
 make missing or contradictory firmware descriptions usable. One SPI resource,
-one single-pin reset GpioIo and one single-pin edge GpioInt are required.
+one single-pin reset GpioIo and one edge-sensitive interrupt are required:
+single-pin GpioInt or one ordinary ACPI IRQ/Interrupt resource.
 Separate GPIO controllers are supported; ambiguous resources, unsupported
 trigger modes, reset mapping conflicts and transfer limits are explicit
-failures. The bridge cannot infer a missing power rail, inverter or undocumented
+failures. The glue cannot infer a missing power rail, inverter or undocumented
 board reset polarity. A shared `FTE3600` ACPI ID is not a chip identity.
 
 Unit tests and mock lifecycle tests do not establish successful cold boot,

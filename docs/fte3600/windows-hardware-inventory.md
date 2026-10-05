@@ -1,83 +1,102 @@
-# FTE3600 硬件与处理逻辑计数
+# FTE3600 hardware and implementation inventory
 
-核查日期：2026-10-04。样本为 Microsoft Update Catalog 的三个 x64 分发包：
-**2.0.3.99、2.0.3.100、2.0.3.102**。这里的数量只覆盖这些样本，
-不代表厂商全部芯片、全部 OEM 包或市场上全部笔记本型号。
-包来源、哈希、工厂引用、方法地址和固件范围见
-[可复核事实清单](windows-hardware-inventory.json)。仓库不包含厂商二进制、反汇编或固件内容。
+[Documentation index](README.md)
 
-## 数量结论
+<a id="fte3600-硬件与处理逻辑计数"></a>
 
-| 计数对象 | 确认数量 | 含义和边界 |
+Verification date: 2026-10-04. The samples are three x64 packages from Microsoft Update Catalog:
+**2.0.3.99, 2.0.3.100, and 2.0.3.102**. Counts cover these samples only, not every vendor chip, OEM
+package, or laptop model on the market. Package sources, hashes, factory references, method
+addresses, and firmware ranges are in the [reproducible inventory](windows-hardware-inventory.json).
+The repository contains no vendor binaries, disassembly, or firmware contents.
+
+<a id="数量结论"></a>
+
+## Confirmed counts
+
+| Object counted | Confirmed count | Meaning and limits |
 | --- | ---: | --- |
-| INF 完整 PnP ID | **2** | `ACPI\FTE3600`、`USB\VID_2808&PID_9338`；三个版本相同 |
-| 总线适配层 | **2** | SPI 与 USB；ACPI ID 本身不区分具体传感器 |
-| 102 版工厂可创建的传感器后端 | **8** | 8 个构造函数确实被工厂引用，不是仅搜索到 8 个名字 |
-| 102 版操作方法表分组 | **6** | 比较每个对象的 20 槽表，排除析构槽后，对其余 19 槽按地址完全一致分组 |
-| 102 版主识别流程的已定位响应类别 | **9** | 4 个运行时寄存器组合及 5 个特殊 ID；不能等同于 9 种物理芯片 |
-| 底层 `ft93xx` 接受表 | **10 个 ID** | 其中 7 个没有找到独立的主工厂映射，不能据此宣布支持 |
-| 已关联的内嵌固件范围 | **6 段，关联 5 个后端** | FT9368 有 app 与 pramboot 两段；六段在三个样本中逐字节相同 |
-| 实际整机型号、ACPI 布线组合总数 | **无法由这些包确定** | 没有收齐实机 ACPI 表；INF 无逐机型清单 |
+| Complete INF PnP IDs | **2** | `ACPI\FTE3600` and `USB\VID_2808&PID_9338`; identical in all three versions |
+| Bus-adaptation layers | **2** | SPI and USB; the ACPI ID does not distinguish individual sensors |
+| Sensor backends instantiated by the version 102 factory | **8** | The factory actually references 8 constructors; this is not merely a search for 8 names |
+| Version 102 operation-table groups | **6** | Compare each object's 20-slot table, omit the destructor slot, and group by exact address equality across the remaining 19 slots |
+| Located response categories in the version 102 main detection path | **9** | 4 runtime-register pairs and 5 special IDs; these are not equivalent to 9 physical chips |
+| Low-level `ft93xx` acceptance table | **10 IDs** | No separate main-factory mapping was found for 7 of them; their presence does not establish support |
+| Associated embedded firmware ranges | **6 ranges for 5 backends** | FT9368 has separate app and pramboot ranges; all six are byte-identical across the three samples |
+| Total computer models and ACPI wiring combinations | **Not determinable from these packages** | Physical-device ACPI tables have not all been collected, and the INF has no per-model inventory |
 
-因此，对“有多少种硬件、多少种处理逻辑”的可核实回答是：
-**这份 102 版驱动包含 8 个传感器后端，可以按方法共享关系归为 6 组；整机硬件型号总数尚不确定。**
-6 是明确的代码结构计数，并非声称所有初始化、总线、启动状态和恢复分支合计只有 6 条。
+The verifiable answer is: **version 102 contains 8 sensor backends, grouped into 6 sets by shared
+operation methods; the total number of computer hardware models remains unknown.** 6 is a specific count of code-structure groups, not a claim that initialization, transport, startup-state, and
+recovery logic together have only 6 branches.
 
-## 8 个后端如何归为 6 组
+<a id="8-个后端如何归为-6-组"></a>
 
-| 操作组 | 后端标签 | 已定位的识别入口 | 复用与差异 |
+## How the 8 backends form 6 groups
+
+| Operation group | Backend labels | Located detection entry | Shared behavior and differences |
 | --- | --- | --- | --- |
-| 1 | FT9338、FT9536 | 运行时 `5858`、`4080`；另有 boot/OTP 分支 | 19 个操作槽完全相同，但各自的固件和对象参数不同 |
-| 2 | FT9348、FT9361 | 运行时 `6060`、`4050`；A8 家族 OTP 区分 | 19 个操作槽完全相同，但固件不同，不能互相替代 |
-| 3 | FT9368 | 专用识别/恢复入口 | 独立方法表；有 app 与 pramboot 两段固件 |
-| 4 | FT9369 | 主流程响应 `0x9362` → 内部类型 9 | 对象名不等于读回 ID；不能写成“识别到 0x9369” |
-| 5 | FT9365 | 响应 `0x9365` → 内部类型 12 | 与 FT9769 共用部分 `ft93xx` 初始化/读 ID 方法，但不共用完整方法表 |
-| 6 | FT9769 | 响应 `0x9391` 或 `0x9392` → 内部类型 11 | 两种响应进入同一后端；与 FT9365 的末两个操作槽不同 |
+| 1 | FT9338, FT9536 | Runtime `5858`, `4080`; also boot/OTP branches | All 19 operation slots are identical, but firmware and object parameters differ |
+| 2 | FT9348, FT9361 | Runtime `6060`, `4050`; distinguished by A8-family OTP | All 19 operation slots are identical, but their firmware is not interchangeable |
+| 3 | FT9368 | Dedicated detection/recovery entry | Separate method table; app and pramboot firmware ranges |
+| 4 | FT9369 | Main-path response `0x9362` → internal type 9 | The object name is not the returned ID; this must not be described as reading `0x9369` |
+| 5 | FT9365 | Response `0x9365` → internal type 12 | Shares some `ft93xx` initialization/ID-reading methods with FT9769, but not the complete method table |
+| 6 | FT9769 | Response `0x9391` or `0x9392` → internal type 11 | Both responses select one backend; its final two operation slots differ from FT9365 |
 
-102 版工厂 RVA 为 `0x23690`。FT9365 与 FT9769 的公共初始化、读 ID 包装入口
-分别为 `0x383D0`、`0x383E0`，调用底层 `0x196B8`、`0x19978`。
-两者仍有不同的末尾方法槽（偏移 `0x90`、`0x98`），不能因为共用初始化就把整个后端合并。
-反过来，也不需要复制两套完全相同的底层初始化。
+The version 102 factory is at RVA `0x23690`. FT9365 and FT9769 share initialization and ID-reading
+wrappers at `0x383D0` and `0x383E0`, calling low-level `0x196B8` and `0x19978`. Their final method
+slots, at offsets `0x90` and `0x98`, still differ. Sharing initialization is insufficient to merge
+the entire backend; conversely, identical low-level initialization need not be duplicated.
 
-运行时 `0x14/0x15` 四个组合也被原驱动作为传感器 x/y 使用，属于响应特征，
-不是已证实不可变的硅片身份。9 类响应具体为：
-`5858`、`6060`、`4050`、`4080`、`9368`、`9362`、`9365`、`9391`、`9392`。
+The original driver also uses the four `0x14/0x15` runtime pairs as sensor x/y dimensions. They are
+response signatures, not proven immutable silicon identities. The 9 response categories are `5858`,
+`6060`, `4050`, `4080`, `9368`, `9362`, `9365`, `9391`, and `9392`.
 
-## 底层还出现的 10 个 ID
+<a id="底层还出现的-10-个-id"></a>
 
-102 版 RVA `0x191A8` 的比较循环实际检查 10 个值：
+## The 10 additional low-level IDs
 
-`9391`、`9392`、`9395`、`9396`、`9397`、`9398`、`9363`、`9372`、`9349`、`9365`。
+The comparison loop at version 102 RVA `0x191A8` checks 10 values:
 
-这有控制流证据，不只是日志字符串。`0x19978` 的读 ID 流程使用该检查；
-其中还存在将 `9391` 按寄存器条件细分为 `9395` 的逻辑。
-但主启动流程只找到其中 `9365`、`9391`、`9392` 的直接分派。
-其余 **7 个 ID** 可能用于内部变体、其他入口或共用组件，当前证据不能确定全部用途。
-因此不把它们与 8 个类名简单相加，不宣称已支持 15 或 16 种物理芯片。
+`9391`, `9392`, `9395`, `9396`, `9397`, `9398`, `9363`, `9372`, `9349`, `9365`.
 
-## 版本差异已确认到什么程度
+This is supported by control flow, not merely log strings. The ID-reading path at `0x19978` uses
+this check and can further classify `9391` as `9395` according to a register condition. Only `9365`,
+`9391`, and `9392` have located direct dispatches in the main startup path. The other **7 IDs** may
+serve internal variants, other entry points, or shared components; the available evidence does not
+establish all their uses. They must not simply be added to the 8 class names to claim support for 15
+or 16 physical chips.
 
-| 样本版本 | PnP ID | 后端数 | 操作组数 | 已定位固件段数 |
+<a id="版本差异已确认到什么程度"></a>
+
+## Confirmed version differences
+
+| Sample version | PnP IDs | Backends | Operation groups | Located firmware ranges |
 | --- | ---: | ---: | ---: | ---: |
 | 2.0.3.99 | 2 | 6 | 4 | 6 |
 | 2.0.3.100 | 2 | 6 | 4 | 6 |
 | 2.0.3.102 | 2 | 8 | 6 | 6 |
 
-99、100 版共有 FT9338、FT9348、FT9361、FT9368、FT9369、FT9536；
-102 版新增工厂后端 FT9365、FT9769。三个 INF 中的 **44 条显式注册表写入行相同**，
-六段已定位固件也相同。所以这次版本扩展的证据指向新增运行时实现，
-不是增加机型注册表或换一套 FT9361 固件。
+Versions 99 and 100 contain FT9338, FT9348, FT9361, FT9368, FT9369, and FT9536. Version 102 adds
+factory backends FT9365 and FT9769. The **44 explicit registry-write lines are identical** in all
+three INFs, as are the six located firmware ranges. Evidence for this version expansion therefore
+points to added runtime implementations, rather than new per-model registry settings or replacement
+FT9361 firmware.
 
-99 与 100 的 `.text` 哈希不同，不能认为两个版本只有版本号差异。
-这次没有完成逐函数等价性证明，也没有覆盖每个 OEM 的重打包或私有版本。
-Microsoft Catalog 的搜索条目数量包含不同 OS/分类/发布记录，不能用来统计机型或独立协议数。
+Versions 99 and 100 have different `.text` hashes, so they cannot be treated as differing only in
+version number. This analysis did not establish function-by-function equivalence or cover every OEM
+repackaging and private version. Microsoft Catalog search entries include different OS,
+classification, and publication records; their count does not measure computer models or independent
+protocols.
 
-## 固件与初始化资料
+<a id="固件与初始化资料"></a>
 
-以下为 102 版主 DLL 中已通过对象构造/下载关联定位的范围。
-这些是定位元数据，不是固件内容。完整 SHA-256 见 JSON。
+## Firmware and initialization data
 
-| 对象/用途 | RVA | 文件偏移（十进制） | 大小（字节） |
+The following ranges in the version 102 main DLL were located through constructor/download
+associations. They are location metadata, not firmware contents. Complete SHA-256 hashes are in the
+JSON.
+
+| Object / purpose | RVA | File offset (decimal) | Size (bytes) |
 | --- | --- | ---: | ---: |
 | FT9338 | `0x731A0` | 465312 | 14184 |
 | FT9348 | `0x76910` | 479504 | 10312 |
@@ -86,30 +105,47 @@ Microsoft Catalog 的搜索条目数量包含不同 OS/分类/发布记录，不
 | FT9368 pramboot | `0x823F0` | 527344 | 6096 |
 | FT9536 | `0x83BC0` | 533440 | 11934 |
 
-FT9365、FT9369、FT9769 的对应构造字段没有指定这类固件范围。
-这不代表它们“不需要初始化”，也不证明整个驱动不含其他嵌入数据。
-初始化逻辑可以由主机端寄存器操作和参数构成，不能把每个对象都强行归类为“加载一个 bin”。
-**全部初始化表的数量、完整寄存器含义和每条失败恢复路径仍未完成确认。**
+The corresponding constructor fields for FT9365, FT9369, and FT9769 do not specify this kind of
+firmware range. That does not mean these chips need no initialization or prove that the driver
+contains no other embedded data. Initialization may consist of host-side register operations and
+parameters; not every object can be classified as loading one binary file. **The total number of
+initialization tables, complete register semantics, and every failure-recovery path have not all
+been established.**
 
-## 原待确认清单的逐项结论
+<a id="原待确认清单的逐项结论"></a>
 
-| 原问题 | 此次已确认 | 仍缺少的证据 |
+## Findings against the original open questions
+
+This table records the scope of the original inventory. Later Linux implementation work is linked
+below; the original state-machine gaps are not a current claim that those backends remain
+unimplemented.
+
+| Original question | Confirmed by this inventory | Evidence still missing at that stage |
 | --- | --- | --- |
-| 各实际机型 ACPI 描述与极性 | Windows 从系统资源取得连接；Linux 可按 ACPI 资源映射控制器、引脚和 IRQ；不需要 DMI 白名单 | 每台实机 `_CRS/_DSD`、资源用途与电平测量；GpioIo 没有极性字段，不能凭它推导 reset 极性 |
-| 所有冷启动/恢复协议 | 已拆出 runtime、boot-A、boot-B 家族判别、OTP 与特殊芯片入口；FT9361 最小 ROM 识别已形成独立实现 | 其他后端的完整状态机、所有失败重试条件、冷启动及休眠恢复的实机抓包 |
-| 其他芯片固件/初始化表 | 5 个后端的 6 段固件已定位；6 组操作关系已确认 | 全部初始化表和参数语义，未定位后端的完整寄存器流程 |
-| 版本/OEM 差异 | 三个公开版本的 INF、工厂、方法表及上述固件范围已比较 | OEM 专用包与全部历史版本；不能据三个样本排除所有 OEM 特例 |
-| 真实设备成功率 | 这次没有连接目标传感器 | 不能从静态分析或模拟测试推出全系列兼容性 |
+| ACPI descriptions and polarity for every computer model | Windows obtains connections from system resources; Linux can map controllers, pins, and IRQs from ACPI resources without a DMI whitelist | Each physical device's `_CRS/_DSD`, resource roles, and measured levels; GpioIo has no polarity field from which reset polarity could be inferred |
+| All cold-start/recovery protocols | Runtime, boot-A, boot-B family detection, OTP, and special-chip entries were separated; a minimal independent FT9361 ROM detector existed | Complete state machines for other backends, all failure/retry conditions, and hardware traces of cold start and resume |
+| Other chips' firmware/initialization tables | 6 firmware ranges for 5 backends and 6 operation groups were located | All initialization tables and parameter semantics, and complete register flows for the remaining backends |
+| Version/OEM differences | INFs, factories, method tables, and the listed firmware ranges were compared across three public versions | OEM-specific packages and the full historical version set; three samples cannot exclude all OEM exceptions |
+| Success rate on physical devices | No target sensor was connected for this inventory | Static analysis and simulations cannot establish compatibility across the entire family |
 
-## Linux 实现如何使用这些结论
+<a id="linux-实现如何使用这些结论"></a>
 
-共用一层 ACPI 资源桥接、一套探测状态机，再按芯片能力选择协议后端和数据。
-共用方法可以复用，芯片特有的固件、OTP 判别和参数必须分开。
-厂商的版本分叉、重复重试和未知值默认归类不需要照搬。
+## Applying these findings in Linux
 
-当前实现已经删除 DMI 引脚白名单，FT9361 固件加载前要求通过 ROM 家族和 OTP 身份检查；
-未知或未实现芯片明确退出。**Linux 现已为这 8 种芯片接入采图实现，但实现、软件测试通过和实机验证是三个不同层次。** FT9365／FT9769 使用独立曝光校准和图像资格判断，FW9369 使用空载基线和 FDT 校准，FT9368 使用独立应用协议。冷恢复、认证和实机限制以[当前支持矩阵](architecture.md)为准。
-具体实现、测试和实机验证边界见 [动态发现说明](dynamic-discovery.md)。
+The implementation shares ACPI resource handling and a discovery state machine, then selects
+protocol backends and data by chip capability. Shared methods can be reused; chip-specific firmware,
+OTP classification, and parameters must remain distinct. Vendor version forks, redundant retries,
+and default classifications of unknown values need not be copied.
 
-来源：[Microsoft Update Catalog 搜索](https://www.catalog.update.microsoft.com/Search.aspx?q=ACPI%5CFTE3600)，
-三个下载包的精确 URL 与 SHA-256 保存在配套 JSON 中。
+The current implementation has removed the DMI pin whitelist. FT9361 firmware loading requires
+ROM-family and OTP identity checks; unknown or unimplemented chips are rejected explicitly. **Linux
+now has image-capture implementations for these 8 chips, but implementation, passing software tests,
+and physical-device validation are separate levels of evidence.** FT9365/FT9769 use dedicated
+exposure calibration and image qualification, FW9369 uses an unloaded baseline and FDT calibration,
+and FT9368 uses its own application protocol. Cold recovery, authentication, and hardware limits are
+documented in the [current support matrix](status.md#implemented-functions-and-test-limits),
+[legacy38 recovery](legacy38-recovery.md), and [dynamic discovery](dynamic-discovery.md).
+
+Source:
+[Microsoft Update Catalog search](https://www.catalog.update.microsoft.com/Search.aspx?q=ACPI%5CFTE3600).
+Exact download URLs and SHA-256 hashes for all three packages are retained in the accompanying JSON.

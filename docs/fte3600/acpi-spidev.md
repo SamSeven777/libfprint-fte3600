@@ -1,5 +1,12 @@
 # Experimental ACPI GPIO glue and stock spidev
 
+[Documentation index](README.md)
+
+This is the system integration and migration guide. Use [install.md](install.md)
+for distribution dependencies, library builds, firmware and enrollment. The
+[kernel README](../../kernel/fte3600/README.md) defines the detailed ABI and
+resource lifetime; [status.md](status.md) records chip support and hardware evidence.
+
 The current transport sends SPI transactions through the distribution's `spidev` driver. A
 small out-of-tree `fte3600` module exposes the sensor's reset through a one-line
 GPIO character device and its interrupt through a separate IRQ-only UIO device.
@@ -9,9 +16,9 @@ identity checks and firmware validation remain in libfprint.
 This is an experimental transport, not an upstream Linux or libfprint feature.
 Metadata ABI 2 supports a GPIO interrupt or an ordinary edge-sensitive ACPI
 IRQ/`Interrupt()` resource, including the layout in the latest GPD Pocket 3
-report. That does not establish a hardware result for this branch. See the
+report. That does not establish a hardware result for the current transport. See the
 [lifecycle coverage and outstanding work](windows-lifecycle-coverage.md).
-See the [implementation validation record](validation-acpi-spidev-2026-10-04.md)
+See the [release validation record](validation-release-2026-10-05.md)
 for completed checks and hardware-test limits.
 The glue still needs a build for the running kernel and, under Secure Boot, a
 signature trusted by that kernel. Using stock spidev does not remove that
@@ -70,19 +77,13 @@ For example, Fedora needs `kernel-devel-$(uname -r)`, `dkms` and
 A missing development package for a newer kernel is a build blocker, not
 evidence that this module supports it.
 
-The developer PKGBUILD packages committed HEAD. A local Meson build includes
-working-tree changes and can be tested before committing:
+Build and test the library using either route in
+[Build & Installation](install.md#3-build--installation). A local Meson build
+includes working-tree edits; the developer PKGBUILD uses committed HEAD.
+Compile the glue against the target kernel's headers before installation:
 
 ```sh
-meson setup build-acpi-spidev --prefix=/usr \
-  -Ddrivers=fte3600 -Dfte3600_personal_auth=false \
-  -Dgtk-examples=false -Ddoc=false -Dintrospection=false \
-  -Dinstalled-tests=false -Dwerror=true
-meson compile -C build-acpi-spidev
-meson test -C build-acpi-spidev --print-errorlogs \
-  fte3600-context fte3600-resources fpi-spi-transfer \
-  fte3600-driver fte3600-lifecycle fte3600-auth-lifecycle \
-  fte3600-pair fte3600-setup
+make -C kernel/fte3600 check
 make -C kernel/fte3600 KDIR=/lib/modules/$(uname -r)/build W=1
 ```
 
@@ -95,17 +96,17 @@ silicon ID is `9362`, does not need an application firmware blob.
 
 ## Migrate an earlier bridge installation
 
-Do not install this branch over an active DKMS 0.1 bridge. Keep its exact source
+Do not install the current glue over an active DKMS 0.1 bridge. Keep its exact source
 revision, package versions and rollback copies before making changes. Record
 whether each destination below was absent or belonged to an existing package:
 
 - The library and generated udev rules listed by
-  `meson introspect build-acpi-spidev --installed`.
+  `meson introspect build-fte3600 --installed` (use your actual build directory).
 - `/usr/src/fte3600-0.1`, its DKMS records or manually installed module, and any
   signing configuration needed to reinstall it.
 - Old `10-fte3600-bridge.conf`/`10-fte3600-gpio.conf` fprintd drop-ins,
   FTE3600 binding overrides, and `fte3600-bridge`/`fte3600-gpio` SELinux modules.
-- This branch's `/usr/libexec/fte3600-pair`,
+- The current integration's `/usr/libexec/fte3600-pair`,
   `/etc/udev/rules.d/70-fte3600-acpi-spidev.rules`,
   `/etc/udev/rules.d/71-fte3600-acpi-spidev-selinux.rules`,
   `/etc/modprobe.d/fte3600-acpi-spidev.conf`,
@@ -127,10 +128,12 @@ provides the rollback path. No enrolled templates are deleted by these steps.
 
 ## Install and verify the integration
 
-After migration and the local tests, the manual `/usr` workflow is:
+After migration and the local tests, the manual `/usr` workflow is below.
+Use the actual library build directory; omit the Meson install if the same
+build was already installed using [install.md](install.md):
 
 ```sh
-sudo meson install -C build-acpi-spidev
+sudo meson install -C build-fte3600
 sudo ./scripts/setup-fte3600.sh install-all
 sudo ./scripts/setup-fte3600.sh check
 ```
@@ -140,7 +143,8 @@ installs the manually built module for the current kernel. Loading it may
 require your distribution's normal module-signing procedure. Updating a loaded
 module does not replace it; reboot to activate its new code.
 
-Stock spidev must have **at least 32768 bytes** of actual transfer capacity:
+The setup helper requires the running stock-spidev buffer to be
+**at least 32768 bytes**:
 
 ```sh
 cat /sys/module/spidev/parameters/bufsiz
@@ -151,6 +155,9 @@ with a smaller buffer, it fails explicitly and asks for a reboot. It never
 unloads global spidev, which may serve other devices. For a built-in spidev,
 apply the distribution's boot-parameter procedure (`spidev.bufsiz=32768`)
 and verify the running value. Installing a firmware blob cannot enlarge it.
+This buffer check does not discover the controller's transfer/message limits;
+an actual transaction can still fail at the controller. See
+[protocol transaction sizes](dynamic-discovery.md#electrical-and-protocol-limits).
 
 The systemd drop-in is generated from a fresh complete pair and published
 atomically. A failed update keeps the prior file. The SELinux step installs

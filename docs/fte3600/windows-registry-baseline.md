@@ -1,36 +1,71 @@
-# Windows 注册表配置分析：2.0.3.102 基线
+# Windows registry configuration analysis: the 2.0.3.102 baseline
 
-分析日期：2026-10-04。承接 [INF 设备映射](windows-inf-baseline.md)，仅分析同一份 `ftWbioUmdfDriverV2.inf`，SHA-256 为 `b64c8ebe2ec65f47996fa8f27e8f68f9c91076b7cb915839aafde51f6240c1dd`。
+[Documentation index](README.md)
 
-完整结构化记录见 [windows-registry-baseline.json](windows-registry-baseline.json)：包含每条定义的来源节、行号、原始字段、展开后的路径、类型标志、值、操作以及全部四条安装路径的引用关系。此处是静态安装声明分析，未安装驱动或读取实际设备注册表。
+<a id="windows-注册表配置分析203102-基线"></a>
 
-## 已确认的差异
+Analysis date: 2026-10-04. Following the [INF device mapping](windows-inf-baseline.md), this report
+examines only the same `ftWbioUmdfDriverV2.inf`, SHA-256
+`b64c8ebe2ec65f47996fa8f27e8f68f9c91076b7cb915839aafde51f6240c1dd`.
 
-| 安装路径 | 硬件 ID | 本地 AddReg 声明数 | 不同目标值数 |
+The complete structured record is in
+[windows-registry-baseline.json](windows-registry-baseline.json): it includes each definition's
+source section, line number, original fields, expanded path, type flags, value, operation, and
+references from all four installation paths. This is a static analysis of installation declarations;
+no driver was installed and no physical device registry was read.
+
+<a id="已确认的差异"></a>
+
+## Confirmed differences
+
+| Installation path | Hardware ID | Local AddReg declarations | Distinct target values |
 | --- | --- | ---: | ---: |
 | `SPIdevice_Install` | `ACPI\FTE3600` | 42 | 41 |
 | `23H2_SPIdevice_Install` | `ACPI\FTE3600` | 42 | 41 |
 | `USBdevice_Install` | `USB\VID_2808&PID_9338` | 44 | 43 |
 | `23H2_USBdevice_Install` | `USB\VID_2808&PID_9338` | 44 | 43 |
 
-计数按单个安装路径、单个设备实例计算。`Exclusive=1` 在第 234、243 行重复出现，根、子路径、名称、类型和值相同，因此不会增加不同目标值的数量。两种 Windows 目标版本的本地 AddReg 定义一致；USB 比 SPI 仅多两项本地声明。全部 44 条源定义在四条路径上形成 172 次引用。
+Counts are per installation path and device instance. `Exclusive=1` appears at both lines 234 and
+243 with identical root, subpath, name, type, and value, so it does not increase the distinct-value
+count. The local AddReg definitions are identical for the two Windows target versions; USB adds only
+two local declarations compared with SPI. The 44 source definitions produce 172 references across
+the four paths.
 
-这里的“一致”仅指此 INF 的显式 AddReg。系统依赖节、服务安装、WDF 策略、已有注册表状态和运行时写入仍可能造成安装后状态不同。相同 HKR 相对路径在 SPI 和 USB 设备上指向各自的设备实例，不是同一绝对键。
+Here, “identical” refers only to this INF's explicit AddReg declarations. System dependency
+sections, service installation, WDF policies, existing registry state, and runtime writes can still
+produce different installed states. The same HKR-relative path refers to each device's own instance
+on SPI and USB, not to one absolute key.
 
-## 路径、类型与数值规则
+<a id="路径类型与数值规则"></a>
 
-- `A` = `HKLM\System\CurrentControlSet\Control\focalFp`。来自 `%ServiceRoot%` 的第 271 行定义；名称虽然叫 ServiceRoot，展开后实际为 **Control**，不是 Services。这 17 项是机器级共享配置。
-- `H` = 安装设备的硬件键。此样本的 HKR 条目全部通过 `.NT.hw` 引用，具体设备实例路径未知，不编造绝对路径。
-- `D` = `HKLM\System\CurrentControlSet\Services\WbioSrvc\Databases\{91CF558A-2540-4C3D-9A85-4AD392FDE4DA}`。这是显式的全局数据库配置路径。
-- `0x00010001` / `0x10001` / `%REG_DWORD%` 均表示 DWORD；省略 flags 表示字符串；`0x00010008` 表示多字符串追加且避免重复。十进制原文按十进制解读，`0x` 前缀按十六进制解读。表中类型表示 INF 声明类型，特殊设备属性最终如何存储不由此表证明。
+## Paths, types, and numeric interpretation
 
-HKR 作用域和类型规则依据 [Microsoft AddReg 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-addreg-directive)。原始数值拼写、原始 flags 和归一化值均保留在 JSON 中。
+- `A` = `HKLM\System\CurrentControlSet\Control\focalFp`. This expands `%ServiceRoot%`, defined at
+  line 271. Despite the name ServiceRoot, the path is under **Control**, not Services. These 17
+  values are shared machine-level configuration.
+- `H` = the installed device's hardware key. Every HKR entry in this sample is referenced through
+  `.NT.hw`; the specific device-instance path is unknown, so no absolute path is invented.
+- `D` =
+  `HKLM\System\CurrentControlSet\Services\WbioSrvc\Databases\{91CF558A-2540-4C3D-9A85-4AD392FDE4DA}`.
+  This is an explicitly declared global database-configuration path.
+- `0x00010001` / `0x10001` / `%REG_DWORD%` all mean DWORD; omitted flags mean a string; `0x00010008`
+  means append to a multistring without adding duplicates. Decimal literals are interpreted as
+  decimal and `0x`-prefixed literals as hexadecimal. Table types are those declared in the INF; this
+  table does not prove how special device properties are ultimately stored.
 
-## 厂商参数：四条路径共用
+HKR scope and type rules follow the
+[Microsoft AddReg documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-addreg-directive).
+Original numeric spellings, original flags, and normalized values are all retained in the JSON.
 
-来源节 `FTFP_AlgInfo.AddReg`，全部在路径 `A` 下，全部为 DWORD。以下只是键名与声明默认值；没有根据名称推导算法公式、单位或硬件寄存器。
+<a id="厂商参数四条路径共用"></a>
 
-| 行 | 名称 | 十进制值 |
+## Vendor parameters shared by all four paths
+
+Source section: `FTFP_AlgInfo.AddReg`. All values are DWORDs under path `A`. These are only the key
+names and declared defaults; no algorithm formula, unit, or hardware register is inferred from a
+name.
+
+| Line | Name | Decimal value |
 | --- | --- | ---: |
 | 210 | AlgMaxTemplates | 42 |
 | 211 | EnrollMaxTemplates | 18 |
@@ -50,15 +85,19 @@ HKR 作用域和类型规则依据 [Microsoft AddReg 文档](https://learn.micro
 | 227 | RightEdge | 3 |
 | 228 | TopEdge | 2 |
 
-保留厂商原始拼写 `ValidErea*`。不能把 `Center` / `*Edge` 直接当作像素裁剪尺寸，也不能将匹配阈值直接移植到当前 libfprint 的独立匹配实现；需要先确认读取函数及后续数据流。
+The vendor spelling `ValidErea*` is preserved. `Center` / `*Edge` must not be treated as pixel-crop
+dimensions, and matching thresholds must not be copied directly into libfprint's independent
+matcher. Their readers and downstream data flow need to be established first.
 
-## 设备配置：四条路径共用
+<a id="设备配置四条路径共用"></a>
 
-来源节 `Biometric_Device_AddReg`。
+## Device configuration shared by all four paths
 
-| 行 | 路径 | 名称 | 类型 | 声明值 |
+Source section: `Biometric_Device_AddReg`.
+
+| Line | Path | Name | Type | Declared value |
 | --- | --- | --- | --- | --- |
-| 232 | H | DeviceCharacteristics | DWORD | `0x0100`（256） |
+| 232 | H | DeviceCharacteristics | DWORD | `0x0100` (256) |
 | 233 | H | Security | SZ | `D:P(A;;GA;;;BA)(A;;GA;;;SY)` |
 | 234 | H | Exclusive | DWORD | 1 |
 | 235 | H | SystemWakeEnabled | DWORD | 1 |
@@ -68,15 +107,19 @@ HKR 作用域和类型规则依据 [Microsoft AddReg 文档](https://learn.micro
 | 239 | H | DefaultIdleTimeout | DWORD | 5000 |
 | 240 | H\WDF | WdfDirectedPowerTransitionEnable | DWORD | 1 |
 
-这是 Windows 设备安装/电源策略配置，不构成 SPI 寄存器表，也不能据此推导 Linux 下的复位延时或 GPIO 极性。保留 `Security` 字符串内的分号，不能误当成 INF 注释截断。
+These are Windows device-installation and power-policy settings, not an SPI register table. They do
+not establish Linux reset delays or GPIO polarity. Semicolons inside the `Security` string must be
+retained, not mistaken for INF comment delimiters.
 
-## WinBio 插件配置：四条路径共用
+<a id="winbio-插件配置四条路径共用"></a>
 
-来源节 `DriverPlugInAddReg`。
+## WinBio plug-in configuration shared by all four paths
 
-| 行 | 路径 | 名称 | 类型 | 声明值 |
+Source section: `DriverPlugInAddReg`.
+
+| Line | Path | Name | Type | Declared value |
 | --- | --- | --- | --- | --- |
-| 243 | H | Exclusive | DWORD | 1（与第 234 行同值重复） |
+| 243 | H | Exclusive | DWORD | 1 (duplicates line 234) |
 | 244 | H\WinBio\Configurations | DefaultConfiguration | SZ | `"0"` |
 | 245 | H\WinBio\Configurations\0 | SensorMode | DWORD | 1 |
 | 246 | H\WinBio\Configurations\0 | SystemSensor | DWORD | 1 |
@@ -85,65 +128,108 @@ HKR 作用域和类型规则依据 [Microsoft AddReg 文档](https://learn.micro
 | 249 | H\WinBio\Configurations\0 | StorageAdapterBinary | SZ | `ftWbioStorageAdapter.DLL` |
 | 250 | H\WinBio\Configurations\0 | DatabaseId | SZ | `91CF558A-2540-4C3D-9A85-4AD392FDE4DA` |
 
-`DefaultConfiguration` 是字符串 `"0"`，不是 DWORD 0。上述 GUID 是配置标识，不是芯片 ID。
+`DefaultConfiguration` is the string `"0"`, not DWORD 0. The GUID is a configuration identifier, not
+a chip ID.
 
-## WinBio 数据库配置：四条路径共用
+<a id="winbio-数据库配置四条路径共用"></a>
 
-来源节 `DatabaseAddReg`，路径均为 `D`。
+## WinBio database configuration shared by all four paths
 
-| 行 | 名称 | 类型 | 声明值 |
+Source section: `DatabaseAddReg`; every path is `D`.
+
+| Line | Name | Type | Declared value |
 | --- | --- | --- | --- |
-| 253 | BiometricType | DWORD | `0x00000008`（8） |
-| 254 | Attributes | DWORD | `0x00000001`（1） |
+| 253 | BiometricType | DWORD | `0x00000008` (8) |
+| 254 | Attributes | DWORD | `0x00000001` (1) |
 | 255 | Format | SZ | `CDAE92F1-5B32-4a91-94A8-56ACA204B3B9` |
-| 256 | InitialSize | DWORD | `0x00000020`（32） |
+| 256 | InitialSize | DWORD | `0x00000020` (32) |
 | 257 | AutoCreate | DWORD | 1 |
 | 258 | AutoName | DWORD | 1 |
-| 259 | FilePath | SZ | 空字符串 |
-| 260 | ConnectionString | SZ | 空字符串 |
+| 259 | FilePath | SZ | Empty string |
+| 260 | ConnectionString | SZ | Empty string |
 
-空字符串是明确的声明值，不是缺失数据。
+An empty string is an explicit declared value, not missing data.
 
-## USB 独有的两项
+<a id="usb-独有的两项"></a>
 
-来源节 `usb_device_include`，只由两条 USB 安装路径的 `.NT.hw` 引用（第 46、71 行）。
+## The two USB-only values
 
-| 行 | 路径 | 名称 | 类型/操作 | 声明值 |
+Source section: `usb_device_include`, referenced only by `.NT.hw` on the two USB installation paths
+(lines 46 and 71).
+
+| Line | Path | Name | Type / operation | Declared value |
 | --- | --- | --- | --- | --- |
-| 93 | H | LowerFilters | MULTI_SZ，若不存在则追加 | `WinUsb` |
-| 94 | H | WinUsbPowerPolicyOwnershipDisabled | DWORD，设置 | 1 |
+| 93 | H | LowerFilters | MULTI_SZ, append if absent | `WinUsb` |
+| 94 | H | WinUsbPowerPolicyOwnershipDisabled | DWORD, set | 1 |
 
-第 93 行不是把完整过滤器列表替换成单一 `WinUsb`；最终列表取决于已有内容及其他安装操作。这两项是 Windows USB 驱动栈差异，不能当作传感器芯片的初始化差异。
+Line 93 does not replace the entire filter list with a single `WinUsb` entry. The final list depends
+on existing contents and other installation operations. These values describe Windows USB-stack
+differences, not differences in sensor-chip initialization.
 
-## AddReg 之外的安装差异及外部依赖
+<a id="addreg-之外的安装差异及外部依赖"></a>
 
-保留同一节中所有重复出现的 Include/Needs 指令。下表将每节的依赖作为集合列出，不假定相邻两行一定是一一配对关系。外部文件不在本 CAB 中，未使用当前计算机上的系统 INF 代替样本目标 Windows 版本的文件。
+## Installation differences and external dependencies beyond AddReg
 
-| 安装路径 / 节后缀 | Include 文件 | Needs 节 |
+All repeated Include/Needs directives in each section are retained. The following table lists
+dependencies as sets per section; adjacent source lines are not assumed to form one-to-one pairs.
+The external files are absent from this CAB, and system INFs from the analysis computer were not
+substituted for those of the sample's target Windows version.
+
+| Installation path / section suffix | Include files | Needs sections |
 | --- | --- | --- |
-| SPI / `.NT`、`.NT.hw`、`.NT.Services` | 无 | 无 |
+| SPI / `.NT`, `.NT.hw`, `.NT.Services` | None | None |
 | USB / `.NT` | WINUSB.INF | WINUSB.NT |
 | 23H2_SPI / `.NT` | WUDFRD.INF | WUDFRD.NT |
 | 23H2_SPI / `.NT.hw` | WUDFRD.INF | WUDFRD.NT.HW |
 | 23H2_SPI / `.NT.Services` | WUDFRD.INF | WUDFRD.NT.Services |
-| 23H2_USB / `.NT` | WINUSB.INF、WUDFRD.INF | WINUSB.NT、WUDFRD.NT |
-| 23H2_USB / `.NT.hw` | WUDFRD.INF、WINUSB.INF | WUDFRD.NT.HW、WINUSB.NT.HW |
-| 23H2_USB / `.NT.Services` | WUDFRD.INF、WINUSB.INF | WUDFRD.NT.Services、WINUSB.NT.Services |
+| 23H2_USB / `.NT` | WINUSB.INF, WUDFRD.INF | WINUSB.NT, WUDFRD.NT |
+| 23H2_USB / `.NT.hw` | WUDFRD.INF, WINUSB.INF | WUDFRD.NT.HW, WINUSB.NT.HW |
+| 23H2_USB / `.NT.Services` | WUDFRD.INF, WINUSB.INF | WUDFRD.NT.Services, WINUSB.NT.Services |
 
-普通 USB 的 `.NT.hw` / `.NT.Services` 没有本地 Include/Needs。上述来源行及完整依赖列表见 JSON。依据 [Microsoft DDInstall 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-ddinstall-section)，Needs 指定安装时还需处理的系统 INF 节；没有这些文件就无法展开全部依赖操作。
+The ordinary USB `.NT.hw` / `.NT.Services` sections have no local Include/Needs directives. Source
+lines and the complete dependency list are in the JSON. Under the
+[Microsoft DDInstall documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-ddinstall-section),
+Needs names system-INF sections that must also be processed during installation. Without those
+files, the dependency operations cannot be fully expanded.
 
-- 普通 SPI 显式 AddService `WUDFRd`；普通 USB 显式 AddService `WUDFRd`、`WinUsb`、`focalFpSrvcDeamon`。两条 23H2 路径通过系统 INF 引入框架服务，23H2 USB 另显式添加 `focalFpSrvcDeamon`。仅从文件复制清单出现 EXE 不能认定 SPI 安装了该服务。
-- 两条 USB 路径指定 `UmdfDispatcher=WinUsb`。两条 SPI 路径和 23H2 USB 指定 `UmdfDirectHardwareAccess`、`UmdfFileObjectPolicy`、`UmdfImpersonationLevel`；普通 USB 没有显式设置这三项。缺少声明不等于运行时取相反值。
-- 四条路径的 `UmdfLibraryVersion` 均为 `2.15.0`。UMDF 服务二进制路径从普通安装的 `%12%\UMDF\ftWbioUmdfDriverV2.dll` 改为 23H2 安装的 `%13%\ftWbioUmdfDriverV2.dll`。USB 附加服务的 EXE 路径有对应变化。保留 DIRID 占位符，未臆造系统绝对路径。
+- Ordinary SPI explicitly adds service `WUDFRd`; ordinary USB explicitly adds `WUDFRd`, `WinUsb`,
+  and `focalFpSrvcDeamon`. The two 23H2 paths obtain framework services through system INFs, and
+  23H2 USB additionally declares `focalFpSrvcDeamon`. An EXE appearing in a copy list does not prove
+  that the SPI installation installs that service.
+- Both USB paths specify `UmdfDispatcher=WinUsb`. Both SPI paths and 23H2 USB specify
+  `UmdfDirectHardwareAccess`, `UmdfFileObjectPolicy`, and `UmdfImpersonationLevel`; ordinary USB
+  does not explicitly set those three values. An omitted declaration does not imply the opposite
+  runtime value.
+- All four paths specify `UmdfLibraryVersion` `2.15.0`. The UMDF service binary path changes from
+  `%12%\UMDF\ftWbioUmdfDriverV2.dll` in ordinary installations to `%13%\ftWbioUmdfDriverV2.dll` in
+  23H2 installations. The USB auxiliary-service EXE path changes correspondingly. DIRID placeholders
+  are retained; no absolute system path is assumed.
 
-这些差异不能被“两个 Windows 目标版本 AddReg 相同”掩盖。本报告没有模拟服务安装或 WDF 指令产生的注册表写入。
+Identical AddReg values between Windows target versions do not erase these differences. This report
+does not simulate registry writes caused by service installation or WDF directives.
 
-## 验证结果与下一步
+<a id="验证结果与下一步"></a>
 
-已核对全部五个 AddReg 定义节：厂商参数 17、设备配置 9、插件配置 8、数据库配置 8、USB 附加 2。提取保留重复 AddReg 引用，核对字符串展开、十六进制转换、空字符串、多字符串追加，以及含分号的安全描述符。四条路径共 172 条引用，两个 Windows 版本之间的本地键值集合一致，USB 与 SPI 差集恰为上述两项。未执行硬件测试，本步骤不涉及驱动代码修改。
+## Validation results and subsequent work
 
-**当前未发现此 INF 内的整机型号差异化键值、芯片型号选择键、GPIO 路由或固件/初始化表选择键。** 这不代表这些差异不存在于其他驱动包或运行时逻辑中。
+All five AddReg definition sections were checked: 17 vendor parameters, 9 device settings, 8 plug-in
+settings, 8 database settings, and 2 USB additions. Extraction preserves repeated AddReg references
+and checks string expansion, hexadecimal conversion, empty strings, multistring append operations,
+and the security descriptor containing semicolons. The four paths contain 172 references. Local
+value sets are identical between Windows target versions; the USB–SPI difference is exactly the two
+values listed above. No hardware tests or driver-code changes were part of this step.
 
-下一步进入二进制静态分析：先记录各文件哈希与 PE 信息，定位这 17 项配置的实际读取位置及芯片识别分支，再核对已知 FT9361 固件的偏移、长度和哈希，并追踪初始化序列的选择条件。仅有字符串命中不能证明配置被使用，候选二进制片段不能直接当成已确认固件。
+**This INF contains no identified computer-model-specific registry values, chip-selection keys, GPIO
+routing, or firmware/initialization-table selection keys.** Such differences may still exist in
+other packages or runtime logic.
 
-后续研究已核实主要硬件适配机制，见 [Windows 运行时适配分析](windows-runtime-adaptation.md)。该研究聚焦资源绑定、芯片检测与固件选择；17 项厂商参数的完整读取数据流仍未逐一还原。
+The next stage of the original research plan was static binary analysis: record file hashes and PE
+metadata, locate readers for these 17 settings and chip-detection branches, verify the known FT9361
+firmware's offset, length, and hash, and trace initialization-sequence selection. A string match
+alone does not prove that a setting is used, and a candidate binary region is not automatically
+confirmed firmware.
+
+Subsequent work confirmed the main hardware-adaptation mechanisms; see
+[Windows runtime adaptation](windows-runtime-adaptation.md). That work covers resource binding, chip
+detection, and firmware selection. The complete read-side data flow of the 17 vendor parameters has
+not been reconstructed individually.

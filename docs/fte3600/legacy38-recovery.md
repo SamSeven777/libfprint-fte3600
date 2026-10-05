@@ -1,5 +1,7 @@
 # FT9338 and FT9536: bounded ROM identification and RAM recovery
 
+[Documentation index](README.md)
+
 The FT9338/FT9536 family shares a verified RAM-download procedure, distinct from
 the FT9361/FT9348 procedure. This description records independent protocol facts
 from the 2.0.3.102 binary identified in `windows-hardware-inventory.json`.

@@ -1,144 +1,211 @@
-# Windows 生命周期覆盖与未完成项
+<a id="windows-生命周期覆盖与未完成项"></a>
 
-核查日期：2026-10-04（America/Chicago）。Linux 对象为 `acpi-spidev`
-未提交工作树，基于 `1ce4c740ac759b69537312f46ac956e39c4a9b53`。
-本文纠正此前把主要采集路径的核对扩大为“Windows 全生命周期已实现”的结论。
-先前核查追踪了下面列出的调用链，随后本轮实现了已确认的普通IRQ支持、
-最终关闭接口、FW9369事件前通信恢复及C1收尾、FT9368有界wake检查。
-**仍没有完成全部 Windows 路径的移植或硬件验证**；下表按当前工作树更新，
-历史测试结论不能扩大为尚未测试的硬件结果。
+# Windows lifecycle coverage and remaining work
 
-## 证据基线与判定方法
+[Documentation index](README.md)
 
-Windows 包的 INF 版本为 **2.0.3.102**。其中 `ftWbioUmdfDriverV2.dll`
-的 PE FileVersion / ProductVersion 实际为 **1.0.0.3188**，不是 2.0.3.102。
-本轮重新检查了版本资源及 SHA-256：
-`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`。
-DLL 为 AMD64、1,515,192 字节，映像基址 `0x180000000`；下文均为 RVA。
-旧文档中把“DLL 2.0.3.102”作为简称的地方指同一包/同一哈希，不能解释为
-DLL 自身的文件版本。其他包版本的目录、构造器或固件相同，不证明生命周期相同。
+**Coverage checkpoint: 2026-10-04 (America/Chicago).** The reviewed Linux
+implementation was the then-uncommitted `acpi-spidev` tree based on
+`1ce4c740ac759b69537312f46ac956e39c4a9b53`. Those changes were subsequently
+published in `6e25b20`, with additional fixes described in the
+[October 5 audit](audit-acpi-spidev-2026-10-05.md) and
+[release validation](validation-release-2026-10-05.md). The current transport
+contract is in [ACPI glue and stock spidev](acpi-spidev.md).
 
-依据是本地原始二进制、反汇编、调用记录和函数表；未执行厂商二进制。
-仓库仅记录接口、命令和控制流事实，不收录反汇编、厂商实现或固件。
-本轮同时读取当前生产代码和测试模拟器。分类含义：
+This record corrects the earlier inference that checking major capture paths
+established a complete Windows-lifecycle port. The investigation traced the
+call chains below and implemented ordinary-IRQ support, a separate final-close
+interface, FW9369 pre-event communication recovery/C1 shutdown, and bounded
+FT9368 wake checks. **Not every Windows path has been ported or tested on
+hardware.** The table records this checkpoint's scope; historical test results
+do not validate untested hardware behavior.
 
-- **已核对**：仅所列条件、报文和分支有对应证据；不扩大到整芯片或整机。
-- **实现缺口**：原厂已存在的功能/分支尚未实现；不自动等于某次实测故障原因。
-- **独立策略**：Linux 有意采用不同策略，仍须说明后果和验证范围。
-- **未追清**：入口、条件、后置状态或硬件行为证据不完整，不能作肯定结论。
+<a id="证据基线与判定方法"></a>
 
-函数存在、入口确实可达、特定机器实际走到该入口，是三个不同层次的证据。
-公开应用关闭、取消采集、芯片 idle、设备 D0Exit、系统休眠必须分别追踪。
+## Evidence baseline and classification
 
-## 资源、IRQ 与框架生命周期
+The Windows package INF version is **2.0.3.102**. The contained
+`ftWbioUmdfDriverV2.dll` has PE FileVersion/ProductVersion **1.0.0.3188**,
+not 2.0.3.102. Version resources and SHA-256 were checked again:
+`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`.
 
-| 项目 | 原厂事实与定位 | 当前 Linux 对应 | 结论 |
+The AMD64 DLL is 1,515,192 bytes, with image base `0x180000000`; all addresses
+below are RVAs. Older references to “DLL 2.0.3.102” mean this package/hash, not
+the DLL's file version. Matching catalogs, constructors or firmware across
+package versions do not establish equivalent lifecycle behavior.
+
+Evidence came from the original local binary, disassembly, call records and
+function tables; the vendor binary was not executed. The repository records
+interface, command and control-flow facts, not disassembly, vendor
+implementation or firmware. Production Linux code and its simulators were
+also examined. The classifications mean:
+
+- **Checked:** evidence covers only the listed condition, message and branch,
+  not an entire chip or computer.
+- **Implementation gap:** a Windows function or branch has not been ported;
+  that alone does not establish the cause of a reported hardware failure.
+- **Independent policy:** Linux intentionally differs, with consequences and
+  validation scope that must remain explicit.
+- **Untraced:** the entry point, condition, postcondition or hardware behavior
+  is insufficiently established for a positive claim.
+
+A function's existence, a reachable call to it and a particular machine
+actually taking that path are different levels of evidence. Application close,
+capture cancellation, chip idle, device D0Exit and system suspend must be
+traced separately.
+
+<a id="资源irq-与框架生命周期"></a>
+
+## Resources, IRQ and framework lifecycle
+
+| Item | Windows evidence | Linux behavior at the checkpoint | Finding |
 | --- | --- | --- | --- |
-| 资源准备 | `2EB20` 枚举转换后的资源，`2EC38` 接受通用中断 Type=2；`301E8` 将同索引 raw/translated 描述符交给 WDF | ABI2接受单一edge GpioInt、IRQ或EXTENDED_IRQ，分别由真实GPIO descriptor或SPI core解析的IRQ取得 | **本轮已实现并通过编译/策略测试**；GPD实机仍需验证此分支 |
-| IRQ 极性 | `301E8` 保留系统描述符，没有修改 flags 或硬编码触发边沿 | 两类IRQ均采用ACPI极性，不伪造普通IRQ为GPIO | 不能声称 Windows 自动纠正 ACPI；GPD 最新测试的 edge/active-low 可直接工作 |
-| IRQ 对象寿命 | Prepare 创建 passive ISR `2DC20`；SPI 析构 `2DBA5–2DBC9` 删除 IRQ 对象 | 有效reset lease内打开UIO才申请IRQ，关闭/PM/移除均释放；无使用者不处理传感器事件 | **独立策略**。释放主机 IRQ 不证明传感器停止输出 |
-| 物理 reset | `2F5E0 → 31414 → 3106C` 将 1/0/1 原值交给 GPIO 请求，等待10/20ms | active-low 请求的逻辑0/1/0，对应物理H/L/H | 请求电平和时序已核对；未替代实测波形 |
-| CS | `303BC` 按 Resource Hub connection ID 打开 SPI | ACPI 基线加两极性探测，正常关闭恢复基线 | **独立策略**；不是已证明的 Windows 双 CS 逻辑 |
-| 框架注册 | `24916–24948` 注册 Prepare `23D80`、Release `24760`、D0Entry `238C0`、D0Exit `23B70` | 已有资源准备/释放；内核 PM 标记会话失效，用户态重新打开时重识别 | **芯片电源生命周期尚未对齐**。会话失效保护不等于低功耗/唤醒实现 |
-| D0 分派 | D0Entry/Exit 对相应芯片分派 vtable `+90/+88`；FW9369 对应 `39130/39280` | 已区分每帧reset与最终shutdown，系统PM仍令旧会话失效、要求重开 | **尚非自动系统电源恢复**；各芯片全部电源条件仍需追踪 |
-| S0/Sx 策略 | `30EF0` 包含5000ms idle设置，但 `2EF30–2EF3F` 仅 scene=2 调用；SxWake `2D958` 也有条件 | 没有对应 runtime-idle/wakeup 策略 | 未证明 GPD 实际满足这些条件，不能称 Windows 在它上面固定5秒睡眠 |
+| Resource preparation | `2EB20` enumerates translated resources; `2EC38` accepts generic interrupt Type=2; `301E8` gives same-index raw/translated descriptors to WDF | ABI 2 accepts one edge-sensitive GpioInt, IRQ or EXTENDED_IRQ, using the real GPIO descriptor or SPI-core IRQ respectively | Implemented and covered by builds/policy tests; this branch still needed GPD hardware validation |
+| IRQ polarity | `301E8` preserves system descriptors, without changing flags or hardcoding an edge | Both IRQ sources use ACPI polarity; ordinary IRQ is not fabricated as GPIO | No evidence that Windows corrects ACPI polarity; the cited GPD edge/active-low configuration worked in its reported test |
+| IRQ-object lifetime | Prepare creates passive ISR `2DC20`; SPI destructor `2DBA5–2DBC9` deletes the IRQ object | UIO open within a valid reset lease requests the IRQ; close, PM and removal release it; no user means no sensor-event processing | Independent policy; releasing the host IRQ does not prove the sensor stopped signaling |
+| Physical reset | `2F5E0 → 31414 → 3106C` passes raw 1/0/1 to GPIO writes with 10/20 ms waits | An active-low request's logical 0/1/0 corresponds to physical H/L/H | Requested levels/timing checked; actual waveform still unmeasured |
+| CS | `303BC` opens SPI using a Resource Hub connection ID | ACPI baseline and polarity probing; normal close restores the baseline | Independent policy, not a proven Windows dual-CS sequence; current switching is additionally gated by reported CS-control capability |
+| Framework registration | `24916–24948` registers Prepare `23D80`, Release `24760`, D0Entry `238C0`, D0Exit `23B70` | Resource preparation/release exist; kernel PM invalidates sessions and reopening identifies the sensor again | Chip power lifecycles are not equivalent; invalidation does not implement low-power entry/wake |
+| D0 dispatch | D0Entry/Exit dispatch through vtable `+90/+88`; FW9369 targets `39130/39280` | Per-frame reset and final shutdown are distinct; system PM still invalidates the old session and requires reopen | Not automatic system-power recovery; all chip-specific power conditions still need tracing |
+| S0/Sx policy | `30EF0` contains a 5000 ms idle setting, but `2EF30–2EF3F` calls it only for scene=2; SxWake `2D958` is conditional too | No corresponding runtime-idle/wakeup policy | GPD taking these branches was not established; Windows cannot be claimed to sleep it after a fixed five seconds |
 
-Windows 将 GPIO 来源的中断同样抽象为 `CmResourceTypeInterrupt`，见
-[微软资源说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-interrupt-resources)。
-Linux 对普通 IRQ 的支持不能靠放宽计数完成。本轮因此将reset保留为一条
-真实GPIO，把两种IRQ统一放到只读标准UIO事件接口；内核、配对器、用户态、
-权限和测试同步改为ABI2。事件计数允许合并/回绕，PM唤醒必须先验证generation，
-不得当成有效传感器事件。参见[完整接口合同](../../kernel/fte3600/README.md)。
+Windows also abstracts GPIO-originated interrupts as
+`CmResourceTypeInterrupt`; see
+[Microsoft's resource documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-interrupt-resources).
+
+Supporting ordinary IRQ on Linux required more than relaxing resource counts.
+Reset remains one real GPIO; both interrupt sources use the standard read-only
+UIO event interface. Kernel, pairing helper, userspace, permissions and tests
+moved together to ABI 2. Event counts can coalesce or wrap. A PM wake must
+validate generation before treating a notification as a sensor event. See
+[the kernel contract](../../kernel/fte3600/README.md).
 
 ## FW9369 / raw ID 9362
 
-| 阶段 | 原厂事实与定位 | Linux 对应与覆盖 |
+| Stage | Windows evidence | Linux behavior and coverage |
 | --- | --- | --- |
-| 身份 | `10088/10CD8` 配置C6、读取1A8B、确认9362 | discovery / special-probe / 初始化均有正向身份检查；重复确认是独立保护 |
-| 初始化结束 | `FED8` 完成唤醒、工艺、参数及基线后进入 WAIT_TOUCH | `fte3600-fw9369.c` 初始化结束进入 awake idle，等待显式 action；**结束状态不同** |
-| 校准 | `157C0 → 11C64` FDT基线；`16294` 图像基线更新 | 主机有界DAC搜索和稳定性检查为独立算法；**不含全部后台基线更新/抗干扰流程** |
-| 按下/释放 | `F8C4(1/2) → 11800` 配置FDT、基线、1881、清002F、发C2 | 主要命令骨架已核对；Linux录入阶段预布防释放并拒绝模糊UP/DOWN |
-| 图像 | `39050 → F8B4 → 15938 → 16898`；`17000` 进入C4/状态54、触发扫描；`18208` 读FIFO | 6字节头+10,240字节16位像素、主要顺序已核对；图像转换独立 |
-| 事件前通信恢复 | `101EC → 10CD8` 验证通信，失败经 `102B3` 唤醒后再试 | **本轮实现**C6=01/4ms及连续ID确认；空白回复最多10轮wake，正向冲突ID停止后续通信 |
-| 事件控制 | `11008` 读1A82；`11014/10FD0` 对1A83置位/清位；`10FC0` 写1A84确认 | 最终关闭以读改写屏蔽已知07FF位、单独W1C确认07FF；保留未知位。不是清除所有未知事件的保证 |
-| 无采集请求的IRQ | ISR `2DDEC` 先查事件，TOUCH后才检查请求；无请求 `2DEFA → F8C4(2)` 仍进入WAIT_LEAVE | 仅action中处理事件，关闭后释放传输；**后台事件生命周期不同** |
-| 设备idle能力 | `FB2B → FB5A → 10BD0` 发C0、等1ms、发C1、等1ms | 每帧reset仍验证awake idle；**最终shutdown补C1/1ms**，并先屏蔽/确认已知事件 |
-| deep-sleep能力 | `FBA0(3)` 明确标记deep sleep，`FC3F → 11048` 先wake再发C1 | 已发送已知C1睡眠命令；不猜测C1后状态值，不声明实测功耗或自动清IRQ效果；重开经真实discovery/special-probe模拟测试 |
-| D0Entry | `238C0 → 39130` 查事件、恢复等待，部分异常复位并重新初始化 | Linux令旧会话失效并要求重开；不是相同的自动恢复 |
-| D0Exit | `23B70 → 39280` 在标志 `1A4400==0` 时进入WAIT_TOUCH | 不能解释为“Windows总是在D0Exit深睡眠” |
-| ESD/reset | `101EC` 分类，ISR `2DE7C–2DF4A` 有复位/重新初始化路径 | Linux取消校准有效性并报错、要求重开；**有意收紧，恢复能力较少** |
-| 取消请求 | `28EE0` 清请求、条件ResumeIdle、通知等待者、完成取消 | Linux响应取消后尽力清理；未证原厂取消回调直接发送C0/C1 |
-| 公开用户close | **尚未建立完整的公开句柄关闭到芯片命令的调用链** | 不得把C1函数存在写成“Windows每次close都会发送C1” |
+| Identity | `10088/10CD8` configures C6, reads 1A8B and checks 9362 | Discovery, special probing and initialization check positive identity; repeated confirmation is an independent protection |
+| End of initialization | `FED8` completes wake, process selection, parameters and baseline, then enters WAIT_TOUCH | Linux initialization ends in awake idle and waits for an explicit action; the ending state differs |
+| Calibration | `157C0 → 11C64` updates FDT baseline; `16294` updates image baseline | Bounded host DAC search and stability checks are independent algorithms; not all background baseline/interference handling is ported |
+| Finger down/up | `F8C4(1/2) → 11800` configures FDT, baseline and 1881, clears 002F and sends C2 | Main command structure checked; Linux prearms release between enrollment samples and rejects ambiguous UP/DOWN |
+| Image | `39050 → F8B4 → 15938 → 16898`; `17000` enters C4/state 54 and triggers scan; `18208` reads FIFO | Six-byte header plus 10,240 bytes of 16-bit pixels and main ordering checked; image conversion is independent |
+| Pre-event communication recovery | `101EC → 10CD8` checks communication; failure wakes through `102B3` and retries | C6=01/4 ms and consecutive identity confirmation implemented; blank replies allow at most ten wake rounds, positive conflicting IDs stop further communication |
+| Event control | `11008` reads 1A82; `11014/10FD0` sets/clears 1A83; `10FC0` writes 1A84 acknowledgement | Final close masks known 07FF bits by read-modify-write and separately acknowledges 07FF with W1C; unknown bits are preserved, not guaranteed cleared |
+| IRQ without a capture request | ISR `2DDEC` checks events before checking the request after TOUCH; no request still enters WAIT_LEAVE through `2DEFA → F8C4(2)` | Linux handles events only during an action and releases transport at close; the background lifecycle differs |
+| Device-idle capability | `FB2B → FB5A → 10BD0` sends C0, waits 1 ms, sends C1, waits 1 ms | Per-frame reset still verifies awake idle; final shutdown adds C1/1 ms after masking/acknowledging known events |
+| Deep-sleep capability | `FBA0(3)` explicitly identifies deep sleep; `FC3F → 11048` wakes then sends C1 | Known C1 command implemented without inventing a post-C1 state value or claiming measured power/IRQ effects; reopen tested with production discovery/special-probe simulators |
+| D0Entry | `238C0 → 39130` checks events and restores waiting; some failures reset/reinitialize | Linux invalidates the old session and requires reopen, rather than providing the same automatic recovery |
+| D0Exit | `23B70 → 39280` enters WAIT_TOUCH when flag `1A4400==0` | This does not mean Windows always enters deep sleep at D0Exit |
+| ESD/reset | `101EC` classifies events; ISR `2DE7C–2DF4A` has reset/reinitialize paths | Linux invalidates calibration, reports failure and requires reopen: intentionally less automatic recovery |
+| Request cancellation | `28EE0` clears the request, conditionally calls ResumeIdle, notifies waiters and completes cancellation | Linux performs best-effort cleanup after cancellation; a direct C0/C1 from the Windows cancellation callback was not established |
+| Public application close | No complete call chain from public handle close to chip commands has been established | C1's existence must not be described as proof that Windows sends it on every close |
 
-`FBA0` 已追到的直接调用为wake；idle/deep-sleep分支存在本身不证明某次
-Windows用户关闭会使用它们。Windows保持后台手指检测也可能是有效策略。
-Linux应明确自己的无使用者状态和事件所有权，不机械照搬后台服务行为。
+The traced direct call into `FBA0` used wake. Idle/deep-sleep branches alone
+do not establish their use on a particular Windows application close.
+Background finger detection can itself be a valid Windows policy. Linux must
+define its own no-user state and event ownership instead of assuming that
+copying a background service is necessary.
 
-## 其他芯片的关键覆盖与缺口
+The subsequent [October 5 audit](audit-acpi-spidev-2026-10-05.md) found that
+communication recovery could stop detection and then wait without rearming.
+That defect was fixed separately; the existence of the pre-event recovery
+path in this checkpoint was not proof of complete recovery behavior.
 
-| 家族/阶段 | 原厂事实与定位 | 当前结论 |
+<a id="其他芯片的关键覆盖与缺口"></a>
+
+## Key checks and gaps in other families
+
+| Family/stage | Windows evidence | Finding |
 | --- | --- | --- |
-| Legacy识别前唤醒 | `24221 → 28344 → 270E4 → 28C54`，双70、5ms、MCU状态、最多六轮及成功后350ms | 已有慢启动回退；A1快路径与第二次70后的2ms是保留的独立优化 |
-| FT9338/9536 RAM恢复 | `365C0` 上传，`368DA` 比较失败返回，仅 `3691B` 后启动 | 完整回读成功后才双复位；失败释放reset并令会话失效。首次无身份9338拒绝默认猜测是独立策略 |
-| FT9348/9361 A8上传 | `397EA` 进入下载、`3982D` 上传、`3983A` 等2ms、`39866` 启动 | 该顺序已核对；原厂本路径也没有38家族式完整RAM回读 |
-| Legacy停止 | `28668 → 28C54` 双70，按模式决定是否清1E/1F并等10ms | 主要停止规则已核对；有界误IRQ退出属于独立策略 |
-| FT9365/9769 down/up/sleep | `1928C` mode1/2调用 `1B3B4` 的FDT，mode0调用 `1AC14` | **未实现原厂FDT/睡眠生命周期**；当前主动扫描图像、用独立门限判定按下/释放 |
-| FT9365/9769 idle收尾 | `1A804` 验证80=50，`1A880 → 225DC` 发送A5 5A 00 | Linux停在awake idle，未发送该收尾；不能称待机等效 |
-| FT9368 wake恢复 | `38E90` 发FF00、等10ms、通过 `38DEC` 读9180的4字节；4字节相同且非零时循环 | **本轮实现并测试**初始化及两处capture wake，最多3次总尝试；之后仍需完整INFO确认身份/几何 |
-| FT9368图像/确认 | `384F0` 图像，`38610` 的9080确认，`38B60` 信息读取 | 原生8位图像、偏移7及确认路径已有；没有新增实机证明 |
-| FT9368 POA | `38AF0` 特定全局模式发F080、读取4字节 | **该能力未实现；调用条件未完整追清**。不能无条件加到close |
+| Wake before legacy identification | `24221 → 28344 → 270E4 → 28C54`: two 70 commands, 5 ms, MCU check, at most six rounds and 350 ms after success | Slow-start fallback exists; the A1 fast path and 2 ms after the second 70 are retained independent optimizations |
+| FT9338/FT9536 RAM recovery | `365C0` uploads; failed comparison at `368DA` returns; only after `3691B` does startup occur | Double reset follows complete matching readback only; failure releases reset and invalidates the session. Refusing to guess an initially unidentified FT9338 is independent policy |
+| FT9348/FT9361 A8 upload | `397EA` enters download, `3982D` uploads, `3983A` waits 2 ms, `39866` starts | Order checked; Windows also lacks legacy38-style complete RAM readback in this path |
+| Legacy stop | `28668 → 28C54`: two 70 commands, mode-dependent clearing of 1E/1F and 10 ms wait | Main stop rule checked; bounded exit after unrelated IRQs is independent policy |
+| FT9365/FT9769 down/up/sleep | `1928C` mode 1/2 uses FDT in `1B3B4`; mode 0 calls `1AC14` | Native FDT/sleep lifecycle not implemented; Linux actively scans and uses independent image thresholds for contact/release |
+| FT9365/FT9769 idle finalization | `1A804` verifies 80=50; `1A880 → 225DC` sends A5 5A 00 | Linux remains awake idle and omits this final command; standby equivalence is not claimed |
+| FT9368 wake recovery | `38E90` sends FF00, waits 10 ms, reads four bytes at 9180 through `38DEC`; equal nonzero bytes trigger retry | Implemented in initialization and both capture wake points, with at most three total attempts; complete INFO must still validate identity/geometry |
+| FT9368 image/acknowledgement | `384F0` reads image; `38610` acknowledges with 9080; `38B60` reads information | Native 8-bit image, offset 7 and acknowledgement paths implemented; no new hardware validation |
+| FT9368 POA | `38AF0` sends F080/reads four bytes in a particular global mode | Not implemented; calling conditions not fully traced. Do not add it unconditionally to close |
 
-本轮没有逐条重查所有AFE字段、FT9368 PRAM/flash错误分支、每族取消传播，
-以及每个D0/Modern Standby条件组合。它们仍须列入完整移植的审计范围。
+This investigation did not recheck every AFE field, FT9368 PRAM/flash error
+branch, per-family cancellation path or D0/Modern Standby condition. Those
+remain within the scope of a complete-port audit.
 
-## 为什么此前测试没有发现
+<a id="为什么此前测试没有发现"></a>
 
-此前公共 `Fte3600Backend` 只有通用 `create_reset()`，没有单独表达最终关闭、
-低功耗、唤醒的硬件操作。此前 `fte3600_close()` 在 `idle_verified` 为真时直接
-关闭传输；这个值证明的是后端可复用的空闲状态，不能证明睡眠或停止全部IRQ。
-同一reset还用于初始化结束、每帧收尾、取消和错误恢复。直接在其中补C1会
-同时改变这些场景，不能视为只修改关闭行为。
+## Why earlier tests missed these gaps
 
-此前 `tests/test-fw9369-backend.c` 的模拟器把C0变为状态50，5A/A5无状态副作用，
-没有模拟睡眠后的寄存器不可达性、无请求时的后台IRQ或C1后重新发现。
-现有测试能检查已编码的合同，不能独立证明该合同涵盖了原厂所有状态。
-先前的编译、单元测试和sanitizer通过记录仍然有效，但它们不是全生命周期
-等价验证，也不能证明未运行的路径。
+The shared `Fte3600Backend` interface previously exposed only
+`create_reset()`, without distinguishing final close, low power and wake.
+Earlier `fte3600_close()` released transport immediately when
+`idle_verified` was true. That flag proved reusable backend idle, not sleep
+or suppression of every IRQ. The same reset served initialization completion,
+per-frame cleanup, cancellation and error recovery. Adding C1 there would
+change all those paths, not only close.
 
-本轮增加可选 `create_shutdown()`，在资源仍持有时执行；即使已awake idle，
-FW9369最终close也执行它。错误后仍释放资源并保留首错，失败会话不再发送命令。
-协议测试引入C1后睡眠、唤醒前ID空白的模型，并连接生产discovery/special-probe
-与真实后端初始化/采集状态机；公共action测试另验每帧不shutdown及重复close/reopen。
-它们扩大回归覆盖，仍不构成硬件睡眠行为的独立证据。
+The previous `test-fw9369-backend.c` model made C0 produce state 50 and gave
+5A/A5 no state effects. It did not model inaccessible registers during sleep,
+background IRQs without a request or rediscovery after C1. Tests can check the
+contract encoded in their model; they cannot independently prove it covers
+every Windows state. Earlier builds, unit tests and sanitizer results remain
+valid within scope, not as complete-lifecycle equivalence or evidence of
+unexecuted paths.
 
-## 本轮实现与后续边界
+An optional `create_shutdown()` was added while resources are still held.
+FW9369 final close invokes it even from awake idle. Errors retain the first
+failure and still release resources; failed sessions send no further commands.
+Protocol tests model C1 sleep and blank identity before wake, then connect
+production discovery/special-probe with actual backend initialization/capture.
+Separate public-action tests check that per-frame cleanup does not shut down
+and that repeated close/reopen works. These expand regression coverage without
+providing independent evidence of physical sleep.
 
-1. **已实现**：普通IRQ资源和GpioInt都建立明确的事件传递、申请/释放、休眠及移除合同；
-   保留真实reset GPIO，分别测试两种资源布局及无/多中断的错误处理。
-2. **部分完成**：后端接口区分停止采集和最终关闭，FW9369实现收尾及唤醒。
-   其他家族保留现有awake-idle清理，不声明睡眠等效。每族仍须记录完整的前置状态、
-   命令、等待、可观测后置条件、失败/取消动作；不猜测未知睡眠状态值。
-3. **已补软件回归**：FW9369睡眠后首次ID无响应、经专用wake后识别、
-   再校准/采集、重复close/reopen，以及C1/唤醒失败和短传输。
-4. **已实现并测试**：FT9368已确认的有界wake重试；不得把全零响应擅自定义为
-   原厂相同的重试条件，也不得把3次总尝试写成初次加3次重试。
-5. **保留的Linux策略**：FT9365/9769使用主动扫描及主机图像门限，未采用原厂FDT/
-   sleep；FW9369不做后台基线更新，ESD后清除校准并要求重开，以免有手指时自动
-   重校准污染基线。这些选择的功耗/检测质量仍需实机评估。FT9368 POA条件未追清，
-   不无条件加入关闭路径。每项独立验证，不能用“整体按Windows实现”代替选择。
-6. 继续追公开关闭、全部芯片电源槽、WDF请求/电源引用、全局策略标志来源及
-   必要的SensorAdapter入口。入口未查清前保持未完成，不以函数名字补全调用链。
-7. 实机记录芯片状态/事件、IRQ计数、重开和休眠恢复；功耗及图像质量另行验证。
-   只有中断减少、单次图像传输成功或软件测试通过，都不足以关闭所有待办。
+<a id="本轮实现与后续边界"></a>
 
-## 最新GPD证据能证明什么
+## Implemented scope and outstanding work
 
-[资源修正报告](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987576100)
-和[成功采集报告](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987625692)
-针对的是main `1ce4c74`加测试者本地普通IRQ补丁，**不是本acpi-spidev工作树**。
-报告确认raw9362、CS高有效、ACPI edge/active-low IRQ、初始化、采集及两次
-关闭/重新打开。图像被丢弃，未验证图像质量、录入/匹配或系统休眠恢复。
-关闭时IRQ仍约10次/秒；缺少对应1A82/1A83/状态观测，原因仍未知。
+1. Ordinary IRQ and GpioInt both have explicit delivery, acquisition/release,
+   suspend and removal contracts. Reset remains a real GPIO. Both layouts and
+   missing/multiple-interrupt errors have tests.
+2. The backend interface distinguishes capture stop from final close; FW9369
+   has shutdown/wake. Other families retain awake-idle cleanup without claiming
+   equivalent sleep. Each family still needs explicit preconditions, commands,
+   waits, observable postconditions, failure and cancellation behavior.
+3. Software regressions cover FW9369's blank initial ID after sleep, dedicated
+   wake/identification, recalibration/capture, repeated close/reopen, C1/wake
+   errors and short transfers.
+4. FT9368's confirmed bounded wake retry is implemented and tested. All-zero
+   replies must not be assigned the same retry condition without evidence;
+   three total attempts is not one initial attempt plus three retries.
+5. Independent Linux policies remain: FT9365/FT9769 use active scans and host
+   image thresholds instead of native FDT/sleep; FW9369 omits background
+   baseline updates and invalidates calibration after ESD, requiring reopen
+   rather than recalibrating automatically over a possible finger. Power and
+   detection quality need hardware measurement. FT9368 POA conditions remain
+   untraced and are not added unconditionally to close.
+6. Trace public close, every chip's power slots, WDF request/power references,
+   global-policy flag origins and necessary SensorAdapter entry points.
+   Function names cannot substitute for missing call-chain evidence.
+7. Record hardware chip state/events, IRQ counts, reopen and suspend/resume.
+   Power and image quality need separate validation. Fewer interrupts, one
+   successful frame or software tests cannot close every outstanding item.
 
-本轮修改保留在 `acpi-spidev` 工作树，没有提交、推送、更新issue或访问实物。
-具体构建、测试和跳过项见[验证记录](validation-acpi-spidev-2026-10-04.md)。
+<a id="最新gpd证据能证明什么"></a>
+
+## Scope of the cited GPD evidence
+
+The [resource correction report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987576100)
+and [capture report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987625692)
+used main `1ce4c74` plus the tester's local ordinary-IRQ patch, **not this
+ACPI/spidev implementation**. They reported raw ID 9362, active-high CS, an ACPI
+edge/active-low IRQ, initialization, capture and two close/reopen cycles.
+Images were discarded; image quality, enrollment/matching and system
+suspend/resume were not verified. About ten IRQs per second persisted after
+close. Without corresponding 1A82/1A83/state observations, the cause remained
+unknown.
+
+At this checkpoint the changes were uncommitted and no issue update or
+hardware access was performed. That is historical provenance, not the present
+publication state. See the [checkpoint validation](validation-acpi-spidev-2026-10-04.md)
+and [later release validation](validation-release-2026-10-05.md) for executed
+checks and skips.

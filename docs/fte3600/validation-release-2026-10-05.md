@@ -1,7 +1,14 @@
 # Release preparation validation — 2026-10-05
 
+[Documentation index](README.md)
+
+**Dated validation record.** Counts below are results for the recorded
+implementation and runs, not a promise that an arbitrary later checkout passed
+the same checks.
+
 This record covers the ACPI reset/IRQ glue and stock-spidev implementation in
-the commit containing this document, based on `1ce4c74`. It follows the
+`6e25b20`, based on `1ce4c74`, and the subsequent CI dependency fix in
+`732425e`. It follows the
 [independent audit](audit-acpi-spidev-2026-10-05.md); it does not replace the
 earlier hardware reports with simulated results.
 
@@ -66,6 +73,22 @@ Local full-build and sanitizer logs are under
 `work/publish-validation-2026-10-05/`; these are development records, not shipped
 runtime dependencies. The final queue-ordering change was followed by another
 complete run of the installation/removal and pairing helper suites; both passed.
+
+## Published CI results
+
+The final CI runs below completed successfully after adding the `systemd`
+runtime package, which provides `systemd-escape`, to the Ubuntu dependencies.
+These are remote software checks and are distinct from the local matrix above.
+
+| Branch / source | Workflow run | Fedora 43 job | Ubuntu job |
+| --- | --- | --- | --- |
+| Main `732425e` | [37270794630](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794630) | [111637148615 — passed](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794630/job/111637148615) | [111637148724 — passed](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794630/job/111637148724) |
+| Separate Medion branch `c71dfa4` | [37270794636](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794636) | [111637148598 — passed](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794636/job/111637148598) | [111637148863 — passed](https://github.com/SamSeven777/libfprint-fte3600/actions/runs/37270794636/job/111637148863) |
+
+The Medion result belongs to its separate diagnostic branch; it does not make
+that workflow part of main or establish successful operation on the reported
+Medion machine. Neither run is evidence of physical sensor behavior or an
+enforcing-system installation.
 
 ## Hardware and integration limits
 

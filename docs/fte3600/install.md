@@ -1,9 +1,18 @@
 # Build & Installation Guide
 
-This guide covers dependency installation, firmware setup, compilation and enrollment.
-For the current transport, follow [ACPI glue and stock spidev](acpi-spidev.md)
-for the complete transport build, migration and system integration workflow.
-It requires an out-of-tree GPIO glue module; Secure Boot signing still applies.
+[Documentation index](README.md)
+
+Use this guide to choose a build, install any required external firmware, and
+test capture or opt-in authentication. Check the [support matrix](status.md#implemented-functions-and-test-limits)
+first: implemented chip protocols are not a guarantee that a particular laptop
+has passed hardware testing.
+
+The current driver uses stock spidev with an out-of-tree reset/IRQ glue module.
+Follow the sections below for dependencies and the library build, then
+[system integration](acpi-spidev.md) for kernel configuration, old-installation
+migration, permissions and removal. Start with capture-only mode; enrollment
+requires an explicit authentication build. Secure Boot signing still applies
+to the glue module.
 
 ---
 
@@ -48,7 +57,7 @@ The experimental transport requires stock `spidev`, kernel UIO support
 libgpiod is not a dependency: userspace uses the GPIO character-device v2 ABI
 for reset and the standard UIO event counter for IRQ notification.
 Follow [ACPI glue and stock spidev](acpi-spidev.md)
-before installing this branch. This transport has not yet been validated on hardware.
+before installing. This transport has not yet been validated on hardware.
 Record the exact commit used for the build; older revisions use a different
 custom SPI bridge interface and must follow the migration procedure.
 
@@ -190,10 +199,11 @@ Neither override relaxes the hardware identity checks.
 ### Option A: Arch Linux Package (Recommended for Arch)
 
 The developer `PKGBUILD` compiles with `-Dfte3600_personal_auth=true` and installs
-DKMS 0.2 glue sources. It packages committed HEAD and therefore does **not**
-include this branch's current uncommitted changes. Use the manual build below
-for those changes. Once packaging a committed revision, install matching kernel
-headers and follow [the migration guide](acpi-spidev.md) before this sequence:
+DKMS 0.2 glue sources. It packages the checkout's committed HEAD; local
+uncommitted edits are excluded. Record that commit, install matching kernel
+headers and follow [the migration guide](acpi-spidev.md) before this sequence.
+For a capture-only build, use the manual route below instead of this package's
+explicit personal-auth policy.
 
 ```sh
 cd packaging/arch
@@ -223,7 +233,8 @@ meson compile -C build-fte3600
 
 # Execute unit and lifecycle test suite
 meson test -C build-fte3600 --print-errorlogs \
-  fpi-spi-transfer fte3600-driver fte3600-brisk fte3600-template \
+  fte3600-context fte3600-resources fpi-spi-transfer \
+  fte3600-driver fte3600-brisk fte3600-template \
   fte3600-family-template fte3600-lifecycle fte3600-auth-lifecycle
 
 # Local synthetic installer tests; no downloads or system installation
@@ -242,10 +253,11 @@ sudo meson install -C build-fte3600
 
 ## 4. System Configuration
 
-Follow [the experimental transport guide](acpi-spidev.md) for prerequisites,
+Follow [the system integration guide](acpi-spidev.md) for prerequisites,
 rollback records, old-bridge migration, installation and checks. Its setup
-helper builds DKMS 0.2, verifies stock spidev's actual buffer is at least 32768,
-and validates a ready pair before publishing exact-node fprintd permissions.
+helper builds DKMS 0.2 when available (or installs the manually built module),
+verifies stock spidev's running buffer is at least 32768, and validates the
+related SPI/reset/UIO nodes before publishing exact-node fprintd permissions.
 
 ```sh
 sudo ./scripts/setup-fte3600.sh install-all
@@ -275,7 +287,7 @@ bypass. See [GPIO polarity](gpio-polarity.md) for the electrical evidence.
 
 This section requires an explicit personal-auth build followed by rebuild, retest and installation. Capture-only builds intentionally cannot enroll or verify; do not treat that as a hardware fault.
 
-After rebooting, validate the companion pair before authentication testing:
+After rebooting, validate the related SPI/reset/UIO nodes before authentication testing:
 ```sh
 sudo /usr/libexec/fte3600-pair
 sudo ./scripts/setup-fte3600.sh check

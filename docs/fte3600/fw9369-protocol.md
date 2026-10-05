@@ -1,231 +1,281 @@
-# FW9369 / 返回 9362 的硬件协议研究
+# FW9369 protocol: hardware returning 9362
 
-依据 Windows 驱动包（INF 版本 2.0.3.102）中的 `ftWbioUmdfDriverV2.dll`，
-其 PE FileVersion / ProductVersion 为 1.0.0.3188，SHA-256
-`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`。
-本文仅记录独立核查得到的硬件操作合同，不包含厂商实现、固件或初始化表。
-RVA 均相对这一 DLL。硬件协议与独立 Linux 策略分开说明；静态证据与模拟测试
-不等于实机采集质量验证。
+[Documentation index](README.md)
 
-## 身份与传输
+<a id="fw9369--返回-9362-的硬件协议研究"></a>
 
-后端构造入口 `0x35BA4`，操作表 `0x49410`；对象名为 FT9369，
-探测/通信检查却明确要求内部地址 `1A8B` 返回 `9362`（`0x10088`、`0x10CD8`）。
-名称不是芯片 ID。64 × 80 像素有 `0x15938` 的图像处理参数和行步幅直接证据。
-SPI CS 极性由平台连接确定，不能从这个 ID 推定；主机必须保留已经确认的连接参数。
+Based on `ftWbioUmdfDriverV2.dll` from the Windows package with INF version 2.0.3.102. The DLL's PE
+FileVersion / ProductVersion is 1.0.0.3188, and its SHA-256 is
+`0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`. This document records
+independently verified hardware-operation contracts, without vendor implementation code, firmware,
+or initialization tables. RVAs refer to this DLL. Hardware protocol and independent Linux policy are
+described separately; static evidence and simulated tests do not establish physical-device image
+quality.
 
-| 操作 | 完整 TX | RX 有效位置 | 证据 |
+<a id="身份与传输"></a>
+
+## Identity and transport
+
+The backend constructor is at `0x35BA4`, with operation table `0x49410`. The object is named FT9369,
+but detection/communication checks explicitly require internal address `1A8B` to return `9362`
+(`0x10088`, `0x10CD8`). The name is not the chip ID. Image-processing parameters and row stride at
+`0x15938` directly establish 64 × 80 pixels. SPI CS polarity depends on the platform connection, not
+this ID; the host must preserve confirmed connection parameters.
+
+| Operation | Complete TX | Valid RX position | Evidence |
 | --- | --- | --- | --- |
-| SFR 读 | `08 F7 reg 00 00`，5 字节 | 偏移 4，1 字节 | `0x1830C` → `0xF5D0` |
-| SFR 写 | `09 F6 reg value`，**4 字节** | 无 | `0x18368` → `0xF738` |
-| word 读 | `04 FB (addr_hi OR 80) addr_lo 00 01`，再补 6 字节时钟，共 12 字节 | 偏移 6 的 2 字节大端值 | `0x183B0` → `0xF748` |
-| word 写 | `05 FA (addr_hi OR 80) addr_lo 00 01 value_hi value_lo`，8 字节 | 无 | `0x18550` |
+| SFR read | `08 F7 reg 00 00`, 5 bytes | 1 byte at offset 4 | `0x1830C` → `0xF5D0` |
+| SFR write | `09 F6 reg value`, **4 bytes** | None | `0x18368` → `0xF738` |
+| Word read | `04 FB (addr_hi OR 80) addr_lo 00 01`, followed by 6 bytes of clocks; 12 bytes total | 2-byte big-endian value at offset 6 | `0x183B0` → `0xF748` |
+| Word write | `05 FA (addr_hi OR 80) addr_lo 00 01 value_hi value_lo`, 8 bytes | None | `0x18550` |
 
-word 地址单位与 SFR 寄存器不是同一空间。word 读的后四个附加响应字节
-在 `0x183B0` 中没有校验；不能自行断言它们的含义或检查算法。
-本协议 SFR 写没有末尾 dummy，不能直接复用 A8 的五字节写包。
+Word addresses and SFR registers occupy different address spaces. `0x183B0` does not validate the
+final four additional response bytes of a word read; their meaning or checking algorithm must not be
+invented. SFR writes in this protocol have no trailing dummy byte, so A8's five-byte write packet
+cannot be reused directly.
 
-`0xFD94` 的 SPI 配置为 SFR `C6 = 01`，等 4 ms，再读 `C6`，要求为 01；
-失败最多重试 30 次（共 31 次尝试）。`0x23010` 为毫秒等待，不是微秒。
-`0x10A74` 调用此配置后再经 `0x10D70` 配置一次并读取 `1A8B`。
-Linux 应先取得重复一致的正向 ID，再做此芯片专属写入；
-不得对所有未知器件先写 C6。
+SPI configuration at `0xFD94` writes SFR `C6 = 01`, waits 4 ms, then reads `C6`, requiring 01.
+Failure allows up to 30 retries, or 31 attempts in total. `0x23010` waits in milliseconds, not
+microseconds. `0x10A74` calls this configuration, then `0x10D70` configures it again and reads
+`1A8B`.
 
-## 电源、状态与命令
+Linux first attempts repeated, consistent positive ID reads. If read-only discovery fails, the
+separately bounded [special-mode probe](special-probe.md) can perform the documented C6 negotiation.
+This is a deliberate state-changing fallback, not a claim that C6 is a harmless write for every
+unknown device. Chip-specific initialization still requires a confirmed identity.
 
-`0x186B0` 将操作编号翻译为短命令，通常发送 3 字节；
-命令发出后等待 1 ms，wake-end 是不附加该等待的例外。
+<a id="电源状态与命令"></a>
 
-| 意图 | 命令 / 行为 | 证据 |
+## Power, status, and commands
+
+`0x186B0` translates operation numbers to short commands, usually 3 bytes. Commands are followed by
+1 ms, except wake-end, which adds no such wait.
+
+| Intent | Command / behavior | Evidence |
 | --- | --- | --- |
-| 返回 idle | `C0 3F 00`，等 1 ms；`C1 3E 00`，等 1 ms | `0x10BD0` |
-| 唤醒 | `5A A5 00`，等 1 ms；读 SFR 80；若不是 50，发 `C0 3F 00`，等 1 ms；最后 `A5 5A 00` | `0x10F0C` |
-| 查询设备状态 | SFR 80 | `0x110E8` |
-| 进入图像模式 | 完成图像配置后发 `C4 3B 00`，等 1 ms，查询 SFR 80，期望 54 | `0x17000` |
-| 开始一次扫描 | 图像模式下，word 1800 的 bit 0 置 1，等 1 ms | `0x17000` |
+| Return to idle | `C0 3F 00`, wait 1 ms; `C1 3E 00`, wait 1 ms | `0x10BD0` |
+| Wake | `5A A5 00`, wait 1 ms; read SFR 80; if it is not 50, send `C0 3F 00`, wait 1 ms; finish with `A5 5A 00` | `0x10F0C` |
+| Query device status | SFR 80 | `0x110E8` |
+| Enter image mode | After image configuration, send `C4 3B 00`, wait 1 ms, query SFR 80, expect 54 | `0x17000` |
+| Start one scan | In image mode, set bit 0 of word 1800, then wait 1 ms | `0x17000` |
 
-补充核查：`0xFBA0` 的 power-mode 参数3分支明确标记 deep sleep，
-`0xFC3F → 0x11048` 先执行上述 wake，再发送 `C1 3E 00`、等1ms。
-因此 C1 的深睡眠用途有直接依据，但 C1 后的状态值、寄存器可达性和是否自动
-清除IRQ仍无充分证据。`0x10BD0` 对应设备 idle 模式；尚未建立每次公开用户
-close 都到达此模式的完整链，不能把“存在idle/deep-sleep能力”写成“每次close
-必发C1”。D0Exit 甚至有条件进入 WAIT_TOUCH，详见
-[生命周期覆盖表](windows-lifecycle-coverage.md)。
+Additional verification: the power-mode parameter 3 branch at `0xFBA0` is explicitly labeled deep
+sleep. `0xFC3F → 0x11048` first performs the wake sequence above, then sends `C1 3E 00` and waits 1
+ms. This directly establishes a deep-sleep use of C1, but not the state value, register
+accessibility, or automatic IRQ clearing after C1. `0x10BD0` implements device idle mode; the
+complete chain from every public user close to this mode has not been established. The existence of
+idle/deep-sleep operations must not be described as proof that every close sends C1. D0Exit can even
+conditionally enter WAIT_TOUCH; see [lifecycle coverage](windows-lifecycle-coverage.md).
 
-完整软件初始化 `0xFED8` 包含 ID 检查、唤醒、OTP 信息读取、制造工艺辨别、
-清中断、参数初始化、FDT 基线稳定和图像基线校准，最后进入等待触摸。
-后两项尚不能用一个固定图像读包替代。
+Complete software initialization at `0xFED8` includes ID validation, wake, OTP-information reads,
+manufacturing-process identification, interrupt clearing, parameter initialization, FDT-baseline
+stabilization, and image-baseline calibration, then enters wait-for-touch. The last two steps cannot
+be replaced by one fixed image-read packet.
 
-SFR `9B >> 2` 为制造工艺判据（`0x10D8C`）：十六进制 00 和 13 是已接受值，
-其他值重读最多 10 次。工艺 13 时 image integration 默认 150，
-工艺 0 时默认 200（`0x10BEC`）；这不是主机设备型号白名单。
+SFR `9B >> 2` identifies the manufacturing process (`0x10D8C`). Hexadecimal 00 and 13 are accepted;
+other values are reread up to 10 times. Process 13 defaults image integration to 150, and process 0
+to 200 (`0x10BEC`). This is not a computer-model whitelist.
 
-## 中断合同
+<a id="中断合同"></a>
 
-word `1A82` 为事件标志，word `1A83` 为事件 mask，向 `1A84` 写入事件值清除相应标志。
-证据 `0x11008`、`0x11014`、`0x10FC0`；事件使用位图，不能按单个枚举值比较。
+## Interrupt contract
 
-| mask | 事件 |
+Word `1A82` contains event flags, word `1A83` the event mask, and writing event bits to `1A84`
+clears the corresponding flags. Evidence: `0x11008`, `0x11014`, `0x10FC0`. Events form a bitmap and
+must not be compared as a single enumeration value.
+
+| Mask | Event |
 | --- | --- |
-| 0001 | idle |
-| 0002 | finger down |
-| 0004 | finger up |
-| 0008 | manual detection |
-| 0010 | invalid |
-| 0020 | image data |
+| 0001 | Idle |
+| 0002 | Finger down |
+| 0004 | Finger up |
+| 0008 | Manual detection |
+| 0010 | Invalid |
+| 0020 | Image data |
 | 0040 | AFE |
-| 0080 | half FIFO |
-| 0100 | full FIFO |
-| 0200 | reset |
+| 0080 | Half FIFO |
+| 0100 | Full FIFO |
+| 0200 | Reset |
 | 0400 | ESD |
 
-`0x101EC` 先验证通信，再取事件并清除；触摸事件到来后允许 image-data 事件。
-reset / ESD 走重新初始化，不能把这种 IRQ 当作有效图像就绪。
-Linux 的有限实现应在错误后返回可验证 idle 或关闭会话，不无限重试校准。
+`0x101EC` validates communication before reading and clearing events; a touch event enables
+image-data events. Reset / ESD requires reinitialization and must not be treated as a valid
+image-ready IRQ. A bounded Linux implementation should return to verified idle or close the session
+after an error, rather than retry calibration indefinitely.
 
-`0x101EC` 通信验证失败时还会唤醒再试。Linux 现在在 action 的事件读取前
-写 C6=01、等4ms并验证1A8B，要求三次连续9362；空白0000/FFFF触发有界
-唤醒恢复，每次唤醒后等20ms，最多10轮。传输错误直接失败；正向冲突ID立即
-使会话和校准失效，并禁止后续芯片清理写入。该恢复不能代替ESD后的重新校准。
-Linux 的 wake 包含 C0，会停止此前的 FDT；恢复通信后先读取和确认已有事件。
-若事件为空或与当前按下/释放等待无关，保留原有检测模式和基线，仅重发 C2
-恢复检测后继续等待，不重新清除事件或排空主机 IRQ，以保留期间到达的新事件。
-重新启动失败或取消走正常有界清理，不进入未布防的等待。
-Windows passive ISR `0x2DDEC` 在检查是否存在采集请求之前就处理芯片事件，
-无请求的触摸事件经 `0x2DEFA → 0xF8C4(2)` 进入 WAIT_LEAVE。
-因此不能假设 Windows 在没有采集请求时完全不处理IRQ。Linux当前只在action中
-处理事件，关闭时释放传输资源；该生命周期与原厂不同。
+`0x101EC` also wakes and retries after a communication-check failure. Linux now writes C6=01 before
+action-time event reads, waits 4 ms, and validates 1A8B, requiring three consecutive 9362 responses.
+Blank 0000/FFFF responses trigger bounded wake recovery, with 20 ms after each wake and at most 10
+rounds. Transfer errors fail immediately. A positive conflicting ID immediately invalidates the
+session and calibration and prevents further chip-cleanup writes. This recovery does not replace
+recalibration after ESD.
 
-## 图像与像素格式
+The Linux wake sequence includes C0, which stops the previous FDT operation. Once communication
+recovers, existing events are read and acknowledged first. If the event is empty or irrelevant to
+the current down/up wait, the implementation preserves the detection mode and baseline and resends
+only C2 before continuing to wait. It does not clear events again or drain host IRQs, preserving
+events that arrive during recovery. A restart failure or cancellation takes the normal bounded
+cleanup path instead of entering an unarmed wait.
 
-原始图像为 **64 × 80 个大端 16 位样本**，总数据 10240 字节。
-`0x18208` 从 FIFO word 地址 `1A05` 读取；`0x180F4` 以 word 数编码长度，
-`0xF464` 组合完整 SPI 交易。单帧请求是：
+Windows passive ISR `0x2DDEC` handles chip events before checking whether a capture request exists.
+With no request, a touch event enters WAIT_LEAVE through `0x2DEFA → 0xF8C4(2)`. Windows therefore
+cannot be assumed to ignore all IRQs when no capture is requested. Linux currently handles events
+only during actions and releases transport resources on close; its lifecycle differs from the
+vendor's.
 
-`06 F9 9A 05 14 00` + 10240 个 dummy 字节。
+<a id="图像与像素格式"></a>
 
-完整交易 **10246 字节**，响应数据偏移 **6**，没有 A8 图像协议的额外两字节偏移。
-`0x15938` 明确把每两个字节转换为一个大端样本。
-`0x16898` 的读取流程为：图像模式初始化 → scan start → FIFO 读 → 清 data 事件。
+## Images and pixel format
 
-原厂输出的 8 位图像不是原始值的高字节。其必要输入包括当前无指基线：
-按像素计算非负基线差 `max(baseline - sample, 0)`，再做边缘/坏点处理与归一化。
-这里记录输入和物理数据含义，不复制厂商处理函数；Linux 可独立设计有界整数转换。
-必须通过合成数据验证大端解析、完整帧长度、差值不下溢、常量图像和输出范围。
-没有基线和采集配置证据时，不能把单次 FIFO 数据宣告为已验证可用指纹图。
+A raw image contains **64 × 80 big-endian 16-bit samples**, totaling 10240 data bytes. `0x18208`
+reads from FIFO word address `1A05`; `0x180F4` encodes length in words, and `0xF464` assembles the
+full SPI transaction. A single-frame request is:
 
-## 图像模拟前端配置
+`06 F9 9A 05 14 00` + 10240 dummy bytes.
 
-图像模式入口 `0x168C8`、扫描时钟设置 `0x156A4` 确认以下寄存器合同。
-这里是逐项核实的地址、字段及数值，不是从二进制复制的初始化数据段。
-未列出的字段保留硬件当前值。寄存器数值以下均为十六进制。
+The complete transaction is **10246 bytes**, with response data at offset **6**. It has none of the
+A8 image protocol's extra two-byte offset. `0x15938` explicitly converts each byte pair to one
+big-endian sample. The read flow at `0x16898` is image-mode initialization → scan start → FIFO read
+→ clear data event.
 
-| word 地址 | 字段 / 写入值 | 意义与来源 |
+The vendor's 8-bit output is not simply the high byte of each raw sample. Required inputs include
+the current no-finger baseline: a nonnegative per-pixel difference `max(baseline - sample, 0)` is
+followed by edge/bad-pixel processing and normalization. This document records inputs and physical
+data meaning without copying the vendor's processing functions. Linux can implement its own bounded
+integer conversion. Synthetic tests must verify big-endian parsing, complete frame size, subtraction
+without underflow, constant images, and output range. Without baseline and acquisition-configuration
+evidence, one FIFO read cannot be declared a validated usable fingerprint image.
+
+<a id="图像模拟前端配置"></a>
+
+## Image analog-front-end configuration
+
+Image-mode entry `0x168C8` and scan-clock setup `0x156A4` establish the following register contract.
+These are individually verified addresses, fields, and values, not an initialization-data region
+copied from the binary. Unlisted fields retain their current hardware values. Register values below
+are hexadecimal unless stated otherwise.
+
+| Word address | Field / written value | Meaning and source |
 | --- | --- | --- |
-| 1801 | `FC80 OR DAC`，DAC 为 7 bit | 模拟偏置；`0x16921` |
-| 1800 | 4FFE；扫描时 bit 0 置 1 | 图像扫描控制；`0x169EE`、`0x1705E` |
-| 1804 | 27CA | 图像采样配置；`0x16B52` |
-| 1806 | bits 13:7 = 9 | 2M 扫描时钟；`0x156DC` |
-| 180A | bits 13:7 = 9，bits 6:0 = 3 | `0x15708` |
-| 180B | bits 13:7 = 4，bits 6:0 = 8 | `0x15749` |
-| 1807 | `(integration - 1) << 5 OR 1` | integration 为 DB 200、SMIC 150；`0x16C2E` |
-| 1887 | 0002 | 默认单组通道模式；`0x16CF5` |
-| 1805 | bit 4 = 0，bits 7:5 = 0 | 共用模拟配置；`0x16DC3` |
+| 1801 | `FC80 OR DAC`, with a 7-bit DAC | Analog bias; `0x16921` |
+| 1800 | 4FFE; set bit 0 for scanning | Image scan control; `0x169EE`, `0x1705E` |
+| 1804 | 27CA | Image sampling configuration; `0x16B52` |
+| 1806 | bits 13:7 = 9 | 2M scan clock; `0x156DC` |
+| 180A | bits 13:7 = 9, bits 6:0 = 3 | `0x15708` |
+| 180B | bits 13:7 = 4, bits 6:0 = 8 | `0x15749` |
+| 1807 | `(integration - 1) << 5 OR 1` | Integration is DB 200 or SMIC 150; `0x16C2E` |
+| 1887 | 0002 | Default single-group channel mode; `0x16CF5` |
+| 1805 | bit 4 = 0, bits 7:5 = 0 | Shared analog configuration; `0x16DC3` |
 | 1811 | bits 9:0 = 01FE | `0x16E79` |
 
-`0x16F17` 启用事件 0020、0040；随后 SFR 8E 写 F4，
-定时器为 SFR 90=00、91=07、92=D0、90=01（2000，`0x11098`）。
-图像模式初次调用之后 Windows 用主机缓存省略部分重写；Linux 为避免缓存失步
-每次模式切换明确重设已知字段并读取配置字段验证，触发位和 W1C 标志不做此验证。
+`0x16F17` enables events 0020 and 0040, then writes F4 to SFR 8E. The timer uses SFR 90=00, 91=07,
+92=D0, 90=01 (2000, `0x11098`). After the first image-mode call, Windows uses host-side caching to
+omit some rewrites. To avoid cache desynchronization, Linux explicitly resets known fields on every
+mode switch and reads back configuration fields; trigger bits and W1C flags are excluded from this
+verification.
 
-## 手指检测与校准
+<a id="手指检测与校准"></a>
 
-`0x10BEC` 的默认主机配置选用 **4 通道** FDT。程序也有 8 通道分支，
-但不属于本后端当前实现。FDT DAC 默认 27，图像 DAC 默认 54，均为十进制；
-`0x1120C` 把 FDT 正常 DAC 范围描述为 1–125，并向平均响应 512 调整。
-`0x149D4` 对图像内部区域的 `raw / 4` 取中位值，图像 DAC 也向 512 调整。
-因此样本虽以 16 位封装，不能把 65535 作为校准目标。
+## Finger detection and calibration
 
-FDT 模式入口 `0x12F20`。默认 4 通道配置的字段合同：
+The default host configuration at `0x10BEC` selects **4-channel** FDT. The program also has an
+8-channel branch, outside the current backend's implementation. Default FDT DAC is 27 and image DAC
+54, both decimal. `0x1120C` describes the normal FDT DAC range as 1–125 and adjusts toward average
+response 512. `0x149D4` takes the median of `raw / 4` over the image's interior, also adjusting the
+image DAC toward 512. The samples' 16-bit container therefore does not imply a calibration target of
+65535.
 
-| word 地址 | 字段 / 写入值 | 证据 |
+FDT-mode entry is `0x12F20`. The default 4-channel configuration has the following field contract:
+
+| Word address | Field / written value | Evidence |
 | --- | --- | --- |
 | 1801 | `FC80 OR FDT_DAC` | `0x12F8A` |
-| 180C | bits 10:0：DAC 搜索时 0；搜索结束后 0600 | `0x1304C`–`0x13189` |
-| 1881 | 周期 bits 15:8 = 15；计数 bits 4:2 = 3 | `0x132B5`–`0x13335`，60 Hz 整数配置 |
+| 180C | bits 10:0: 0 during DAC search; 0600 afterward | `0x1304C`–`0x13189` |
+| 1881 | Period bits 15:8 = 15; count bits 4:2 = 3 | `0x132B5`–`0x13335`, 60 Hz integer configuration |
 | 1800 | 07FE | `0x133D3`–`0x1343C` |
 | 1804 | 27C8 | `0x134BE`–`0x134EE` |
 | 1807 | 1671 | `0x13571`–`0x1358E` |
 | 1808 | 0801 | `0x1360E`–`0x1365D` |
 | 1887 | bits 2:0 = 5 | `0x136E0`–`0x13715` |
-| 1806 / 180A / 180B | 时钟字段分别 19；19 与 7；9 与 17 | `0x110F0`；字段宽度同图像模式 |
+| 1806 / 180A / 180B | Clock fields respectively 19; 19 and 7; 9 and 17 | `0x110F0`; field widths match image mode |
 | 1805 | bit 4 = 0 | `0x137D7` |
-| 180D | 以刚读取并清 bit 4 的 **1805** 值为起点，bits 9:0 = 900 | `0x13881`，900 为十进制 |
+| 180D | Start with the just-read **1805** value with bit 4 cleared; set bits 9:0 = 900 | `0x13881`; 900 is decimal |
 | 1888 | bits 9:2 = 0 | `0x13928` |
-| 00C0 | bits 12:0 = 0444 | `0x139EC`；SFR 9A=5A 解锁后访问 |
-| 00C1 | bits 5:3 = 4、bits 2:0 = 1 | `0x13A95` |
-| 00C2 | bits 7:6 = 3 | `0x13B65`；随后 SFR 9A=00 重锁 |
-| 1880 | 2D32，即释放差阈值 45、按下差阈值 50 | `0x13E7A` |
-| 1881 | bit 0 = 0、bit 1 = 1、bit 7 = 1 | `0x13F45`，手动检测 |
+| 00C0 | bits 12:0 = 0444 | `0x139EC`; access after unlocking SFR 9A=5A |
+| 00C1 | bits 5:3 = 4, bits 2:0 = 1 | `0x13A95` |
+| 00C2 | bits 7:6 = 3 | `0x13B65`; then relock SFR 9A=00 |
+| 1880 | 2D32: release-difference threshold 45, down-difference threshold 50 | `0x13E7A` |
+| 1881 | bit 0 = 0, bit 1 = 1, bit 7 = 1 | `0x13F45`, manual detection |
 | 1884 | bits 2:0 = 3 | `0x14010` |
 | 1A8A | 00FF | `0x140C1` |
 
-手动样本流程 `0x128EC`：完成 FDT 配置并置 1881 bit 1，发送
-`C2 3D 00`，等 1 ms，word 1885=0001，然后查询 1A82 的 0008。
-原厂最多等 5 次、每次 1 ms；Linux 到上限仍不就绪则失败。
-`0x122C4` 经 `0x18434` 读取四个大端 word：
+Manual sampling at `0x128EC`: finish FDT configuration and set 1881 bit 1, send `C2 3D 00`, wait 1
+ms, write word 1885=0001, then poll 1A82 for 0008. The vendor waits up to 5 times, 1 ms each; Linux
+fails if not ready by the limit. `0x122C4` reads four big-endian words through `0x18434`:
 
-- DB：`04 FB 80 B8 00 04` + 8 个 dummy，共 14 字节。
-- SMIC：地址改为 `80 E8`；响应从偏移 6 起为四个 16 位值。
+- DB: `04 FB 80 B8 00 04` + 8 dummy bytes, 14 bytes total.
+- SMIC: use address `80 E8`; the response contains four 16-bit values starting at offset 6.
 
-`0x11C64` 取多次稳定样本的各通道最小值；通道连续变化不超过 5 为稳定。
-`0x14954` 要求前四个值各在 300–700；`0x11A54` 从基线扣除 30，低于 30
-则饱和为零。自动检测基线写入 `0x11770`：解锁 SFR 9A=5A，
-`05 FA 80 B0 00 08` + 16 字节基线，SMIC 地址改 E0，然后 9A=00。
-默认 4 通道只使用前四个 word，另外四个保持零。
+`0x11C64` takes each channel's minimum across repeated stable samples; successive changes of no more
+than 5 count as stable. `0x14954` requires each of the first four values to be within 300–700.
+`0x11A54` subtracts 30 from the baseline, saturating values below 30 to zero. Automatic-detection
+baseline writing at `0x11770` unlocks SFR 9A=5A, sends `05 FA 80 B0 00 08` + 16 baseline bytes (use
+E0 for SMIC), then writes 9A=00. Default 4-channel mode uses only the first four words; the other
+four stay zero.
 
-自动等待按下 `0x11800`：恢复正常 FDT 配置并写入基线，
-1881 的 bit 0 = 1、bit 1 = 0、bit 7 = 1；清除事件 002F 后发 C2。
-释放检测则 bit 0 和 bit 7 清零。Linux 录入中间阶段在完成图像采集后预先
-启用释放检测，保留异步匹配期间到达的 UP；等待释放时不再次清除该事件。
-只有不同时含 DOWN 的 UP 才允许进入下一次按下采集。最后阶段返回空闲；
-若该阶段被 matcher 拒绝，再按需启用释放检测。检测启用前手指已经离开、
-以及末阶段重试的短窗口，仍需实机验证；不假定空载时重新启用必立即产生 UP。
+Automatic wait-for-down at `0x11800` restores normal FDT configuration and writes the baseline; 1881
+bit 0 = 1, bit 1 = 0, bit 7 = 1. It clears events 002F and sends C2. Release detection clears bits 0
+and 7. During intermediate Linux enrollment stages, release detection is armed immediately after
+image capture to preserve UP arriving during asynchronous matching. Waiting for release does not
+clear that event again. Only UP without simultaneous DOWN permits the next down capture. The final
+stage returns to idle; if the matcher rejects it, release detection is enabled as needed. A finger
+leaving before detection is enabled, and the short final-stage retry window, still require hardware
+validation. Re-enabling detection on an unloaded sensor is not assumed to generate UP immediately.
 
-## Linux 独立实现与验证边界
+<a id="linux-独立实现与验证边界"></a>
 
-`fte3600-fw9369-protocol.{h,c}` 负责有界报文构造、大端解析和独立图像映射；
-`fte3600-fw9369.c` 实现异步、可取消的初始化和采集状态机。
-DAC 使用独立的有界二分搜索，允许范围 1–125，响应目标窗口 450–575；
-不复制 Windows 搜索、坏点分析或图像增强算法。
-FDT 基线要求 3 次连续稳定，最多 10 次测量；图像基线要求平均绝对帧差不超过 20，
-同样限制次数。配置保留无关字段，对可读配置字段检查写回值。
+## Independent Linux implementation and validation limits
 
-图像采用逐像素饱和基线差、99 分位线性映射与边界延伸。
-低对比或几乎全空的图像被拒绝，避免把噪声增强为指纹。
-此映射是 Linux 策略，数值阈值需要实机图像评估，不声称复现原厂图像质量。
+`fte3600-fw9369-protocol.{h,c}` handles bounded packet construction, big-endian parsing, and
+independent image mapping. `fte3600-fw9369.c` implements asynchronous, cancellable initialization
+and capture state machines. DAC adjustment uses an independent bounded binary search, range 1–125,
+with target response window 450–575. It does not copy the Windows search, bad-pixel analysis, or
+image-enhancement algorithms. FDT calibration requires 3 consecutive stable measurements, with at
+most 10 measurements. Image-baseline calibration requires mean absolute frame difference no greater
+than 20, also with a bounded attempt count. Configuration preserves unrelated fields and verifies
+readable fields after writing.
 
-空载基线在打开期间建立，**打开设备时手指必须离开传感器**。
-稳定性检测不能证明某个稳定物体不是手指，这是当前校准的物理限制，
-也是实机验收必须覆盖的场景。基线不落盘，关闭时清除。
-未知制造工艺、失配 ID、不稳定基线、事件 reset/ESD/invalid 均拒绝继续采集。
+Image processing uses per-pixel saturated baseline subtraction, linear mapping at percentile 99, and border extension. Low-contrast or almost empty images are rejected to avoid
+enhancing noise into apparent fingerprints. This mapping is Linux policy; its thresholds need
+evaluation on real images and do not claim to reproduce vendor image quality.
 
-每帧、取消和可恢复错误后的清理仍采用 `C0 3F 00` 后 SFR 80=50，保持
-可复用的 awake idle。只有成功查询到状态才标记 idle，清理失败要求关闭重开。
-最终关闭使用独立的 `create_shutdown()`：重锁9A、C0及有界状态查询，
-再以读改写方式屏蔽1A83的已知事件位07FF（保留其他位），独立向1A84写07FF
-确认挂起事件，最后发 `C1 3E 00` 并等1ms。某一步失败仍尝试其余收尾步骤，
-保留第一个错误，最终总会释放传输资源；已失效的会话不再发送芯片命令。
+The unloaded baseline is established during open: **the finger must be off the sensor when opening
+it**. Stability checks cannot prove that a stable object is not a finger. This is a physical
+limitation of the current calibration and a required hardware-acceptance scenario. Baselines are
+never written to disk and are cleared on close. Unknown manufacturing process, conflicting ID,
+unstable baseline, and reset/ESD/invalid events all prevent further capture.
 
-C1发出后清除 `idle_verified`，不猜测状态51、不在可能睡眠的芯片上追加
-未证实的状态读取。成功返回证明上述命令完成，不能代替实测功耗或IRQ波形。
-这一最终关闭策略采用原厂已知命令，但不声称Windows每次用户close都走同一链。
-本后端不发送硬件复位、ROM 命令、固件下载或持久存储写入。
+Cleanup after each frame, cancellation, or recoverable error uses `C0 3F 00` followed by SFR 80=50,
+retaining reusable awake idle. Idle is marked verified only after a successful status read; cleanup
+failure requires close/reopen. Final close uses a separate `create_shutdown()`: relock 9A, send C0
+and perform bounded status polling, then read-modify-write 1A83 to mask known event bits 07FF while
+preserving other bits. Independently acknowledge pending events by writing 07FF to 1A84, then send
+`C1 3E 00` and wait 1 ms. Failure at one step does not prevent attempts at the remaining
+finalization steps. The first error is retained and transport resources are always released;
+invalidated sessions send no further chip commands.
 
-独立合成测试覆盖完整帧尺寸、大小端、容量/非法命令、差值饱和、空帧拒绝，
-以及 DB/SMIC 初始化、重复采集、取消、SPI 故障和清理故障。释放回归还覆盖
-单独 UP、UP/DOWN 同时出现、持续 DOWN、匹配前已到达的 UP、预布防失败和取消。
-通信恢复回归要求每次 IRQ 等待时 FDT 已运行，覆盖无关/空事件、恢复期间新锁存
-事件、C2 重启失败和取消，并以无需 wake 的相同事件序列作为对照。
-测试中的模拟硬件不是额外协议证据；CS 极性、实际 IRQ 行为、功耗及最终图像质量
-仍需 GPD 等实物验证。
+After C1, `idle_verified` is cleared. The implementation does not guess status 51 or append unproven
+status reads to a possibly sleeping chip. Successful completion establishes that these commands
+completed, not measured power consumption or IRQ behavior. This final-close policy uses known vendor
+commands without claiming that Windows takes the same chain on every user close. This backend sends
+no hardware resets, ROM commands, firmware downloads, or persistent-storage writes.
+
+Independent synthetic tests cover full-frame sizes, byte order, capacity/invalid-command handling,
+saturated subtraction, and empty-frame rejection, plus DB/SMIC initialization, repeated capture,
+cancellation, SPI errors, and cleanup errors. Release regressions additionally cover UP alone,
+simultaneous UP/DOWN, persistent DOWN, UP arriving before matching, pre-arm failure, and
+cancellation. Communication-recovery regressions require FDT to be running at every IRQ wait. They
+cover irrelevant/empty events, newly latched events during recovery, C2 restart failure, and
+cancellation, with the same event sequences without wake as controls. Simulated hardware is not
+additional protocol evidence. CS polarity, actual IRQ behavior, power consumption, and final image
+quality still require physical validation on GPD and other devices.

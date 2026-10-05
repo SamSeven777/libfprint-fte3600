@@ -1,5 +1,7 @@
 # FT9368 SPI application and explicit firmware update
 
+[Documentation index](README.md)
+
 This document records independently expressed wire facts from the 2.0.3.102
 Windows driver whose SHA-256 is
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`.

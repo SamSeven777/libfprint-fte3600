@@ -1,5 +1,7 @@
 # FTE3600 ACPI reset and IRQ glue
 
+[Documentation index](../../docs/fte3600/README.md)
+
 The current transport uses the unmodified Linux `spidev` driver for the physical SPI
 device. Module `fte3600` creates a `fte3600-glue` platform child only while that
 device is bound to `spidev` and has the FTE3600 ACPI identity. The platform driver
@@ -8,9 +10,9 @@ device plus an IRQ-only UIO device. It does not bind another driver to the SPI d
 controller, execute SPI messages, or change SPI mode.
 
 The old private `/dev/fte3600-*` ioctl interface is not provided. Documents
-describing that bridge concern the earlier main-branch implementation, not this
-branch's interface. Existing installations need matching userspace and setup
-files from this branch.
+describing that bridge concern the earlier implementation. Existing
+installations need matching userspace and setup files; follow the
+[migration guide](../../docs/fte3600/acpi-spidev.md#migrate-an-earlier-bridge-installation).
 
 ## Resources and device pairing
 
@@ -158,7 +160,7 @@ SIGKILL can leave a native-CS trial polarity until the next configure; fixed-CS
 sessions cannot restore an independently changed hidden polarity. The glue
 intentionally never changes `spi->mode`.
 Opposite-polarity trials on a shared controller retain the electrical risk of
-selecting the sensor during another device's traffic. This branch does not
+selecting the sensor during another device's traffic. The implementation does not
 claim bus-wide isolation, measured reset waveforms, or suspend validation on
 real hardware.
 

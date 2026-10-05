@@ -1,53 +1,62 @@
-# Host Matcher Architecture: Algorithm and Driver Decoupling
+# Host matcher architecture
 
-The `host-matcher` branch establishes a clean architectural separation between
-host-based fingerprint biometric matching algorithms and hardware sensor drivers.
+[Documentation index](README.md)
 
-## Design Philosophy
+The current implementation separates reusable feature extraction and matching
+from sensor communication, stored-template formats and authentication policy.
+Both cores depend only on GLib, the C library and libm. Their source files do
+not include driver headers, transport APIs, firmware sequences or generated
+build-policy headers.
 
-Traditionally in match-on-host drivers, matching logic, image processing,
-wire protocols, and hardware abstraction were tightly coupled within monolithic
-driver sources. In this architecture:
+<a id="design-philosophy"></a>
 
-1. **Algorithm Independence (`libfprint/matchers/`)**:
-   - Biometric feature extraction and matching algorithms live in independent
-     subdirectories under `libfprint/matchers/`.
-   - Each matcher (`matchers/brisk/`, `matchers/ipa/`) compiles as an isolated
-     static library (`fprint-brisk-core`, `fprint-ipa-core`).
-   - Matchers depend **only on GLib, standard C, and libm**.
-   - They contain **zero** device driver code, GPIO/SPI/USB APIs, hardware registers,
-     firmware sequences, or platform-specific authentication policy definitions.
-   - Algorithms can be audited, benchmarked, and mathematically verified in pure
-     isolation without any hardware or mock driver wrappers.
+## Core and adapter responsibilities
 
-2. **Driver Adapters (`libfprint/drivers/fte3600-*`)**:
-   - The hardware driver acts solely as a consumer of matcher cores.
-   - The driver layer owns hardware communication, frame capture, sensor geometry
-     profiling, template container serialization, and authentication decision policy gates.
+The cores in `libfprint/matchers/` extract features and return numerical match
+evidence. The driver adapter owns captured images, sensor profiles, template
+serialization, enrollment and the final authentication decision. A successful
+core match is not by itself an identity decision.
 
-## Available Host Matchers
+The FTE3600 BRISK adapter passes each sensor's native dimensions and row stride.
+FT9361 is one setting among eight profiles. The optional 2D-IPA core currently
+has a fixed 64 × 80 input interface. Its current driver integration is restricted
+to FT9361; the other 64 × 80 profiles do not enable IPA merely because their
+dimensions agree. See [family authentication](family-authentication.md)
+for the BRISK adapter's profile and template compatibility rules.
 
-| Matcher Core | Directory | Key Techniques | Primary Strengths |
-| :--- | :--- | :--- | :--- |
-| **BRISK Core** | `libfprint/matchers/brisk/` | Difference-of-Gaussians (DoG) keypoints, circular concentric pattern sampling, orientation-normalized binary Hamming descriptors, RANSAC rigid consensus | Extremely fast execution, lightweight memory footprint, robust across standard touch geometries |
-| **2D-IPA Core** | `libfprint/matchers/ipa/` | Local Contrast Normalization (LCN), Structure Tensor image gradients, Harris corner response with sub-pixel quadratic peak interpolation, normalized Sylvester-Hadamard 32D continuous descriptors, Invariant Point Attention with SE(2) vector bearing checks, rigid cluster verification | Sub-pixel spatial resolution, continuous patch representation, enhanced discriminative power on low-ridge-count sensors |
+<a id="available-host-matchers"></a>
 
-## Mathematical Verification
+## Available cores
 
-Each host matcher includes an independent test suite in `tests/`:
+| Core | Input and implementation | API and reuse |
+| --- | --- | --- |
+| BRISK-style | Variable-size grayscale images; Gaussian/DoG keypoints, orientation-normalized binary descriptors and rigid geometric consensus | [BRISK guide](../../libfprint/matchers/brisk/README.md) |
+| 2D-IPA | Fixed 64 × 80 grayscale images; Harris keypoints, continuous Hadamard descriptors, invariant point comparisons and rigid cluster verification | [2D-IPA guide](../../libfprint/matchers/ipa/README.md) |
 
-- `tests/test-brisk-core.c`: Verifies BRISK contrast normalization, golden extraction vectors, deterministic hashing, coordinate bounds, and affine consensus.
-- `tests/test-ipa-core.c`: Verifies 2D-IPA parameter validation, bit-exact determinism, tied-peak sub-pixel deduplication, translation and rotation invariance, Hadamard basis orthonormality, and multi-threaded reentrancy.
+Meson builds them as the independent `fprint-brisk-core` and `fprint-ipa-core`
+static targets. Authentication options belong to the driver build and adapter;
+neither core accesses hardware. No comparative accuracy or performance
+qualification is implied by the algorithms in this table.
 
-Neither test suite requires a physical sensor or driver mocks. Both can be compiled
-and executed standalone:
+<a id="mathematical-verification"></a>
+
+## Standalone checks
+
+Run from the repository root with a C compiler and GLib development files:
 
 ```sh
-# Standalone BRISK verification
-cc -std=gnu99 -O2 -Wall -Wextra -Werror tests/test-brisk-core.c libfprint/matchers/brisk/brisk.c $(pkg-config --cflags --libs glib-2.0) -lm -o /tmp/test-brisk-core
+cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+  tests/test-brisk-core.c libfprint/matchers/brisk/brisk.c \
+  $(pkg-config --cflags --libs glib-2.0) -lm -o /tmp/test-brisk-core
 /tmp/test-brisk-core
 
-# Standalone 2D-IPA verification
-cc -std=gnu99 -O2 -Wall -Wextra -Werror tests/test-ipa-core.c libfprint/matchers/ipa/ipa.c $(pkg-config --cflags --libs glib-2.0) -lm -o /tmp/test-ipa-core
+cc -std=gnu99 -O2 -Wall -Wextra -Werror \
+  tests/test-ipa-core.c libfprint/matchers/ipa/ipa.c \
+  $(pkg-config --cflags --libs glib-2.0) -lm -o /tmp/test-ipa-core
 /tmp/test-ipa-core
 ```
+
+These suites use synthetic data to check bounds, deterministic extraction,
+transforms, descriptor behavior and concurrency. They require no sensor or
+driver mocks. For the integrated driver, run `./scripts/check-fte3600.sh`.
+Synthetic checks are regressions, not population FAR/FRR measurements.
