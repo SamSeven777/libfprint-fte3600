@@ -31,8 +31,3 @@ This documentation covers the architecture, wire protocols, installation, and ha
 | **[Hardware Status](status.md)** | Implementation matrix, physical hardware test reports, and validation limits |
 | **[Troubleshooting](troubleshooting.md)** | Diagnostic checklists, common permission / SPI buffer issues, and log inspection |
 
----
-
-## 3. Historical Archives
-
-Detailed daily validation logs, static reverse-engineering baselines, and dated audit records are preserved in the **[Historical Archive](archive/)**.
