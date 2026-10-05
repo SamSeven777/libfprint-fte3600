@@ -1,0 +1,1060 @@
+{
+  "scope": "Three Microsoft Update Catalog x64 packages; static analysis, no hardware validation.",
+  "checked_date": "2026-10-04",
+  "grouping_rule": "20 vtable slots; exclude destructor slot 0; group identical remaining 19 function RVAs within each binary. This is not a count of all control-flow paths.",
+  "versions": [
+    {
+      "version": "2.0.3.99",
+      "cab_sha256": "d34920e19189bc03ced49985f7aa3a8d5f64c7a28e95afccc6ab791d1c760551",
+      "dll_sha256": "67afdb5085536df0983d9b2e647a5953b891a220dfb3ae16ca88a7f0664ff593",
+      "dll_size": 1461496,
+      "machine": "0x8664",
+      "inf_sha256": "9e3919964836e2641d5e35eea01fcbfb83dbe2595f1400079d89c069ba8ea352",
+      "ids": [
+        "ACPI\\FTE3600",
+        "USB\\VID_2808&PID_9338"
+      ],
+      "firmware_exact_matches": [
+        {
+          "label": "FT9338",
+          "size": 14184,
+          "file_offset": 412752
+        },
+        {
+          "label": "FT9348",
+          "size": 10312,
+          "file_offset": 426944
+        },
+        {
+          "label": "FT9361",
+          "size": 10396,
+          "file_offset": 437264
+        },
+        {
+          "label": "FT9368-app",
+          "size": 27120,
+          "file_offset": 447664
+        },
+        {
+          "label": "FT9368-pramboot",
+          "size": 6096,
+          "file_offset": 474784
+        },
+        {
+          "label": "FT9536",
+          "size": 11934,
+          "file_offset": 480880
+        }
+      ],
+      "constructors": [
+        {
+          "label": "[Driver] V clsFT9338 construct",
+          "rva": "0x2abac",
+          "vtables": [
+            {
+              "rva": "0x3ca28",
+              "slots": [
+                "0x2ac60",
+                "0x2d20",
+                "0x2bd50",
+                "0x2b8e0",
+                "0x2cad0",
+                "0x2b290",
+                "0x2bfc0",
+                "0x2bef0",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x1930a",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9348 construct",
+          "rva": "0x2ac94",
+          "vtables": [
+            {
+              "rva": "0x3cb48",
+              "slots": [
+                "0x2ad40",
+                "0x2d20",
+                "0x2e9b0",
+                "0x2e6f0",
+                "0x22820",
+                "0x2e330",
+                "0x22820",
+                "0x2ec10",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192ed",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9361 construct",
+          "rva": "0x2ad74",
+          "vtables": [
+            {
+              "rva": "0x3cc68",
+              "slots": [
+                "0x2ae20",
+                "0x2d20",
+                "0x2e9b0",
+                "0x2e6f0",
+                "0x22820",
+                "0x2e330",
+                "0x22820",
+                "0x2ec10",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192d4",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9368 construct",
+          "rva": "0x2ae54",
+          "vtables": [
+            {
+              "rva": "0x3cd88",
+              "slots": [
+                "0x2af30",
+                "0x2db30",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2dbe0",
+                "0x22820",
+                "0x2ddf0",
+                "0x2d560",
+                "0x2d5c0",
+                "0x2db40",
+                "0x2da40",
+                "0x2dab0",
+                "0x2d9d0",
+                "0x2d7d0",
+                "0x2d440"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192bb",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9369 construct",
+          "rva": "0x2af64",
+          "vtables": [
+            {
+              "rva": "0x3cee0",
+              "slots": [
+                "0x2afd0",
+                "0x2db30",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2e260",
+                "0x2e270",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x2e200",
+                "0x22820",
+                "0x2e1e0",
+                "0x2e090",
+                "0x2dfb0"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x19289",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9536 construct",
+          "rva": "0x2b004",
+          "vtables": [
+            {
+              "rva": "0x3cfc0",
+              "slots": [
+                "0x2b0b0",
+                "0x2d20",
+                "0x2bd50",
+                "0x2b8e0",
+                "0x2cad0",
+                "0x2b290",
+                "0x2bfc0",
+                "0x2bef0",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192a2",
+              "function": "0x19244"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "id": "8b741e0c-912f-4f19-ab7c-c721606fdf55",
+        "title": "FocalTech Electronics(ShenZhen)Co.,Ltd - Biometric - 2.0.3.99",
+        "cab_url": "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2025/02/5562cbe0-ff76-4647-bcf1-8ecee79ac2fa_0c3a9aa4a615fa2196712c2da9fd5893583f641c.cab"
+      },
+      "backend_count": 6,
+      "operation_group_count": 4,
+      "operation_groups": [
+        [
+          "FT9338",
+          "FT9536"
+        ],
+        [
+          "FT9348",
+          "FT9361"
+        ],
+        [
+          "FT9368"
+        ],
+        [
+          "FT9369"
+        ]
+      ],
+      "explicit_registry_line_count": 44,
+      "registry_lines_equal_across_samples": true,
+      "text_section_sha256": "cac8dc624303c0150842b2f84f45a811443714b3f7ee9ff88a04385fa524f890"
+    },
+    {
+      "version": "2.0.3.100",
+      "cab_sha256": "5f7b28cea1996345a639df56b417d9250c8472687dd029e6301f9cda3c749b07",
+      "dll_sha256": "ae283de8df227c46907f973a04b63d6ef228fef0887f92333de6f75302f8792e",
+      "dll_size": 1461488,
+      "machine": "0x8664",
+      "inf_sha256": "d58927091646dd9de0d9b84cf671e1c5d13293e7386c357f6c137f023b56ae37",
+      "ids": [
+        "ACPI\\FTE3600",
+        "USB\\VID_2808&PID_9338"
+      ],
+      "firmware_exact_matches": [
+        {
+          "label": "FT9338",
+          "size": 14184,
+          "file_offset": 412752
+        },
+        {
+          "label": "FT9348",
+          "size": 10312,
+          "file_offset": 426944
+        },
+        {
+          "label": "FT9361",
+          "size": 10396,
+          "file_offset": 437264
+        },
+        {
+          "label": "FT9368-app",
+          "size": 27120,
+          "file_offset": 447664
+        },
+        {
+          "label": "FT9368-pramboot",
+          "size": 6096,
+          "file_offset": 474784
+        },
+        {
+          "label": "FT9536",
+          "size": 11934,
+          "file_offset": 480880
+        }
+      ],
+      "constructors": [
+        {
+          "label": "[Driver] V clsFT9338 construct",
+          "rva": "0x2abac",
+          "vtables": [
+            {
+              "rva": "0x3ca28",
+              "slots": [
+                "0x2ac60",
+                "0x2d20",
+                "0x2bd50",
+                "0x2b8e0",
+                "0x2cad0",
+                "0x2b290",
+                "0x2bfc0",
+                "0x2bef0",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x1930a",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9348 construct",
+          "rva": "0x2ac94",
+          "vtables": [
+            {
+              "rva": "0x3cb48",
+              "slots": [
+                "0x2ad40",
+                "0x2d20",
+                "0x2e9b0",
+                "0x2e6f0",
+                "0x22820",
+                "0x2e330",
+                "0x22820",
+                "0x2ec10",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192ed",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9361 construct",
+          "rva": "0x2ad74",
+          "vtables": [
+            {
+              "rva": "0x3cc68",
+              "slots": [
+                "0x2ae20",
+                "0x2d20",
+                "0x2e9b0",
+                "0x2e6f0",
+                "0x22820",
+                "0x2e330",
+                "0x22820",
+                "0x2ec10",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192d4",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9368 construct",
+          "rva": "0x2ae54",
+          "vtables": [
+            {
+              "rva": "0x3cd88",
+              "slots": [
+                "0x2af30",
+                "0x2db30",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2dbe0",
+                "0x22820",
+                "0x2ddf0",
+                "0x2d560",
+                "0x2d5c0",
+                "0x2db40",
+                "0x2da40",
+                "0x2dab0",
+                "0x2d9d0",
+                "0x2d7d0",
+                "0x2d440"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192bb",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9369 construct",
+          "rva": "0x2af64",
+          "vtables": [
+            {
+              "rva": "0x3cee0",
+              "slots": [
+                "0x2afd0",
+                "0x2db30",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2e260",
+                "0x2e270",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x2e200",
+                "0x22820",
+                "0x2e1e0",
+                "0x2e090",
+                "0x2dfb0"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x19289",
+              "function": "0x19244"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9536 construct",
+          "rva": "0x2b004",
+          "vtables": [
+            {
+              "rva": "0x3cfc0",
+              "slots": [
+                "0x2b0b0",
+                "0x2d20",
+                "0x2bd50",
+                "0x2b8e0",
+                "0x2cad0",
+                "0x2b290",
+                "0x2bfc0",
+                "0x2bef0",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x2b280",
+                "0x2b280",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820",
+                "0x22820"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x192a2",
+              "function": "0x19244"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "id": "33715f60-a19f-4fd9-b75b-0ce9e8831ac9",
+        "title": "FocalTech Electronics(ShenZhen)Co.,Ltd Biometric Driver Update (2.0.3.100)",
+        "cab_url": "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2025/11/10d62e93-fd39-43e4-820d-967ec55dbaf3_5068d4894580c966b83cc21ef71af19e15411690.cab"
+      },
+      "backend_count": 6,
+      "operation_group_count": 4,
+      "operation_groups": [
+        [
+          "FT9338",
+          "FT9536"
+        ],
+        [
+          "FT9348",
+          "FT9361"
+        ],
+        [
+          "FT9368"
+        ],
+        [
+          "FT9369"
+        ]
+      ],
+      "explicit_registry_line_count": 44,
+      "registry_lines_equal_across_samples": true,
+      "text_section_sha256": "5277d89b55ec7060ad98b86fdd4e6e38bb9effb0a7976806be56e1e1c9f32f8e"
+    },
+    {
+      "version": "2.0.3.102",
+      "cab_sha256": "2c3380810f40ca2152fdce3f0f237441521f65fee80cbe802a2def4ca01d6cb5",
+      "dll_sha256": "0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10",
+      "dll_size": 1515192,
+      "machine": "0x8664",
+      "inf_sha256": "b64c8ebe2ec65f47996fa8f27e8f68f9c91076b7cb915839aafde51f6240c1dd",
+      "ids": [
+        "ACPI\\FTE3600",
+        "USB\\VID_2808&PID_9338"
+      ],
+      "firmware_exact_matches": [
+        {
+          "label": "FT9338",
+          "size": 14184,
+          "file_offset": 465312
+        },
+        {
+          "label": "FT9348",
+          "size": 10312,
+          "file_offset": 479504
+        },
+        {
+          "label": "FT9361",
+          "size": 10396,
+          "file_offset": 489824
+        },
+        {
+          "label": "FT9368-app",
+          "size": 27120,
+          "file_offset": 500224
+        },
+        {
+          "label": "FT9368-pramboot",
+          "size": 6096,
+          "file_offset": 527344
+        },
+        {
+          "label": "FT9536",
+          "size": 11934,
+          "file_offset": 533440
+        }
+      ],
+      "constructors": [
+        {
+          "label": "[Driver] V clsFT9338 construct",
+          "rva": "0x3574c",
+          "vtables": [
+            {
+              "rva": "0x48e78",
+              "slots": [
+                "0x35800",
+                "0x2d50",
+                "0x36a30",
+                "0x365c0",
+                "0x377a0",
+                "0x35f70",
+                "0x36ca0",
+                "0x36bd0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x237ac",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9348 construct",
+          "rva": "0x35834",
+          "vtables": [
+            {
+              "rva": "0x48f98",
+              "slots": [
+                "0x358e0",
+                "0x2d50",
+                "0x399f0",
+                "0x39730",
+                "0x2d130",
+                "0x39370",
+                "0x2d130",
+                "0x39c50",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x2378f",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9361 construct",
+          "rva": "0x35914",
+          "vtables": [
+            {
+              "rva": "0x490b8",
+              "slots": [
+                "0x359c0",
+                "0x2d50",
+                "0x399f0",
+                "0x39730",
+                "0x2d130",
+                "0x39370",
+                "0x2d130",
+                "0x39c50",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x23776",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9365 construct",
+          "rva": "0x359f4",
+          "vtables": [
+            {
+              "rva": "0x491d8",
+              "slots": [
+                "0x35a60",
+                "0x383c0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x383d0",
+                "0x383e0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x38360",
+                "0x2d130",
+                "0x38340",
+                "0x381f0",
+                "0x38110"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x236ef",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9368 construct",
+          "rva": "0x35a94",
+          "vtables": [
+            {
+              "rva": "0x492b8",
+              "slots": [
+                "0x35b70",
+                "0x383c0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x38c80",
+                "0x2d130",
+                "0x38e90",
+                "0x38610",
+                "0x38670",
+                "0x38be0",
+                "0x38af0",
+                "0x38b60",
+                "0x38a80",
+                "0x38870",
+                "0x384f0"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x2375d",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9369 construct",
+          "rva": "0x35ba4",
+          "vtables": [
+            {
+              "rva": "0x49410",
+              "slots": [
+                "0x35c10",
+                "0x383c0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x392a0",
+                "0x392b0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x38360",
+                "0x2d130",
+                "0x39280",
+                "0x39130",
+                "0x39050"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x2372b",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9536 construct",
+          "rva": "0x35c44",
+          "vtables": [
+            {
+              "rva": "0x494f0",
+              "slots": [
+                "0x35cf0",
+                "0x2d50",
+                "0x36a30",
+                "0x365c0",
+                "0x377a0",
+                "0x35f70",
+                "0x36ca0",
+                "0x36bd0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x23744",
+              "function": "0x23690"
+            }
+          ]
+        },
+        {
+          "label": "[Driver] V clsFT9769 construct",
+          "rva": "0x35d24",
+          "vtables": [
+            {
+              "rva": "0x49610",
+              "slots": [
+                "0x35d90",
+                "0x383c0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x383d0",
+                "0x383e0",
+                "0x2d130",
+                "0x2d130",
+                "0x2d130",
+                "0x35f60",
+                "0x35f60",
+                "0x38360",
+                "0x2d130",
+                "0x38340",
+                "0x39ec0",
+                "0x39de0"
+              ]
+            }
+          ],
+          "callers": [
+            {
+              "call": "0x2370f",
+              "function": "0x23690"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "id": "43f41996-c114-420e-8889-ea95d019e7ce",
+        "title": "FocalTech Electronics(ShenZhen)Co.,Ltd Biometric Driver Update (2.0.3.102)",
+        "cab_url": "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2026/08/e684f740-91ac-4458-9097-09850eaedf9d_4f80a6cb0c9e453d4619667af7c92eadeb165e0f.cab"
+      },
+      "backend_count": 8,
+      "operation_group_count": 6,
+      "operation_groups": [
+        [
+          "FT9338",
+          "FT9536"
+        ],
+        [
+          "FT9348",
+          "FT9361"
+        ],
+        [
+          "FT9365"
+        ],
+        [
+          "FT9368"
+        ],
+        [
+          "FT9369"
+        ],
+        [
+          "FT9769"
+        ]
+      ],
+      "explicit_registry_line_count": 44,
+      "registry_lines_equal_across_samples": true,
+      "text_section_sha256": "fca085fddd3c160625f47141cbcec455b56691be4aa77a959c78685745dc51ba"
+    }
+  ],
+  "firmware_regions_in_2.0.3.102": [
+    {
+      "label": "FT9338",
+      "rva": "0x731a0",
+      "file_offset": 465312,
+      "size": 14184,
+      "sha256": "ca4490163a1754639e945da3bd6ecbb4a498138962d611fc825dc129819efc46"
+    },
+    {
+      "label": "FT9348",
+      "rva": "0x76910",
+      "file_offset": 479504,
+      "size": 10312,
+      "sha256": "48d658d588c297a5d749c1f4bd6a0f5bd3d6ede59040e1674f95fe9db08eede2"
+    },
+    {
+      "label": "FT9361",
+      "rva": "0x79160",
+      "file_offset": 489824,
+      "size": 10396,
+      "sha256": "027d776b0f4da0857037bbfe6bd114f52394061c67e8459528f9b2e30114e64f"
+    },
+    {
+      "label": "FT9368-app",
+      "rva": "0x7ba00",
+      "file_offset": 500224,
+      "size": 27120,
+      "sha256": "9997aafac8eb9a1aecc7ba5b41212004fe1b325e7bdd1ea9ca08ae54b803e2e0"
+    },
+    {
+      "label": "FT9368-pramboot",
+      "rva": "0x823f0",
+      "file_offset": 527344,
+      "size": 6096,
+      "sha256": "c93a807eaaa34d9e79fbab77b86e910a419fd633ea98b628b72c64b285ffd191"
+    },
+    {
+      "label": "FT9536",
+      "rva": "0x83bc0",
+      "file_offset": 533440,
+      "size": 11934,
+      "sha256": "4a62b5d9a8a7b4620bec7843763b030632a5a37a54c4cb7ed2cd96d5c7451e79"
+    }
+  ],
+  "main_response_categories_2.0.3.102": {
+    "runtime_pairs": {
+      "5858": "FT9338",
+      "6060": "FT9348",
+      "4050": "FT9361",
+      "4080": "FT9536"
+    },
+    "special_ids": {
+      "9368": "FT9368",
+      "9362": "FT9369",
+      "9365": "FT9365",
+      "9391": "FT9769",
+      "9392": "FT9769"
+    },
+    "caveat": "Runtime pairs also encode geometry; class labels are not necessarily raw silicon IDs."
+  },
+  "lower_level_id_table_2.0.3.102": {
+    "function_rva": "0x191a8",
+    "ids": [
+      "9391",
+      "9392",
+      "9395",
+      "9396",
+      "9397",
+      "9398",
+      "9363",
+      "9372",
+      "9349",
+      "9365"
+    ],
+    "without_independent_main_factory_mapping_found": [
+      "9395",
+      "9396",
+      "9397",
+      "9398",
+      "9363",
+      "9372",
+      "9349"
+    ],
+    "caveat": "Table membership does not establish an independently supported physical chip."
+  },
+  "unknown_counts": [
+    "physical computer models",
+    "all OEM variants",
+    "all initialization tables",
+    "all cold/recovery paths"
+  ]
+}
