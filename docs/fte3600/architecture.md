@@ -39,6 +39,18 @@ The driver avoids DMI/board whitelists by dynamically identifying the connected 
    - `0x5858` $\implies$ **FT9338** ($88 \times 88$, requires SRAM firmware load)
    - `0x4080` $\implies$ **FT9536** ($64 \times 128$, requires SRAM firmware load)
 
+The complete factory sequence is used for initial enumeration and whenever the
+kernel glue reports a new generation. A successful discovery caches the exact
+identity, glue path, generation, and working CS polarity. A later open may reuse
+that backend only while the ACPI companion and generation remain unchanged.
+Suspend/resume, a stale reset lease, rebind, failed initialization, or a failed
+runtime session invalidates the cache and restores full factory discovery.
+
+Fast open skips only the redundant cross-family search. The selected backend
+still performs its own wake, identity validation, configuration, and image
+calibration. Legacy backends also retain the vendor 350 ms post-wake geometry
+settle before checking `0x14/0x15`.
+
 ---
 
 ## 3. Host Biometric Matcher (BRISK)

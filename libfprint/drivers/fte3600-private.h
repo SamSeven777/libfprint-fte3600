@@ -52,6 +52,12 @@ struct _FpiDeviceFte3600
   Fte3600Identity                identity;
   Fte3600Identity                rom_identity;
   Fte3600Sensor                  probed_sensor;
+  Fte3600Identity                cached_identity;
+  guint64                        cached_generation;
+  gchar                         *cached_glue_path;
+  gboolean                       cached_identity_valid;
+  gboolean                       cached_cs_high;
+  gboolean                       fast_open;
   gsize                          image_size;
   gsize                          capture_frame_size;
   gboolean                       discovery_boot_only;

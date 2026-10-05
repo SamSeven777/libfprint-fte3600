@@ -1794,13 +1794,15 @@ test_inactive_discovery (gconstpointer data)
   sensor.fail_wake_at = scenario == 1 ? 1 : scenario == 2 ? 2 : 0;
   sensor.unstable_wake = scenario == 3;
   sensor.cancel_wake = scenario == 4;
+  if (scenario != 0 && scenario != 5)
+    sensor.epoch++; /* Exercise factory rediscovery after a PM generation change. */
   if (scenario == 0 || scenario == 5)
     {
       open_device (device);
       g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
-      g_assert_cmpuint (sensor.retained_application_resets, ==, 4);
-      /* Discovery repeats both bytes; backend initialization checks them again. */
-      g_assert_cmpuint (sensor.awake_id_reads, ==, 6);
+      g_assert_cmpuint (sensor.retained_application_resets, ==, 2);
+      /* Fast open runs only the known backend's repeated identity check. */
+      g_assert_cmpuint (sensor.awake_id_reads, ==, 2);
       g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
       g_assert_true (fp_device_close_sync (device, NULL, &error));
       g_assert_no_error (error);
@@ -1809,8 +1811,8 @@ test_inactive_discovery (gconstpointer data)
       sensor.awake_id_reads = 0;
       open_device (device);
       g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
-      g_assert_cmpuint (sensor.retained_application_resets, ==, 6);
-      g_assert_cmpuint (sensor.awake_id_reads, ==, 6);
+      g_assert_cmpuint (sensor.retained_application_resets, ==, 2);
+      g_assert_cmpuint (sensor.awake_id_reads, ==, 2);
       g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
     }
   else
@@ -1890,22 +1892,34 @@ test_cs_restore_reopen (gconstpointer data)
   g_assert_cmpuint (sensor.last_closed_spi_mode, ==, selected_mode);
   g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
 
-  for (guint round = 0; round < 2; round++)
+  for (guint round = 0; round < 3; round++)
     {
       g_autoptr(GError) error = NULL;
       g_autoptr(FpImage) image = NULL;
       guint geometry_reads = sensor.selected_geometry_reads;
       guint wrong_cs_transfers = sensor.wrong_cs_transfers;
 
-      /* Probe has already closed its descriptor. Each application open must
-       * begin at the original polarity, negotiate again, and reread identity
-       * before initializing the backend rather than reuse the probed mode. */
+      /* The first open reuses the probe result within the same kernel
+       * generation. Advancing the generation models suspend/resume and must
+       * force one complete factory discovery; the following open is fast
+       * again using the identity selected after resume. */
+      if (round == 1)
+        sensor.epoch++;
       open_device (device);
       g_assert_cmpuint (sensor.original_spi_mode, ==, original_mode);
       g_assert_cmpuint (sensor.spi_mode, ==, selected_mode);
-      g_assert_cmpuint (sensor.cs_changes, ==, (round + 2) * 5);
-      g_assert_cmpuint (sensor.wrong_cs_transfers, >, wrong_cs_transfers);
-      g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, >=, 4);
+      if (round == 1)
+        {
+          g_assert_cmpuint (sensor.cs_changes, ==, 11);
+          g_assert_cmpuint (sensor.wrong_cs_transfers, >, wrong_cs_transfers);
+          g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, >=, 4);
+        }
+      else
+        {
+          g_assert_cmpuint (sensor.cs_changes, ==, round == 0 ? 6 : 12);
+          g_assert_cmpuint (sensor.wrong_cs_transfers, ==, wrong_cs_transfers);
+          g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, ==, 2);
+        }
       image = fp_device_capture_sync (device, TRUE, NULL, &error);
       g_assert_no_error (error);
       g_assert_nonnull (image);
@@ -1918,7 +1932,7 @@ test_cs_restore_reopen (gconstpointer data)
       g_assert_cmpuint (sensor.opens, ==, round + 2);
       g_assert_cmpuint (sensor.closes, ==, round + 2);
     }
-  g_assert_cmpuint (sensor.images, ==, 2);
+  g_assert_cmpuint (sensor.images, ==, 3);
   g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
@@ -1988,8 +2002,8 @@ test_controller_managed_cs (gconstpointer data)
       g_assert_cmpuint (sensor.speed, ==, 500000);
     }
   g_assert_cmpuint (sensor.wrong_cs_transfers, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 6);
-  g_assert_cmpuint (sensor.retained_application_resets, ==, 6);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 4);
+  g_assert_cmpuint (sensor.retained_application_resets, ==, 4);
   g_assert_true (sensor.retained_application_ram);
   g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -2077,6 +2091,7 @@ test_ft9348_rom_and_firmware (gconstpointer data)
 
   sensor.rom_probe = TRUE;
   sensor.cold_start = TRUE;
+  sensor.epoch++; /* A real power transition invalidates the kernel generation. */
   sensor.hardware_recovery = TRUE;
   if (scenario == 0)
     {
@@ -2165,6 +2180,7 @@ test_probe_open_identity_change (gconstpointer data)
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
   sensor.registers[FT9361_REG_FW_VERSION] = sensor.model->firmware_version;
   sensor.registers[FT9361_REG_AGC_VERSION] = sensor.model->agc_version;
+  sensor.epoch++; /* Rebinding different silicon invalidates the kernel generation. */
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_assert_cmpuint (sensor.factory_geometry_reads, ==, geometry_reads);
@@ -2262,6 +2278,7 @@ test_legacy_reject_unready_application (gconstpointer data)
   else
     {
       sensor.backend_cold_only = TRUE;
+      sensor.epoch++; /* Force factory discovery before injecting backend loss. */
       g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                              "*Sensor reset after open failure also failed:*");
     }
@@ -2342,6 +2359,7 @@ test_rom_discovery (gconstpointer data)
 
   sensor.rom_probe = TRUE;
   sensor.cold_start = TRUE;
+  sensor.epoch++; /* A real power transition invalidates the kernel generation. */
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = 0;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = 0;
   if (scenario == 1)
@@ -2398,6 +2416,7 @@ test_firmware_identity_gate (gconstpointer data)
   /* A stale 40/50 signature does not authorize a firmware upload. */
   sensor.hardware_recovery = TRUE;
   sensor.backend_cold_only = TRUE;
+  sensor.epoch++; /* Exercise the post-discovery firmware identity gate. */
   if (scenario == 0)
     sensor.rom_family = 0;
   if (scenario == 1)
@@ -2478,6 +2497,7 @@ test_hardware_reset (gconstpointer data)
   g_autoptr(GError) error = NULL;
 
   sensor.backend_reset_case = scenario + 1;
+  sensor.epoch++; /* Exercise recovery after a fresh factory discovery. */
   if (scenario == 2)
     g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                            "*Sensor reset after open failure also failed:*");
@@ -2717,7 +2737,9 @@ test_open_error (gconstpointer data)
   if (sensor.bad_id)
     {
       g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (backend_reset_commands (), ==, 0);
+      /* Fast open reaches the known backend, which detects the conflicting
+       * identity and completes its bounded cleanup reset. */
+      g_assert_cmpuint (backend_reset_commands (), ==, 4);
       g_assert_cmpuint (sensor.firmware_opens, ==, 0);
       g_assert_false (sensor.probe_started);
     }
@@ -2780,10 +2802,12 @@ test_transport_restore_failure (void)
   g_assert_false (sensor.reset_asserted);
   g_clear_error (&error);
   /* A close failure can leave stock spidev in the trial state. The next
-   * session must recover the immutable ACPI baseline before sensor I/O. */
+   * session must recover the immutable ACPI baseline and repeat factory
+   * discovery before sensor I/O. */
   sensor.restore_failed = FALSE;
   open_device (device);
   g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+  g_assert_cmpuint (sensor.factory_geometry_reads, ==, 4);
   finish_device (device);
 }
 

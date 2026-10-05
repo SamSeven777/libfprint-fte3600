@@ -27,9 +27,13 @@ This page tracks implementation status, driver capabilities, and reported device
 - **Environment**: Linux Kernel 7.2+, Arch / Omarchy.
 - **Hardware Profile**: ACPI `Interrupt(Edge, ActiveLow)`, SPI mode `0x4`.
 - **Validation**:
-  - Dynamic discovery and C6 negotiation successfully identified raw ID `0x9362`.
+  - The complete factory path identifies raw ID `0x9362`; C6 readback did not
+    acknowledge on the reported unit, but the vendor flow treats that result as
+    non-gating and the backend validates the identity again during initialization.
   - Background baseline calibration and IRQ finger event capture confirmed.
   - Multi-cycle close/reopen lifecycle verified.
+  - Unchanged kernel generations use fast open; suspend/resume forces a complete
+    factory rediscovery before the backend is cached again.
 
 ### One-Netbook A1 (FT9361)
 - **Environment**: Linux Kernel 6.x / 7.x.

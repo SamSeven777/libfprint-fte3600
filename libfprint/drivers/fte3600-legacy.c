@@ -319,7 +319,13 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_INIT_RESET_DELAY:
       if (!config->cold_recovery)
-        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+        {
+          if (self->fast_open)
+            fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
+                                           FTE3600_LEGACY_WAKE_GEOMETRY_MS);
+          else
+            fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+        }
       else
         fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
       return;
@@ -377,7 +383,11 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
               self->small_rx[4], self->small_rx[5]));
           return;
         }
-      fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+      if (self->fast_open)
+        fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
+                                       FTE3600_LEGACY_WAKE_GEOMETRY_MS);
+      else
+        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
       return;
 
     case FTE3600_INIT_IDENTIFY_BOOT:
