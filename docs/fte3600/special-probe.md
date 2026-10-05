@@ -77,11 +77,13 @@ polarity should be tried. This child never changes CS.
    C6 readback failure permits at most four write/wait/read attempts. This is
    a Linux bound matching the FT93xx helper's count, not the larger FW9369
    helper count.
-2. Read ID twice on the same CS and require exact agreement. Only the four
-   IDs selected by the shared reference factory can select a backend.
+2. Read ID twice on the same CS and require exact agreement. A mismatch is a
+   protocol error, including a positive ID followed by an empty response.
+   Only the four IDs selected by the shared reference factory can select a backend.
 3. For `9391`, additionally read and validate the variant twice. `0fff` is
    reported as known but unsupported `9395`, never as FT9769. Invalid CRC or
-   inconsistent observations cannot select a backend.
+   inconsistent observations terminate discovery after reset cleanup. They
+   must not be returned as an unidentified device that permits legacy ROM probing.
 4. On success, leave the chip awake with C6 set to one and return the positive
    identity for backend initialization. No firmware, pad, IRQ-mask, or image
    calibration operation occurs here.
@@ -94,7 +96,8 @@ polarity should be tried. This child never changes CS.
 Cleanup always attempts final deassertion even if an earlier GPIO operation
 fails. The first operation error is preserved. A negative result is returned
 without an error **only if cleanup succeeded**; I/O, cancellation and cleanup
-errors must stop the caller's discovery sequence. A known unsupported ID is
+errors, inconsistent IDs and variant validation failures must stop the caller's
+discovery sequence. A known unsupported ID is
 preserved as diagnostic evidence so the caller cannot reinterpret it as a
 blank device and enter legacy firmware recovery. Cancellation before any
 transaction and an insufficient transfer limit perform no GPIO reset.

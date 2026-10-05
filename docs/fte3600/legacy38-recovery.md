@@ -74,7 +74,7 @@ its identity, size or hash checks. No payload is included in this repository.
    The total frame length is firmware length plus eight, receive data begins
    at offset six, and two additional trailing bytes are not compared. Compare
    every firmware byte; comparing only a prefix is insufficient.
-5. Apply two H10/L20/H reset pulses separated by an additional 10 ms high
+5. Only after the entire readback matches, apply two H10/L20/H reset pulses separated by an additional 10 ms high
    interval, then wait 80 ms for FT9338 or 180 ms for FT9536. Poll application
    MCU status at most 20 times, separated by 2 ms, for `a5 5a`. Require the
    matching application geometry before accepting recovery.
@@ -84,11 +84,16 @@ The memory helpers are `0x2fd80` → `0x2fab0` (write) and `0x2f330` →
 `0x36bd0`; constructors `0x3574c` and `0x35c44` supply the different startup
 delays. This procedure writes volatile RAM, with no flash-erase command.
 
-Both successful completion and failures pass through bounded reset and
-application verification. Cleanup ignores cancellation. A previous transfer,
-readback or cleanup error prevents a verified-idle result even if a later
-geometry read succeeds. A failed cleanup leaves the enclosing driver to end
-the session rather than continue SPI operations.
+Startup is part of the successful download path, never error cleanup. The
+reference returns on a failed readback (`0x36854–0x368aa`) or comparison
+(`0x368da–0x36916`); only the success branch at `0x3691b` reaches startup.
+On Linux, failed validation, transfer, comparison, startup or cancellation
+invalidates the session. Cleanup only attempts to deassert reset if the recovery
+touched hardware, preserving the original error; it does not start the application
+or send additional SPI commands. The enclosing open-error path releases the
+transport without an application reset/status sequence. An already started
+GPIO pulse completes before cancellation is observed. This bounds cleanup;
+it does not prove that a partially programmed RAM is executable or idle.
 
 ## Mock validation
 

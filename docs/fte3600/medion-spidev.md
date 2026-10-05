@@ -59,7 +59,7 @@ For Fedora, the compiler and library dependencies follow the existing
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
   glib2-devel libgusb-devel libgudev-devel systemd-devel \
-  systemd cairo-devel python3
+  systemd cairo-devel python3 cabextract kmod
 ```
 
 Build the standalone target:
@@ -67,7 +67,8 @@ Build the standalone target:
 ```sh
 meson setup build-medion -Ddrivers=fte3600 \
   -Dfte3600_medion_spidev=true -Dfte3600_personal_auth=false \
-  -Dintrospection=false -Ddoc=false -Dgtk-examples=false --prefix=/usr
+  -Dfte3600_ipa_auth=false -Dintrospection=false -Ddoc=false \
+  -Dgtk-examples=false -Dinstalled-tests=false -Dwerror=true --prefix=/usr
 ninja -C build-medion examples/fte3600-medion
 ```
 
@@ -78,6 +79,12 @@ needed. Keep Secure Boot and SELinux enabled; this tool does not change either
 policy. Distribution module loading and access to SPI/GPIO nodes must still be
 permitted by the running system.
 
+Secure Boot does not require signing this userspace executable. The distribution's
+kernel and any loaded modules must still be trusted. Running the diagnostic from
+an administrator's terminal also avoids the `fprintd` service's confinement, but
+`sudo` does not bypass SELinux: a confined terminal or local policy can still
+deny the required device access. No Fedora E3224 hardware success is claimed.
+
 ## Inspect before operating the sensor
 
 The launcher is `scripts/medion-spidev.py`. Its default stage, `--inspect`, only
@@ -86,6 +93,13 @@ between the FTE3600 SPI device and the expected GPIO controllers. A matching
 ACPI name alone is not a sensor identity. This checks the known board's ACPI
 namespace paths and hardware IDs; it does not parse or validate the running
 firmware's `_CRS` resource descriptors.
+
+Inspection also reports the kernel release, firmware Secure Boot state, kernel
+lockdown state, SELinux enforcement and the current process security context,
+when readable. Unavailable values are reported as unknown. Firmware Secure Boot
+state and effective kernel lockdown are separate observations. Inspection does
+not load `spidev`, open SPI/GPIO nodes or request GPIO lines; a successful
+`--inspect` is not proof of device-access permissions or working SPI.
 
 The board configuration is deliberately fixed:
 
@@ -103,6 +117,13 @@ chip-select polarity: a device initially configured with active-high CS is
 rejected. This configuration is an explicit Medion experiment, not a claim
 that these offsets apply to other FTE3600 devices.
 
+The CS choice follows the archived ctfdavis implementation's
+[`spi->mode = SPI_MODE_0`](https://github.com/vobademi/FTEXX00-Ubuntu/blob/a0a35d3e47873a1712e02e3210f0e6e4fe75eeee/alt/focal_spi.c#L181)
+and [Tuxman2's report that ctfdavis's code worked](https://github.com/vobademi/FTEXX00-Ubuntu/issues/1#issuecomment-3288100306).
+It is not a controlled demonstration that changing CS alone fixed the reader:
+the earlier stack also had different GPIO and initialization behavior. CS
+selection and reset GPIO polarity are distinct settings.
+
 Only an unbound SPI device or one already using `spidev` is eligible. A device
 owned by the custom `fte3600` bridge or another driver is left alone. The
 launcher may load the distribution's `spidev` module with a 32768-byte buffer
@@ -114,12 +135,19 @@ protocol frames are not split to make them fit. A temporary
 binding and driver override are restored on normal completion and handled
 failures; a module loaded for the experiment remains loaded.
 
+An explicit FT9338 boot needs at least 14192 bytes; FT9348 needs 10319 bytes.
+If `spidev` is already loaded with a smaller buffer, the launcher refuses that
+boot before pausing `fprintd` or changing the device binding. A newly loaded
+module's actual buffer is checked again. These are minimum complete-frame
+sizes, not proof that the SPI controller accepts the transaction. An existing
+4 KiB or 8 KiB buffer can still run the short identification queries.
+
 ## Stages and side effects
 
 | Stage | What it establishes | Sensor operations |
 | --- | --- | --- |
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
-| `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries and bounded reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
+| `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries, bounded software wake and reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
 | `--boot ft9338` or `--boot ft9348` | Whether the explicitly selected firmware starts with its expected runtime parameters | Validate the selected payload, reset, upload to RAM, verify transfer and application status; no capture or IRQ request |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
 | `--init` | Whether that identified chip completes its existing initialization and cleanup | Probe plus chip initialization; eligible recovery may load matching firmware |
@@ -138,7 +166,13 @@ SPI and reset GPIO synchronously and does not request or wait for the IRQ line;
 the launcher still checks the board's GPIO controller mappings. The later
 probe, initialization and capture stages retain their IRQ setup. It reads
 the application registers `0x14` and `0x15` and can use the documented
-ROM-A8 or boot-B38 OTP identification paths. A prior `0x58/0x58` application
+ROM-A8 or boot-B38 OTP identification paths. After stable empty application
+responses it first tries the bounded legacy software wake sequence: single-byte
+`70`, 5 ms, single-byte `70`, 2 ms. A responsive runtime can be identified without
+toggling reset. The bounded MCU-status retry and settling delays follow the
+shared legacy discovery behavior. Only persistent empty responses reach the
+existing ROM experiment; conflicting responses or I/O failures stop the test.
+A prior `0x58/0x58` application
 response is not an entry requirement: a previous all-zero generic probe can
 still be followed by this explicit identification experiment. If all paths
 return only zeroes, or the responses remain ambiguous or unrecognized, the
@@ -159,10 +193,23 @@ nonempty identity that contradicts the selected profile. A failed FT9338 boot
 does not automatically retry FT9348. `--identify-legacy` remains available when
 only identification is wanted.
 
-Use a local Windows driver DLL or an already extracted raw firmware file as
-input. The installer verifies the selected payload's exact size and SHA-256,
-then writes it to the requested staging directory. These commands do not fetch
-a driver package or install firmware system-wide:
+Download and extract the selected payload from the installer's fixed Microsoft
+Update Catalog package, without installing it system-wide:
+
+```sh
+sh scripts/install-firmware.sh --chip ft9338 --download \
+  --destdir "$PWD/medion-firmware"
+sudo python3 scripts/medion-spidev.py --boot ft9338 \
+  --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
+```
+
+The download needs Python 3 and either `cabextract` or `7z`. Use the explicit
+`--chip` argument; the installer's old no-argument entry point selects FT9361.
+The installer verifies the selected payload's exact size and SHA-256. No Windows
+code is executed and no vendor binary is distributed in this repository.
+
+Alternatively, use a local Windows driver DLL or an already extracted raw
+firmware file. These commands do not download a package:
 
 ```sh
 sh scripts/install-firmware.sh --chip ft9338 \
@@ -181,10 +228,12 @@ sequence. Choose these commands only when running that candidate's experiment:
 
 ```sh
 sh scripts/install-firmware.sh --chip ft9348 \
-  --input /path/to/ftWbioUmdfDriverV2.dll --destdir "$PWD/medion-firmware"
+  --download --destdir "$PWD/medion-firmware"
 sudo python3 scripts/medion-spidev.py --boot ft9348 \
   --firmware "$PWD/medion-firmware/fte3600/ft9348.bin"
 ```
+
+For a local FT9348 input, replace `--download` with `--input /path/to/file`.
 
 `--firmware PATH` is optional and valid only with `--boot`. Without it, the C
 tool uses `/usr/lib/firmware/fte3600/ft9338.bin` or
@@ -310,3 +359,23 @@ population FAR/FRR. Authentication is disabled in the build above. Record the
 source commit, kernel, stage and sanitized result when reporting this Medion
 experiment; no Medion hardware success is claimed by the existence of this
 branch or its mock tests.
+
+## Local validation, 2026-10-04
+
+The standalone branch incorporates shared-driver fixes through main `1ce4c74`.
+The Medion software-wake path and launcher checks were then verified with:
+
+- A GCC 13.3 warnings-as-errors build on Ubuntu 24.04 under WSL.
+- 32 passing selected suites, including Medion transport (17 cases),
+  identification (18), native identification I/O (12), RAM boot (13), launcher
+  (60), and the merged shared-driver lifecycle (121). The general driver suite
+  skipped its optional FT9361 external-firmware and disabled udev-generator
+  subcases; no Medion subcase was skipped.
+- AddressSanitizer and UndefinedBehaviorSanitizer: all four Medion C suites
+  and the shared-driver lifecycle passed.
+- Actual `--chip ft9338 --download` and `--chip ft9348 --download` extraction
+  from the fixed Microsoft package, confirming both payload sizes and hashes.
+
+These checks did not access a sensor, install system software or load a kernel
+module. Fedora SELinux enforcement, Secure Boot and the E3224's physical wiring
+still require the user's hardware run.

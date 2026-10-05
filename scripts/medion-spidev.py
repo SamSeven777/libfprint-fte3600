@@ -28,6 +28,9 @@ PROC = Path("/proc")
 LOCK = Path("/run/lock/fte3600-medion.lock")
 BUFFER_SIZE = 32768
 MIN_PROBE_BUFFER = 64
+# Early host-only bounds for the explicit candidates, including wire overhead.
+# The C engine independently checks the catalog and complete transaction size.
+BOOT_TRANSFER_SIZE = {"ft9338": 14192, "ft9348": 10319}
 NODE_TIMEOUT = 2.0
 SERVICE = "fprintd.service"
 SPI_ACPI = r"\_SB_.PCI0.SPI1.FP05"
@@ -54,6 +57,62 @@ def attribute(path):
     if len(value) > 4096:
         raise DiagnosticError(f"Oversized sysfs attribute: {path}")
     return value.strip()
+
+
+def optional_attribute(path):
+    """Policy reporting must not turn missing or inaccessible data into denial."""
+    try:
+        return attribute(path).rstrip("\0") or "unknown (empty)"
+    except DiagnosticError:
+        return "unknown (unavailable)"
+
+
+def firmware_secure_boot():
+    # efivarfs prefixes the one-byte UEFI value with four attribute bytes.
+    # This reports firmware configuration, not shim validation or module trust.
+    path = SYS / "firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+    try:
+        with path.open("rb") as stream:
+            value = stream.read(6)
+    except OSError:
+        return "unknown (unavailable)"
+    if len(value) != 5 or value[4] not in (0, 1):
+        return "unknown (invalid value)"
+    return "enabled" if value[4] else "disabled"
+
+
+def report_environment():
+    system = os.uname()
+    print(f"[environment] Kernel: {system.sysname} {system.release} {system.machine}", flush=True)
+    enforce = optional_attribute(SYS / "fs/selinux/enforce")
+    selinux = {"0": "permissive", "1": "enforcing"}.get(enforce, "unknown (unavailable or invalid)")
+    lockdown = optional_attribute(SYS / "kernel/security/lockdown")
+    context = optional_attribute(PROC / "self/attr/current")
+    print(f"[environment] Firmware Secure Boot: {firmware_secure_boot()}; "
+          f"lockdown={lockdown!r}; SELinux={selinux}; process_context={context!r}", flush=True)
+    module = SYS / "module/spidev"
+    if module.exists():
+        value = optional_attribute(module / "parameters/bufsiz")
+        print(f"[environment] spidev present; actual bufsiz={value!r} bytes", flush=True)
+    else:
+        print("[environment] spidev not present; inspection does not load it", flush=True)
+    print("[environment] Policy states are informational; device access and module trust "
+          "are checked only by attempted operations.", flush=True)
+
+
+def check_buffer(action, chip=None):
+    value = attribute(SYS / "module/spidev/parameters/bufsiz")
+    minimum = BOOT_TRANSFER_SIZE[chip] if action == "boot" else MIN_PROBE_BUFFER
+    stage = f"{chip.upper()} RAM boot" if action == "boot" else "identification"
+    if not value.isdecimal():
+        raise DiagnosticError(f"Loaded spidev bufsiz is invalid: {value!r}")
+    size = int(value)
+    if size < minimum:
+        raise DiagnosticError(f"{stage} needs an unsplit {minimum}-byte transaction; "
+                              f"loaded spidev bufsiz is {size}. No diagnostic was started. "
+                              "A larger buffer requires a separately planned module reload or boot setting; "
+                              "this launcher will not unload spidev.")
+    return size
 
 
 def canonical(path):
@@ -364,16 +423,14 @@ class Session:
             raise DiagnosticError("fprintd did not reach an inactive state")
         assert_no_fprintd()
 
-    def prepare_transport(self):
+    def prepare_transport(self, action, chip=None):
         self.transport_started = True
         module = SYS / "module/spidev"
         if not module.exists():
             command(["modprobe", "spidev", f"bufsiz={BUFFER_SIZE}"])
-        value = attribute(module / "parameters/bufsiz")
-        if not value.isdecimal() or int(value) < MIN_PROBE_BUFFER:
-            raise DiagnosticError(f"Loaded spidev bufsiz is {value!r}; at least {MIN_PROBE_BUFFER} is required for probing")
+        value = check_buffer(action, chip)
         print(f"[binding] Actual spidev bufsiz: {value} bytes", flush=True)
-        if int(value) < BUFFER_SIZE:
+        if value < BUFFER_SIZE:
             print("[binding] Buffer is below 32768; the diagnostic will check each chip's actual transfer needs. "
                   "A confirmed identity can precede a transfer-limit failure. This launcher will not unload "
                   "the global driver; a larger buffer requires a separately planned reload or boot setting.", flush=True)
@@ -429,6 +486,10 @@ class Session:
 
 
 def execute(resources, tool, action, output=None, chip=None, firmware=None):
+    # Check an already loaded or built-in driver's actual buffer before service
+    # or binding changes. Loading a previously absent module is checked again.
+    if (SYS / "module/spidev").exists():
+        check_buffer(action, chip)
     session = Session(resources)
     error = None
     try:
@@ -438,7 +499,7 @@ def execute(resources, tool, action, output=None, chip=None, firmware=None):
         if discover() != resources:
             raise DiagnosticError("Hardware resources changed during preparation")
         print("[binding] Preparing system spidev, fixed chip select polarity", flush=True)
-        device = session.prepare_transport()
+        device = session.prepare_transport(action, chip)
         arguments = [str(tool), "--device", str(device.path),
                      "--reset-chip", str(resources.reset.path), "--irq-chip", str(resources.irq.path),
                      "--action", action]
@@ -501,6 +562,7 @@ def main(argv=None):
             firmware = Path(os.path.abspath(args.firmware))
             if not stat.S_ISREG(firmware.stat().st_mode):
                 raise DiagnosticError(f"Firmware must be a regular file: {firmware}")
+        report_environment()
         resources = discover()
         print(f"[resources] ACPI {SPI_ACPI}: {resources.spi.name} on {resources.controller.name}", flush=True)
         print(f"[resources] reset {RESET_ACPI} INT3453: {resources.reset.path}, line 39, active-low", flush=True)
@@ -510,6 +572,8 @@ def main(argv=None):
         if action is None:
             device = spidev_node(resources.spi, required=False)
             print(f"[resources] spidev: {device.path if device else 'not bound; execution will attempt a temporary binding'}")
+            print("[inspect] Topology only: no module loading, device-node access or GPIO line requests. "
+                  "This does not establish hardware readiness or sensor identity.", flush=True)
             return 0
         if os.geteuid() != 0:
             raise DiagnosticError("Execution requires root; --inspect remains read-only and needs no root")

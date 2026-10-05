@@ -22,14 +22,39 @@ reads, or turn an unknown response into firmware-upload authorization.
    using `ff00`/`9180`. Each positive application identity must repeat unchanged.
    Raw `9391` also requires register `1816 != 0fff`; the 9395 variant is rejected.
    Empty/unrecognized responses try the alternate CS polarity when supported.
-   Successful discovery keeps that polarity. Failure restores the original.
-   If these probes fail, the shared factory wake and verified `c6=01` sequence
+   Successful discovery keeps that polarity for the current open session.
+   Failure restores the original; the kernel also restores it on final close.
+   If these probes cannot identify a chip, discovery first
+   retries the legacy application after `70`, a minimum 5 ms wait, `70`, and
+   a minimum 2 ms wait. This first wake runs once per supported CS polarity,
+   after the other application protocols had a chance to identify or reject
+   the chip. Inactive legacy registers can return stale bytes as well as zeros;
+   an unknown reply still prevents firmware recovery if waking fails. The two
+   commands finish before cancellation is observed; transport errors stop the
+   probe. A positive legacy identity still has to repeat unchanged. This
+   handles an inactive FT9361 application observed on the One-Netbook A1; it
+   does not authorize firmware upload or establish cold ROM identity.
+   If the first awake geometry is still `0000` or `ffff`, discovery checks
+   `20/21` for `a5 5a`. It can repeat the wake/status round up to six times
+   total per polarity, with 5 ms between failed rounds. Later rounds go
+   straight to the status check. An idle reply is followed by 350 ms and two
+   matching geometry observations. This slower fallback does not impose an
+   extra idle gate on the A1's already working immediate-geometry path.
+   A nonempty unknown reply preserves the firmware guard and moves to the
+   next polarity; a positive identity that changes on confirmation fails.
+   Device waits are scheduled from the actual monotonic time, so work done
+   inside a main-loop callback cannot consume a hardware delay before it starts.
+   If the application probes and legacy wake fail, the shared factory wake and verified `c6=01` sequence
    retries identification on each supported CS polarity. This state-changing
    fallback requires repeated IDs and the FT9391 variant check; it never writes
    FD/FE pad-voltage controls before selecting a family. Negative results require
    successful reset cleanup. I/O or cleanup errors stop discovery; known
    unsupported IDs cannot fall through to legacy firmware recovery. See the
    [factory negotiation specification](special-probe.md).
+   There is no second legacy wake after factory negotiation. Already identified
+   families skip the fallback, and explicit boot-only discovery keeps its ROM
+   entry sequence. Failed discovery restores CS; a failed/cancelled soft wake
+   does not trigger an additional hardware reset or claim verified idle.
    Only after these probes fail does an empty legacy response enter ROM
    discovery. A recognized A8 ROM family **and** the SPI OTP variant must agree
    on FT9348 or FT9361. FT9536 instead permits positive boot-A identification;
@@ -40,9 +65,10 @@ reads, or turn an unknown response into firmware-upload authorization.
 
 Runtime `0x14/0x15` values also describe sensor geometry in the Windows driver;
 they are not claimed to be immutable silicon IDs. Geometry, application and AGC
-versions are checked again after initialization. The existing FT9361 extractor
-and authentication policy remain compatible; the sensor-aware template format
-and additional profiles are described in [family authentication](family-authentication.md).
+versions are checked again after initialization. The sensor-aware template
+format and additional profiles are described in
+[family authentication](family-authentication.md); the optional BRISK/IPA
+matcher integration is described in [matcher architectures](matcher-architectures.md).
 
 ## Electrical and protocol limits
 
@@ -62,7 +88,12 @@ The bridge starts with ACPI SPI mode/chip select, caps speed at 1 MHz and uses
 8-bit words. Optional ABI 1 capability `CAP_CS_POLARITY` allows changing only
 the physical active level of CS under the exclusive session lock. It does not
 alter reset polarity, CPOL/CPHA, clock or word size. A failed `spi_setup` rolls
-back; failure to restore invalidates the session. The backends accept mode 0.
+back; failure to roll back invalidates the session. On final file release,
+including process exit, the kernel restores the CS polarity recorded at open.
+If `dup`/`fork` leaves another file reference alive, restoration waits for its
+release. A failed restoration retains the target and blocks a new open until
+setup succeeds; merely changing the software mode bits does not clear the error.
+The backends accept mode 0.
 Its maximum transaction
 is the smaller of the controller transfer/message limits and 32,768 bytes.
 Capture needs 7,752 / 9,224 / 5,128 / 8,200 bytes for
@@ -119,7 +150,14 @@ The info structure remains 32 bytes; the capability consumes a formerly zero
 reserved slot. Old ABI 1 bridges advertise no CS control. There are no arbitrary GPIO
 number, arbitrary SPI configuration, memory-map or multi-transfer ioctls. Nodes are
 root-only. Removal invalidates the fd; suspend invalidates an open session,
-which must be closed and reopened after resume. Kernel buffers containing
+which must be closed and reopened after resume. Suspend attempts CS restoration
+before the parent controller sleeps. A close while suspended performs no GPIO
+or SPI setup; resume retries any pending restoration, and a later open retries
+again if needed. Resume failure never revives the old session. Removal attempts
+restoration only while the controller is awake and still attached; subsequent
+file release cannot access the removed hardware. Restoring the saved polarity
+does not establish that the ACPI value is electrically correct, or isolate
+other devices on a shared SPI bus during discovery. Kernel buffers containing
 transaction data are cleared on free; this is not a complete erasure claim.
 
 ## Build and migrate

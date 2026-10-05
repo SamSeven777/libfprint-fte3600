@@ -10,6 +10,10 @@ option('fte3600_medion_spidev',
        description: 'Build the uninstalled Medion E3224 spidev diagnostic experiment',
        type: 'boolean',
        value: false)
+option('fte3600_ipa_auth',
+       description: 'Opt into experimental IPA/dual authentication; requires fte3600_personal_auth',
+       type: 'boolean',
+       value: false)
 option('introspection',
        description: 'Build GObject Introspection repository',
        type: 'boolean',

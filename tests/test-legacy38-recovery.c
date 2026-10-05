@@ -12,11 +12,13 @@ static struct
   gsize         size;
   guint8        otp;
   guint8        fe;
-  guint         transactions, resets, uploads, reads, loads, polls;
+  guint         transactions, resets, assertions, uploads, reads, loads, polls;
+  guint         application_reads;
   guint         config_writes;
   guint         fail_transaction;
+  guint         fail_reset;
   gboolean      asserted, done, corrupt, busy, missing;
-  gboolean      cancel_reset, cancel_upload;
+  gboolean      cancel_reset, cancel_upload, cancel_readback, cancel_start;
   gboolean      recovering;
   gint64        assertion_time;
   GError       *error;
@@ -60,12 +62,19 @@ fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean as
   if (!asserted && mock.asserted)
     g_assert_cmpint (g_get_monotonic_time () - mock.assertion_time, >=, 19000);
   mock.resets++;
+  if (mock.resets == mock.fail_reset)
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new_literal (
+                             G_IO_ERROR, G_IO_ERROR_FAILED, "Injected reset release failure"));
+      return;
+    }
   mock.asserted = asserted;
   self->idle_verified = FALSE;
   if (asserted)
     {
+      mock.assertions++;
       mock.assertion_time = g_get_monotonic_time ();
-      if (mock.cancel_reset)
+      if (mock.cancel_reset || (mock.cancel_start && mock.reads))
         g_cancellable_cancel (mock.cancel);
     }
   fpi_ssm_next_state (ssm);
@@ -89,6 +98,7 @@ fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize length, gboolean can
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
 
   g_assert_false (cancellable);
+  mock.application_reads++;
   memset (self->small_rx, 0, sizeof self->small_rx);
   self->small_rx_valid = TRUE;
   if (reg == 0x20)
@@ -198,6 +208,8 @@ complete_transfer (gpointer user_data)
           if (mock.corrupt)
             rx[6 + mock.size - 1] ^= 1;
           mock.reads++;
+          if (mock.cancel_readback)
+            g_cancellable_cancel (mock.cancel);
         }
     }
   if (error)
@@ -329,7 +341,7 @@ test_recover (gconstpointer scenario)
 
   run (fpi_fte3600_legacy38_identify_new (self, which != 0));
   g_assert_no_error (mock.error);
-  mock.resets = mock.transactions = 0;
+  mock.resets = mock.assertions = mock.transactions = 0;
   mock.recovering = TRUE;
   switch (which)
     {
@@ -360,6 +372,17 @@ test_recover (gconstpointer scenario)
     case 9: mock.fail_transaction = 2;
       break;
 
+    case 10: mock.cancel_readback = TRUE;
+      break;
+
+    case 11: mock.cancel_start = TRUE;
+      break;
+
+    case 12:
+      mock.fail_transaction = 2;
+      mock.fail_reset = 4;
+      break;
+
     default: g_assert_not_reached ();
     }
   run (fpi_fte3600_legacy38_recovery_new (self));
@@ -367,20 +390,80 @@ test_recover (gconstpointer scenario)
     {
       g_assert_no_error (mock.error);
       g_assert_true (self->idle_verified);
+      g_assert_false (self->session_failed);
       g_assert_cmpuint (mock.uploads, ==, 1);
       g_assert_cmpuint (mock.reads, ==, 1);
+      g_assert_cmpuint (mock.assertions, ==, 3);
+      g_assert_cmpuint (mock.application_reads, ==, 3);
     }
   else
     {
       g_assert_nonnull (mock.error);
       g_assert_false (self->idle_verified);
+      g_assert_true (self->session_failed);
+      if (which != 6)
+        g_assert_cmpuint (mock.application_reads, ==, 0);
     }
   if (which == 3 || which == 4 || which == 7)
-    g_assert_cmpuint (mock.resets + mock.transactions, ==, 0);
+    {
+      g_assert_cmpuint (mock.resets + mock.transactions, ==, 0);
+    }
+  else if (which < 2)
+    {
+      g_assert_cmpuint (mock.resets, ==, 9);
+    }
+  else if (which == 6)
+    {
+      g_assert_cmpuint (mock.resets, ==, 10);
+    }
+  else if (which == 11)
+    {
+      /* Cancellation during the first startup pulse finishes its low hold,
+       * then releases the line without a second pulse or application reads. */
+      g_assert_cmpuint (mock.resets, ==, 7);
+      g_assert_cmpuint (mock.assertions, ==, 2);
+    }
   else
-    g_assert_cmpuint (mock.resets, ==, 9);
+    {
+      g_assert_cmpuint (mock.resets, ==, 4);
+      g_assert_cmpuint (mock.assertions, ==, 1);
+    }
   if (which == 6)
-    g_assert_cmpuint (mock.polls, ==, 20);
+    {
+      g_assert_cmpuint (mock.polls, ==, 20);
+      g_assert_cmpuint (mock.application_reads, ==, 20);
+    }
+  if (which == 5 || which == 8 || which == 10 || which == 11)
+    g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  if (which == 12)
+    {
+      g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_assert_cmpstr (mock.error->message, ==, "Injected boot SPI failure");
+    }
+  finish (self);
+}
+
+static void
+test_recovery_transfer_failure (gconstpointer scenario)
+{
+  guint which = GPOINTER_TO_UINT (scenario);
+  FpiDeviceFte3600 *self = setup (which < 8);
+  guint failed_transfer = which % 8 + 1;
+
+  run (fpi_fte3600_legacy38_identify_new (self, which >= 8));
+  g_assert_no_error (mock.error);
+  mock.resets = mock.assertions = mock.transactions = 0;
+  mock.recovering = TRUE;
+  mock.fail_transaction = failed_transfer;
+  run (fpi_fte3600_legacy38_recovery_new (self));
+  g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_cmpstr (mock.error->message, ==, "Injected boot SPI failure");
+  g_assert_cmpuint (mock.transactions, ==, failed_transfer);
+  g_assert_cmpuint (mock.resets, ==, 4);
+  g_assert_cmpuint (mock.assertions, ==, 1);
+  g_assert_cmpuint (mock.application_reads, ==, 0);
+  g_assert_false (self->idle_verified);
+  g_assert_true (self->session_failed);
   finish (self);
 }
 
@@ -416,10 +499,16 @@ main (int argc, char **argv)
       g_autofree gchar *name = g_strdup_printf ("/legacy38/identity/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_identify);
     }
-  for (guint i = 0; i < 10; i++)
+  for (guint i = 0; i < 13; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/legacy38/recovery/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_recover);
+    }
+  for (guint i = 0; i < 16; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/legacy38/transfer-failure/%s/%u",
+                                                i < 8 ? "FT9338" : "FT9536", i % 8 + 1);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_recovery_transfer_failure);
     }
   return g_test_run ();
 }

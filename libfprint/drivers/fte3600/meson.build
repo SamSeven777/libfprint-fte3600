@@ -19,6 +19,7 @@ fte3600_sources = files(
     '../fte3600-ft9368.c',
     '../fte3600-ft9368-update.c',
     '../fte3600-brisk.c',
+    '../fte3600-ipa.c',
     '../fte3600-match-profile.c',
     '../fte3600-template.c',
 )

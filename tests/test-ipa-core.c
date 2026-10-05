@@ -1,0 +1,508 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Mathematical fixtures only. This test links the 2D-IPA matcher core with
+ * GLib and libm, without a driver, template codec, platform configuration or policy.
+ *
+ * Copyright (C) 2026 FTE3600 Linux contributors
+ */
+
+#include <math.h>
+#include <string.h>
+#include <glib.h>
+
+#include "../libfprint/matchers/ipa/ipa.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
+static void
+assert_policy_result (const FpiIpaMatchEvidence *result, gboolean expected)
+{
+  g_assert_cmpint (result->diagnostic_policy_passed, ==, expected);
+  g_assert_cmpint (fpi_ipa_result_meets_policy (result), ==, expected);
+}
+
+static void
+make_fingerprint_pattern (guint8 *image, guint seed_variant)
+{
+  static const struct
+  {
+    gdouble x;
+    gdouble y;
+    gdouble sigma;
+    gdouble amplitude;
+  } spots_a[] = {
+    { 17, 18, 1.5,  58 }, { 29, 17, 2.2, -54 },
+    { 43, 19, 3.1,  61 }, { 51, 29, 1.8, -48 },
+    { 18, 32, 2.7, -61 }, { 32, 31, 1.4,  52 },
+    { 43, 39, 2.4, -57 }, { 17, 47, 1.9,  55 },
+    { 31, 49, 3.2,  63 }, { 49, 52, 1.5, -53 },
+    { 20, 63, 2.3, -58 }, { 36, 63, 1.7,  57 },
+    { 48, 66, 2.8,  50 },
+  };
+
+  static const struct
+  {
+    gdouble x;
+    gdouble y;
+    gdouble sigma;
+    gdouble amplitude;
+  } spots_b[] = {
+    { 22, 22, 2.0, -60 }, { 38, 24, 1.8,  55 },
+    { 25, 38, 2.5,  62 }, { 45, 42, 2.2, -50 },
+    { 19, 54, 1.6, -56 }, { 35, 56, 3.0,  58 },
+    { 46, 60, 2.1, -52 }, { 28, 68, 1.9,  60 },
+  };
+
+  gdouble freq_x = (seed_variant == 0) ? 0.29 : 0.41;
+  gdouble freq_y = (seed_variant == 0) ? 0.17 : 0.23;
+
+  for (guint y = 0; y < FPI_IPA_HEIGHT; y++)
+    {
+      for (guint x = 0; x < FPI_IPA_WIDTH; x++)
+        {
+          gdouble value = 126.0 + 15.0 * sin (freq_x * x + freq_y * y) +
+                          10.0 * cos (0.13 * x - 0.23 * y);
+
+          if (seed_variant == 0)
+            {
+              for (guint i = 0; i < G_N_ELEMENTS (spots_a); i++)
+                {
+                  const gdouble dx = x - spots_a[i].x;
+                  const gdouble dy = y - spots_a[i].y;
+                  value += spots_a[i].amplitude *
+                           exp (-(dx * dx + dy * dy) / (2.0 * spots_a[i].sigma * spots_a[i].sigma));
+                }
+            }
+          else
+            {
+              for (guint i = 0; i < G_N_ELEMENTS (spots_b); i++)
+                {
+                  const gdouble dx = x - spots_b[i].x;
+                  const gdouble dy = y - spots_b[i].y;
+                  value += spots_b[i].amplitude *
+                           exp (-(dx * dx + dy * dy) / (2.0 * spots_b[i].sigma * spots_b[i].sigma));
+                }
+            }
+
+          image[y * FPI_IPA_WIDTH + x] = (guint8) CLAMP (floor (value + 0.5), 2, 253);
+        }
+    }
+}
+
+static void
+warp_image (const guint8 *source,
+            guint8       *destination,
+            gdouble       angle,
+            gdouble       translate_x,
+            gdouble       translate_y)
+{
+  const gdouble cosine = cos (angle);
+  const gdouble sine = sin (angle);
+  const gdouble center_x = (FPI_IPA_WIDTH - 1) / 2.0;
+  const gdouble center_y = (FPI_IPA_HEIGHT - 1) / 2.0;
+
+  for (guint y = 0; y < FPI_IPA_HEIGHT; y++)
+    {
+      for (guint x = 0; x < FPI_IPA_WIDTH; x++)
+        {
+          const gdouble destination_x = x - center_x - translate_x;
+          const gdouble destination_y = y - center_y - translate_y;
+          const gdouble source_x = cosine * destination_x + sine * destination_y + center_x;
+          const gdouble source_y = -sine * destination_x + cosine * destination_y + center_y;
+          const gint x0 = (gint) floor (source_x);
+          const gint y0 = (gint) floor (source_y);
+          gint value = 126;
+
+          if (x0 >= 0 && y0 >= 0 && x0 + 1 < FPI_IPA_WIDTH && y0 + 1 < FPI_IPA_HEIGHT)
+            {
+              const gdouble fx = source_x - x0;
+              const gdouble fy = source_y - y0;
+              const gdouble top = (1.0 - fx) * source[y0 * FPI_IPA_WIDTH + x0] +
+                                  fx * source[y0 * FPI_IPA_WIDTH + x0 + 1];
+              const gdouble bottom = (1.0 - fx) * source[(y0 + 1) * FPI_IPA_WIDTH + x0] +
+                                     fx * source[(y0 + 1) * FPI_IPA_WIDTH + x0 + 1];
+              value = (gint) floor ((1.0 - fy) * top + fy * bottom + 0.5);
+            }
+          destination[y * FPI_IPA_WIDTH + x] = (guint8) CLAMP (value, 0, 255);
+        }
+    }
+}
+
+static void
+test_ipa_parameter_validation (void)
+{
+  guint8 image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet features = { 0 };
+  FpiIpaMatchEvidence result;
+
+  memset (image, 128, sizeof (image));
+
+  /* Null pointer checks */
+  g_assert_cmpint (fpi_ipa_extract (NULL, sizeof (image), &features),
+                   ==, FPI_IPA_ERR_PARAM);
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), NULL),
+                   ==, FPI_IPA_ERR_PARAM);
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image) - 1, &features),
+                   ==, FPI_IPA_ERR_PARAM);
+
+  g_assert_cmpint (fpi_ipa_match (NULL, &features, &result),
+                   ==, FPI_IPA_ERR_PARAM);
+  g_assert_cmpint (fpi_ipa_match (&features, NULL, &result),
+                   ==, FPI_IPA_ERR_PARAM);
+  g_assert_cmpint (fpi_ipa_match (&features, &features, NULL),
+                   ==, FPI_IPA_ERR_PARAM);
+
+  g_assert_false (fpi_ipa_result_meets_policy (NULL));
+}
+
+static void
+test_ipa_extract_deterministic (void)
+{
+  guint8 image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet feat1, feat2;
+
+  make_fingerprint_pattern (image, 0);
+
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &feat1),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpuint (feat1.n_minutiae, >=, 5);
+  g_assert_cmpuint (feat1.n_minutiae, <=, FPI_IPA_MAX_MINUTIAE);
+
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &feat2),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpuint (feat1.n_minutiae, ==, feat2.n_minutiae);
+
+  /* Bit-exact determinism */
+  for (guint i = 0; i < feat1.n_minutiae; i++)
+    {
+      g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].x, feat2.minutiae[i].x, 1e-6);
+      g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].y, feat2.minutiae[i].y, 1e-6);
+      g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].theta, feat2.minutiae[i].theta, 1e-6);
+      for (guint d = 0; d < FPI_IPA_DESC_DIM; d++)
+        g_assert_cmpfloat_with_epsilon (feat1.minutiae[i].desc[d],
+                                        feat2.minutiae[i].desc[d], 1e-6);
+    }
+}
+
+static void
+test_ipa_extract_tied_peaks (void)
+{
+  const guint patterned_rows[] = { 20, FPI_IPA_HEIGHT };
+
+  for (guint sample = 0; sample < G_N_ELEMENTS (patterned_rows); sample++)
+    {
+      guint8 image[FPI_IPA_IMAGE_SIZE];
+      FpiIpaFeatureSet first, second;
+      FpiIpaMatchEvidence result;
+
+      make_fingerprint_pattern (image, 0);
+      /* Adjacent equal Harris peaks used to refine to duplicate locations.
+       * Cover both a periodic frame and a periodic patch in a varied frame. */
+      for (guint y = 0; y < patterned_rows[sample]; y++)
+        for (guint x = 0; x < FPI_IPA_WIDTH; x++)
+          image[y * FPI_IPA_WIDTH + x] = (guint8) floor (
+            128.0 + 70.0 * cos ((x - 31.5) * G_PI / 3.0) *
+            cos ((y - 39.5) * G_PI / 2.0) + 0.5);
+
+      g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &first),
+                       ==, FPI_IPA_OK);
+      g_assert_true (fpi_ipa_validate_feature_set (&first));
+      g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &second),
+                       ==, FPI_IPA_OK);
+      g_assert_cmpmem (&first, sizeof (first), &second, sizeof (second));
+      g_assert_cmpint (fpi_ipa_match (&first, &second, &result),
+                       ==, FPI_IPA_OK);
+    }
+}
+
+static void
+test_ipa_self_match (void)
+{
+  guint8 image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet feat;
+  FpiIpaMatchEvidence result;
+
+  make_fingerprint_pattern (image, 0);
+
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &feat),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpint (fpi_ipa_match (&feat, &feat, &result),
+                   ==, FPI_IPA_OK);
+
+  g_test_message ("Self-match: pairs=%u inliers=%u score=%.4f policy_passed=%d",
+                  result.n_matched_pairs, result.n_supported_inliers,
+                  result.consensus_score, result.diagnostic_policy_passed);
+
+  g_assert_cmpuint (result.n_matched_pairs, ==, feat.n_minutiae);
+  g_assert_cmpuint (result.n_supported_inliers, >=, FPI_IPA_POLICY_MIN_INLIERS);
+  g_assert_cmpfloat (result.consensus_score, >=, FPI_IPA_POLICY_MIN_SCORE);
+  assert_policy_result (&result, TRUE);
+  g_assert_true (fpi_ipa_result_meets_policy (&result));
+}
+
+static void
+test_ipa_translation_invariance (void)
+{
+  guint8 source[FPI_IPA_IMAGE_SIZE];
+  guint8 translated[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet query, ref;
+  FpiIpaMatchEvidence result;
+
+  make_fingerprint_pattern (source, 0);
+  warp_image (source, translated, 0.0, 2.0, -2.0);
+
+  g_assert_cmpint (fpi_ipa_extract (source, sizeof (source), &query),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpint (fpi_ipa_extract (translated, sizeof (translated), &ref),
+                   ==, FPI_IPA_OK);
+
+  g_assert_cmpint (fpi_ipa_match (&query, &ref, &result),
+                   ==, FPI_IPA_OK);
+
+  g_test_message ("Translation (+2,-2): pairs=%u inliers=%u score=%.4f policy_passed=%d",
+                  result.n_matched_pairs, result.n_supported_inliers,
+                  result.consensus_score, result.diagnostic_policy_passed);
+
+  g_assert_cmpuint (result.n_supported_inliers, >=, FPI_IPA_POLICY_MIN_INLIERS);
+  g_assert_cmpfloat (result.consensus_score, >=, FPI_IPA_POLICY_MIN_SCORE);
+  assert_policy_result (&result, TRUE);
+}
+
+static void
+test_ipa_rotation_invariance (void)
+{
+  guint8 source[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet query;
+
+  make_fingerprint_pattern (source, 0);
+  g_assert_cmpint (fpi_ipa_extract (source, sizeof (source), &query),
+                   ==, FPI_IPA_OK);
+
+  static const gdouble test_angles[] = {
+    0.15,  /* ~8.6 deg */
+    0.35,  /* ~20.0 deg */
+    -0.25, /* ~-14.3 deg */
+  };
+
+  for (guint a = 0; a < G_N_ELEMENTS (test_angles); a++)
+    {
+      guint8 rotated[FPI_IPA_IMAGE_SIZE];
+      FpiIpaFeatureSet ref;
+      FpiIpaMatchEvidence result;
+      gdouble angle = test_angles[a];
+
+      warp_image (source, rotated, angle, 0.0, 0.0);
+      g_assert_cmpint (fpi_ipa_extract (rotated, sizeof (rotated), &ref),
+                       ==, FPI_IPA_OK);
+
+      g_assert_cmpint (fpi_ipa_match (&query, &ref, &result),
+                       ==, FPI_IPA_OK);
+
+      g_test_message ("Rotation (angle=%.2f rad): pairs=%u inliers=%u score=%.4f policy_passed=%d",
+                      angle, result.n_matched_pairs, result.n_supported_inliers,
+                      result.consensus_score, result.diagnostic_policy_passed);
+
+      g_assert_cmpuint (result.n_supported_inliers, >=, FPI_IPA_POLICY_MIN_INLIERS);
+      g_assert_cmpfloat (result.consensus_score, >=, FPI_IPA_POLICY_MIN_SCORE);
+      assert_policy_result (&result, TRUE);
+    }
+}
+
+static void
+test_ipa_impostor_rejection (void)
+{
+  guint8 image_a[FPI_IPA_IMAGE_SIZE];
+  guint8 image_b[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet feat_a, feat_b;
+  FpiIpaMatchEvidence result;
+
+  make_fingerprint_pattern (image_a, 0);
+  make_fingerprint_pattern (image_b, 1);
+
+  g_assert_cmpint (fpi_ipa_extract (image_a, sizeof (image_a), &feat_a),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpint (fpi_ipa_extract (image_b, sizeof (image_b), &feat_b),
+                   ==, FPI_IPA_OK);
+
+  g_assert_cmpint (fpi_ipa_match (&feat_a, &feat_b, &result),
+                   ==, FPI_IPA_OK);
+
+  g_test_message ("Impostor (A vs B): pairs=%u inliers=%u score=%.4f policy_passed=%d",
+                  result.n_matched_pairs, result.n_supported_inliers,
+                  result.consensus_score, result.diagnostic_policy_passed);
+
+  /* One synthetic nonmatching pair is a regression check, not a FAR study. */
+  assert_policy_result (&result, FALSE);
+  g_assert_false (fpi_ipa_result_meets_policy (&result));
+}
+
+static void
+test_ipa_execution_speed (void)
+{
+  guint8 image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet feat1, feat2;
+  FpiIpaMatchEvidence result;
+  const guint iterations = 50;
+
+  make_fingerprint_pattern (image, 0);
+
+  gint64 t0 = g_get_monotonic_time ();
+  for (guint i = 0; i < iterations; i++)
+    fpi_ipa_extract (image, sizeof (image), &feat1);
+  gint64 t1 = g_get_monotonic_time ();
+
+  fpi_ipa_extract (image, sizeof (image), &feat2);
+
+  gint64 t2 = g_get_monotonic_time ();
+  for (guint i = 0; i < iterations; i++)
+    fpi_ipa_match (&feat1, &feat2, &result);
+  gint64 t3 = g_get_monotonic_time ();
+
+  gdouble extract_us = (gdouble) (t1 - t0) / iterations;
+  gdouble match_us = (gdouble) (t3 - t2) / iterations;
+
+  g_test_message ("Performance: 2D-IPA extract = %.2f us (%.3f ms), match = %.2f us (%.3f ms)",
+                  extract_us, extract_us / 1000.0, match_us, match_us / 1000.0);
+}
+
+static void
+test_projection_orthonormal (void)
+{
+  for (guint row = 0; row < FPI_IPA_DESC_DIM; row++)
+    for (guint other = 0; other < FPI_IPA_DESC_DIM; other++)
+      {
+        gdouble dot = 0.0;
+        for (guint col = 0; col < FPI_IPA_DESC_DIM; col++)
+          dot += fpi_ipa_projection_coefficient (row, col) *
+                 fpi_ipa_projection_coefficient (other, col);
+        g_assert_cmpfloat_with_epsilon (dot, row == other ? 1.0 : 0.0, 0.00001);
+      }
+}
+
+static void
+test_rigid_feature_rotation (void)
+{
+  static const gfloat coordinates[6][2] = {
+    { 21, 30 }, { 32, 27 }, { 42, 33 }, { 22, 46 }, { 32, 52 }, { 43, 45 }
+  };
+  static const gfloat angles[] = { 0.6f, -0.75f, 2.0f, -2.2f };
+  FpiIpaFeatureSet query = { 0 };
+
+  query.extractor_schema_version = FPI_IPA_EXTRACTOR_SCHEMA_VERSION;
+  query.n_minutiae = G_N_ELEMENTS (coordinates);
+  for (guint i = 0; i < query.n_minutiae; i++)
+    {
+      query.minutiae[i].x = coordinates[i][0];
+      query.minutiae[i].y = coordinates[i][1];
+      query.minutiae[i].theta = 0.1f * i;
+      query.minutiae[i].desc[i] = 1.0f;
+    }
+  g_assert_true (fpi_ipa_validate_feature_set (&query));
+  for (guint a = 0; a < G_N_ELEMENTS (angles); a++)
+    {
+      FpiIpaFeatureSet reference = query;
+      const gfloat angle = angles[a];
+      FpiIpaMatchEvidence result;
+
+      for (guint i = 0; i < query.n_minutiae; i++)
+        {
+          const gfloat x = query.minutiae[i].x - 32.0f;
+          const gfloat y = query.minutiae[i].y - 40.0f;
+          reference.minutiae[i].x = cosf (angle) * x - sinf (angle) * y + 32.0f;
+          reference.minutiae[i].y = sinf (angle) * x + cosf (angle) * y + 40.0f;
+          reference.minutiae[i].theta = query.minutiae[i].theta + angle;
+          if (i & 1)
+            reference.minutiae[i].theta += (gfloat) M_PI;
+          reference.minutiae[i].theta = atan2f (sinf (reference.minutiae[i].theta),
+                                                cosf (reference.minutiae[i].theta));
+        }
+      g_assert_cmpint (fpi_ipa_match (&query, &reference, &result), ==, FPI_IPA_OK);
+      g_assert_cmpuint (result.n_supported_inliers, ==, query.n_minutiae);
+      assert_policy_result (&result, TRUE);
+      g_assert_cmpint (fpi_ipa_match (&reference, &query, &result), ==, FPI_IPA_OK);
+      assert_policy_result (&result, TRUE);
+    }
+}
+
+typedef struct
+{
+  guint8           image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet expected;
+} ExtractThreadData;
+
+static gpointer
+extract_thread (gpointer user_data)
+{
+  const ExtractThreadData *data = user_data;
+
+  for (guint i = 0; i < 30; i++)
+    {
+      FpiIpaFeatureSet actual;
+      g_assert_cmpint (fpi_ipa_extract (data->image, sizeof (data->image), &actual),
+                       ==, FPI_IPA_OK);
+      g_assert_cmpmem (&actual, sizeof (actual), &data->expected, sizeof (data->expected));
+    }
+  return NULL;
+}
+
+static void
+test_parallel_extract (void)
+{
+  ExtractThreadData first, second;
+
+  make_fingerprint_pattern (first.image, 0);
+  make_fingerprint_pattern (second.image, 1);
+  g_assert_cmpint (fpi_ipa_extract (first.image, sizeof (first.image), &first.expected),
+                   ==, FPI_IPA_OK);
+  g_assert_cmpint (fpi_ipa_extract (second.image, sizeof (second.image), &second.expected),
+                   ==, FPI_IPA_OK);
+  GThread *a = g_thread_new ("ipa-first", extract_thread, &first);
+  GThread *b = g_thread_new ("ipa-second", extract_thread, &second);
+  g_thread_join (a);
+  g_thread_join (b);
+}
+
+static void
+test_feature_validation (void)
+{
+  guint8 image[FPI_IPA_IMAGE_SIZE];
+  FpiIpaFeatureSet features;
+  FpiIpaMatchEvidence result;
+
+  make_fingerprint_pattern (image, 0);
+  g_assert_cmpint (fpi_ipa_extract (image, sizeof (image), &features), ==, FPI_IPA_OK);
+  g_assert_true (fpi_ipa_validate_feature_set (&features));
+  FpiIpaFeatureSet invalid = features;
+  invalid.n_minutiae = FPI_IPA_MAX_MINUTIAE + 1;
+  g_assert_false (fpi_ipa_validate_feature_set (&invalid));
+  g_assert_cmpint (fpi_ipa_match (&invalid, &features, &result), ==, FPI_IPA_ERR_PARAM);
+  invalid = features;
+  invalid.minutiae[0].x = -1.0f;
+  g_assert_false (fpi_ipa_validate_feature_set (&invalid));
+  invalid = features;
+  invalid.extractor_schema_version++;
+  g_assert_false (fpi_ipa_validate_feature_set (&invalid));
+}
+
+int
+main (int   argc,
+      char *argv[])
+{
+  g_test_init (&argc, &argv, NULL);
+
+  g_test_add_func ("/ipa-core/parameter-validation", test_ipa_parameter_validation);
+  g_test_add_func ("/ipa-core/extract-deterministic", test_ipa_extract_deterministic);
+  g_test_add_func ("/ipa-core/extract-tied-peaks", test_ipa_extract_tied_peaks);
+  g_test_add_func ("/ipa-core/self-match", test_ipa_self_match);
+  g_test_add_func ("/ipa-core/translation-invariance", test_ipa_translation_invariance);
+  g_test_add_func ("/ipa-core/rotation-invariance", test_ipa_rotation_invariance);
+  g_test_add_func ("/ipa-core/impostor-rejection", test_ipa_impostor_rejection);
+  g_test_add_func ("/ipa-core/execution-speed", test_ipa_execution_speed);
+  g_test_add_func ("/ipa-core/projection-orthonormal", test_projection_orthonormal);
+  g_test_add_func ("/ipa-core/rigid-feature-rotation", test_rigid_feature_rotation);
+  g_test_add_func ("/ipa-core/parallel-extract", test_parallel_extract);
+  g_test_add_func ("/ipa-core/feature-validation", test_feature_validation);
+
+  return g_test_run ();
+}

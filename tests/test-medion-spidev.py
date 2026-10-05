@@ -44,6 +44,7 @@ class FakeMachine:
         self.load_state = "loaded"
         self.false_mask = False
         self.tool_error = None
+        self.modprobe_buffer = 32768
         self.delayed_node_attempts = 0
         self.tool = root / "fte3600-medion"
         self.tool.write_text("synthetic diagnostic placeholder\n")
@@ -150,7 +151,7 @@ class FakeMachine:
             if "modprobe" in self.fail:
                 status = 1
             else:
-                self.loaded()
+                self.loaded(self.modprobe_buffer)
         elif args[0] == "systemctl":
             if operation in self.fail:
                 status = 1
@@ -219,6 +220,62 @@ class MedionTests(unittest.TestCase):
         self.assertIn("gpiochip7", self.output.getvalue())
         self.assertIn("gpiochip12", self.output.getvalue())
         self.assertIn("not bound", self.output.getvalue())
+        self.assertIn("Firmware Secure Boot: unknown", self.output.getvalue())
+        self.assertIn("Topology only", self.output.getvalue())
+        self.assertIn("no module loading, device-node access or GPIO line requests", self.output.getvalue())
+
+    def test_policy_reporting_does_not_block_enforcing_or_load_hardware(self):
+        m = self.machine
+        attributes = {
+            m.sys / "fs/selinux/enforce": b"1\n",
+            m.sys / "kernel/security/lockdown": b"none [integrity] confidentiality\n",
+            m.proc / "self/attr/current": b"unconfined_u:unconfined_r:unconfined_t:s0\0",
+            m.sys / "firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c":
+                b"\x06\0\0\0\x01",
+        }
+        for path, contents in attributes.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        m.loaded(8192)
+        system = SimpleNamespace(sysname="Linux", release="synthetic-fedora-kernel", machine="x86_64")
+        with patch.object(MEDION.os, "uname", return_value=system):
+            self.assertEqual(self.run_action("--inspect"), 0, self.errors.getvalue())
+        output = self.output.getvalue()
+        self.assertIn("Linux synthetic-fedora-kernel x86_64", output)
+        self.assertIn("Firmware Secure Boot: enabled", output)
+        self.assertIn("[integrity]", output)
+        self.assertIn("SELinux=enforcing", output)
+        self.assertIn("process_context='unconfined_u:unconfined_r:unconfined_t:s0'", output)
+        self.assertIn("actual bufsiz='8192' bytes", output)
+        self.assertEqual(m.log, [])
+        for path, contents in attributes.items():
+            self.assertEqual(path.read_bytes(), contents)
+        self.assertEqual(self.run_action("--identify-legacy"), 0, self.errors.getvalue())
+        self.assert_restored()
+
+    def test_malformed_or_unreadable_policy_is_unknown_not_disabled(self):
+        m = self.machine
+        secure_boot = m.sys / "firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+        secure_boot.parent.mkdir(parents=True)
+        for contents in (b"", b"\x06\0\0\0", b"\x06\0\0\0\x02", b"\x06\0\0\0\x01extra"):
+            with self.subTest(contents=contents):
+                secure_boot.write_bytes(contents)
+                self.assertEqual(MEDION.firmware_secure_boot(), "unknown (invalid value)")
+        secure_boot.unlink()
+        secure_boot.mkdir()
+        self.assertEqual(self.run_action("--inspect"), 0, self.errors.getvalue())
+        self.assertIn("Firmware Secure Boot: unknown", self.output.getvalue())
+        self.assertNotIn("Firmware Secure Boot: disabled", self.output.getvalue())
+        self.assertEqual(m.log, [])
+        secure_boot.rmdir()
+        secure_boot.write_bytes(b"\x06\0\0\0\0")
+        self.assertEqual(MEDION.firmware_secure_boot(), "disabled")
+
+    def test_environment_report_survives_topology_failure(self):
+        (self.machine.acpi_sensor / "path").write_text(r"\_SB_.PCI0.SPI2.FP05")
+        self.assertNotEqual(self.run_action("--inspect"), 0)
+        self.assertIn("[environment] Kernel:", self.output.getvalue())
+        self.assertEqual(self.machine.log, [])
 
     def test_exact_fte3600_acpi_path_is_required(self):
         (self.machine.acpi_sensor / "path").write_text(r"\_SB_.PCI0.SPI2.FP05")
@@ -325,6 +382,57 @@ class MedionTests(unittest.TestCase):
         self.assertNotEqual(self.run_action("--probe"), 0)
         self.assert_restored()
         self.assert_no_binding_writes()
+
+    def test_existing_boot_buffer_is_checked_before_service_or_binding_changes(self):
+        m = self.machine
+        m.bind()
+        for chip, minimum in (("ft9338", 14192), ("ft9348", 10319)):
+            for capacity in (8192, minimum - 1):
+                with self.subTest(chip=chip, capacity=capacity):
+                    m.loaded(capacity)
+                    self.assertNotEqual(self.run_action("--boot", chip), 0)
+                    self.assertIn(f"{chip.upper()} RAM boot needs an unsplit {minimum}-byte transaction",
+                                  self.errors.getvalue())
+                    self.assertEqual(m.log, [])
+                    self.assert_restored(binding="spidev")
+
+    def test_boot_buffer_minimum_is_specific_to_selected_chip(self):
+        m = self.machine
+        for chip, minimum in (("ft9338", 14192), ("ft9348", 10319)):
+            with self.subTest(chip=chip):
+                m.log.clear()
+                m.loaded(minimum)
+                self.assertEqual(self.run_action("--boot", chip), 0, self.errors.getvalue())
+                self.assertTrue(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+                self.assertFalse(any(item[:2] == ("command", "modprobe") for item in m.log))
+                self.assert_restored()
+
+    def test_new_module_actual_buffer_is_checked_before_binding(self):
+        m = self.machine
+        m.modprobe_buffer = 8192
+        self.assertNotEqual(self.run_action("--boot", "ft9338"), 0)
+        self.assertIn(("command", "modprobe", "spidev", "bufsiz=32768"), m.log)
+        self.assertIn("loaded spidev bufsiz is 8192", self.errors.getvalue())
+        self.assert_no_binding_writes()
+        self.assertFalse(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+        self.assert_restored()
+
+    def test_small_identification_buffer_does_not_require_ram_boot_capacity(self):
+        self.machine.loaded(64)
+        self.assertEqual(self.run_action("--identify-legacy"), 0, self.errors.getvalue())
+        self.assert_restored()
+        self.assertFalse(any(item[:2] == ("command", "modprobe") for item in self.machine.log))
+
+    def test_unreadable_buffer_is_reported_but_only_blocks_execution(self):
+        m = self.machine
+        m.loaded()
+        buffer = m.sys / "module/spidev/parameters/bufsiz"
+        buffer.unlink()
+        buffer.mkdir()
+        self.assertEqual(self.run_action("--inspect"), 0, self.errors.getvalue())
+        self.assertIn("actual bufsiz='unknown (unavailable)'", self.output.getvalue())
+        self.assertNotEqual(self.run_action("--boot", "ft9348"), 0)
+        self.assertEqual(m.log, [])
 
     def test_kernel_rejecting_override_restores_previous_override(self):
         self.machine.fail.add("bind")

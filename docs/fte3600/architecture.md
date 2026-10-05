@@ -16,10 +16,9 @@ or a vendor matching library.
 | Identification | `drivers/fte3600-discovery.c`, `fte3600-special-probe.{c,h}`, `fte3600-sensor.{c,h}` | Runtime/ROM identity evidence, bounded factory mode negotiation, immutable geometry, protocol and firmware metadata |
 | Protocol execution | `drivers/fte3600-backends.c`, `fte3600-legacy.c`, `fte3600-legacy-recovery.c`, `fte3600-fw9369.c`, `fte3600-ft93xx.c`, `fte3600-ft9368.c`, `fte3600-ft9368-update.c` | Backend routing, initialization, calibration, capture and bounded cleanup |
 | Wire definitions | `drivers/fte3600-protocol.{c,h}`, `fte3600-legacy-recovery-protocol.{c,h}`, `fte3600-fw9369-protocol.{c,h}`, `fte3600-ft93xx-protocol.{c,h}`, `fte3600-ft9368-protocol.{c,h}`, timing headers | Opcodes, registers, framing, sample decoding and pure image transforms; no device access or matcher dependency |
-| Firmware input | `drivers/fte3600-firmware.{c,h}` | Bounded regular-file loading and exact size/SHA-256 validation; no upload authorization |
-| Reusable algorithm | `matchers/brisk/brisk.{c,h}` | Image normalization, features, correspondences and numerical rigid-match evidence |
+| Reusable algorithms | `matchers/brisk/brisk.{c,h}`, `matchers/ipa/ipa.{c,h}` | Standalone image normalization, features, descriptors, correspondences and numerical rigid-match evidence |
 | FTE3600 matching adapter | `drivers/fte3600-match-profile.{c,h}`, `fte3600-brisk.{c,h}`, `fte3600-template.{c,h}` | Sensor image identities, versioned template codec, variable-size mosaics and authentication policy |
-| Build definitions | `drivers/fte3600/meson.build`, `fte3600-build-config.h`, `matchers/brisk/meson.build` | Driver source composition, authentication policy switch, independent core target |
+| Build definitions | `drivers/fte3600/meson.build`, `fte3600-build-config.h`, `matchers/brisk/meson.build`, `matchers/ipa/meson.build` | Driver source composition, authentication policy switch, independent core targets |
 
 Paths in this table are relative to `libfprint/` except `kernel/`. The parent
 Meson files select the driver and register tests. `fte3600-private.h` defines the
@@ -114,11 +113,22 @@ and validates all six catalog payloads, including the FT9368 pair, before
 installing externally obtained files. Each file replacement is atomic; the
 pair is not a filesystem transaction. Firmware is not redistributed here.
 
-Discovery first tries non-configuring ID queries, then the factory wake and
-verified `c6=01` negotiation on each supported CS polarity. It requires repeated
-positive IDs and the FT9391 variant check. Unknown-family negotiation never
-writes the FD/FE pad-voltage registers. Failed negotiation resets the chip;
-transport or cleanup failures stop discovery. See [special-probe.md](special-probe.md).
+Discovery tries application identity protocols on both supported CS polarities,
+then a single legacy wake stage before factory negotiation. The first
+`70` / 5 ms / `70` / 2 ms pair preserves the A1-tested immediate geometry
+confirmation path, including initially stale register bytes. If geometry is
+still empty, a slower fallback checks MCU `a5 5a`, waits 350 ms and repeats
+geometry confirmation; failed status rounds retry at most six pairs total per
+polarity. A started pair finishes before observing cancellation; transfer
+errors stop immediately. All waits start at the actual monotonic scheduling
+time. See [dynamic discovery](dynamic-discovery.md).
+
+If wake does not identify a chip, factory wake and verified `c6=01` negotiation
+run on each supported polarity. They require repeated IDs and the FT9391
+variant check, and never write unknown-family FD/FE pad-voltage registers.
+Failed negotiation resets the chip; I/O or cleanup errors stop discovery.
+See [special-probe.md](special-probe.md). Explicit boot-only discovery retains
+its ROM sequence; unknown or contradictory identities do not authorize upload.
 
 FT9338/FT9536 RAM recovery has separate four-byte boot-register framing and
 compares every uploaded byte against a complete readback before restarting.
@@ -175,6 +185,16 @@ invalidates the session for further capture. Error/cancellation still finishes
 through one action completion, attempts necessary cleanup, and clears image
 buffers. Reopen establishes a fresh hardware state. Removal and suspend are
 also terminal for an open bridge session.
+
+The kernel owns CS session cleanup. Final file release restores the polarity
+saved at open, including after process termination. Suspend attempts restoration
+while its controller is awake; deferred or failed setup is retried on resume
+and before a new open. A setup failure retains the original target and blocks
+communication until recovery, without resetting an invalidated old session.
+Only `SPI_CS_HIGH` changes; the bridge ABI and other SPI settings are unchanged.
+The shared CS policy is exercised with injected setup failures in host tests;
+actual GPIO, IRQ, process-exit and power-management behavior still need hardware
+validation.
 
 ## Validation
 

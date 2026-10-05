@@ -8,32 +8,44 @@
 typedef struct
 {
   Fte3600MedionIdentifyIo io;
-  guint16 runtime[2];
-  guint16 family[2];
-  guint8 otp[2];
-  guint8 marker[2];
-  guint8 fe[2];
-  guint app_reads;
-  guint boot_reads;
-  guint exchanges;
-  guint resets;
-  guint waits;
-  guint disables;
-  guint syncs;
-  guint fail_exchange;
-  guint fail_wait;
-  guint cancel_reset;
-  gboolean cancel_enable;
-  gboolean cancel_read;
-  gboolean cancelled;
-  gboolean omit_error;
-  gboolean fail_cleanup_disable;
-  gboolean fail_cleanup_assert;
-  gboolean in_cleanup;
-  gboolean asserted;
-  gboolean otp_active;
-  GString *events;
-  GString *reports;
+  guint16                 runtime[2];
+  guint16                 awake[2];
+  guint16                 settled[2];
+  guint16                 mcu[6];
+  guint16                 family[2];
+  guint8                  otp[2];
+  guint8                  marker[2];
+  guint8                  fe[2];
+  guint                   app_reads;
+  guint                   awake_reads;
+  guint                   settled_reads;
+  guint                   mcu_reads;
+  guint                   wake_commands;
+  guint                   boot_reads;
+  guint                   first_rom_exchange;
+  guint                   exchanges;
+  guint                   resets;
+  guint                   waits;
+  guint                   disables;
+  guint                   syncs;
+  guint                   fail_exchange;
+  guint                   fail_wait;
+  guint                   cancel_reset;
+  guint                   cancel_exchange;
+  guint                   cancel_wake;
+  guint                   cancel_wait_ms;
+  gboolean                after_settle;
+  gboolean                cancel_enable;
+  gboolean                cancel_read;
+  gboolean                cancelled;
+  gboolean                omit_error;
+  gboolean                fail_cleanup_disable;
+  gboolean                fail_cleanup_assert;
+  gboolean                in_cleanup;
+  gboolean                asserted;
+  gboolean                otp_active;
+  GString                *events;
+  GString                *reports;
 } Fixture;
 
 static gboolean
@@ -63,14 +75,37 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
 
   if (tx[0] == 0x10)
     {
+      const guint16 *geometry;
+      guint *reads;
+
+      if (tx[2] == 0x20)
+        {
+          const guint8 packet[] = { 0x10, 0xef, 0x20, 0, 0, 0 };
+
+          g_assert_cmpmem (tx, length, packet, sizeof packet);
+          g_assert_cmpuint (f->mcu_reads, <, 6);
+          g_assert_cmpuint (f->wake_commands, ==, 2 * (f->mcu_reads + 1));
+          rx[4] = f->mcu[f->mcu_reads] >> 8;
+          rx[5] = f->mcu[f->mcu_reads++] & 0xff;
+          goto complete;
+        }
+      geometry = !f->wake_commands ? f->runtime : f->after_settle ? f->settled : f->awake;
+      reads = !f->wake_commands ? &f->app_reads : f->after_settle ? &f->settled_reads : &f->awake_reads;
       g_assert_cmpuint (length, ==, 5);
       g_assert_cmphex (tx[1], ==, 0xef);
-      g_assert_cmphex (tx[2], ==, (f->app_reads % 2) ? 0x15 : 0x14);
+      g_assert_cmphex (tx[2], ==, (*reads % 2) ? 0x15 : 0x14);
       g_assert_cmphex (tx[3] | tx[4], ==, 0);
-      g_assert_cmpuint (f->app_reads, <, 4);
-      rx[4] = (f->app_reads % 2) ? f->runtime[f->app_reads / 2] & 0xff :
-              f->runtime[f->app_reads / 2] >> 8;
-      f->app_reads++;
+      g_assert_cmpuint (*reads, <, 4);
+      rx[4] = (*reads % 2) ? geometry[*reads / 2] & 0xff : geometry[*reads / 2] >> 8;
+      (*reads)++;
+      goto complete;
+    }
+  if (tx[0] == 0x70)
+    {
+      g_assert_cmpuint (length, ==, 1);
+      g_assert_cmpuint (f->boot_reads + f->resets, ==, 0);
+      f->wake_commands++;
+      f->cancelled |= f->wake_commands == f->cancel_wake;
       goto complete;
     }
   if (tx[0] == 0x90)
@@ -78,6 +113,8 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       const guint8 packet[] = { 0x90, 0, 0 };
 
       g_assert_cmpmem (tx, length, packet, sizeof packet);
+      if (!f->boot_reads)
+        f->first_rom_exchange = f->exchanges;
       g_assert_cmpuint (f->boot_reads, <, 2);
       rx[2] = f->marker[f->boot_reads++];
       goto complete;
@@ -101,7 +138,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
   else if (tx[0] == 0x05)
     {
       /* The sole permitted memory write is the fixed four-byte family query.
-       * No address-zero upload or arbitrary payload can pass this fixture. */
+      * No address-zero upload or arbitrary payload can pass this fixture. */
       const guint8 packet[] = { 0x05, 0xfa, 0x85, 0xc0, 0, 4, 0x11, 0xee, 2, 0, 0 };
 
       g_assert_cmpmem (tx, length, packet, sizeof packet);
@@ -164,7 +201,9 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
           g_assert_true (tx[3] == 0 || tx[3] == 0x81);
           f->otp_active = tx[3] != 0;
           if (f->otp_active)
-            f->cancelled |= f->cancel_enable;
+            {
+              f->cancelled |= f->cancel_enable;
+            }
           else
             {
               f->disables++;
@@ -176,17 +215,26 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
         {
           switch (tx[2])
             {
-            case 0xc8: g_assert_cmphex (tx[3], ==, a8 ? 0xdf : 0x41); break;
-            case 0xcb: g_assert_cmphex (tx[3], ==, 0x60); break;
-            case 0xf1: g_assert_cmphex (tx[3], ==, 0x1d); break;
+            case 0xc8: g_assert_cmphex (tx[3], ==, a8 ? 0xdf : 0x41);
+              break;
+
+            case 0xcb: g_assert_cmphex (tx[3], ==, 0x60);
+              break;
+
+            case 0xf1: g_assert_cmphex (tx[3], ==, 0x1d);
+              break;
+
             case 0xfd:
-            case 0xfe: g_assert_cmphex (tx[3], ==, 0x11); break;
+            case 0xfe: g_assert_cmphex (tx[3], ==, 0x11);
+              break;
+
             default: g_assert_not_reached ();
             }
         }
     }
 
 complete:
+  f->cancelled |= f->exchanges == f->cancel_exchange;
   if (f->exchanges == f->fail_exchange)
     return f->omit_error ? FALSE : injected (error);
   return TRUE;
@@ -215,6 +263,9 @@ mock_wait (gpointer user_data, guint milliseconds, GError **error)
 
   f->waits++;
   g_string_append_printf (f->events, "W%u;", milliseconds);
+  f->cancelled |= milliseconds == f->cancel_wait_ms;
+  if (milliseconds == 350)
+    f->after_settle = TRUE;
   if (milliseconds == 180)
     f->in_cleanup = FALSE;
   if (f->waits == f->fail_wait)
@@ -246,7 +297,7 @@ static void
 fixture_init (Fixture *f)
 {
   memset (f, 0, sizeof *f);
-  f->io = (Fte3600MedionIdentifyIo) {
+  f->io = (Fte3600MedionIdentifyIo){
     .user_data = f, .max_transfer = 11, .exchange = mock_exchange,
     .set_reset = mock_reset, .wait = mock_wait,
     .check_cancelled = mock_cancelled, .report = mock_report,
@@ -269,6 +320,7 @@ static Fte3600Identity
 run_success (Fixture *f)
 {
   Fte3600Identity result = { 0 };
+
   g_autoptr(GError) error = NULL;
 
   g_assert_true (fte3600_medion_identify_legacy (&f->io, &result, &error));
@@ -297,7 +349,7 @@ test_runtime (void)
 {
   const guint16 signatures[] = { 0x5858, 0x6060, 0x4050, 0x4080 };
   const Fte3600Sensor sensors[] = { FTE3600_SENSOR_FT9338, FTE3600_SENSOR_FT9348,
-                                   FTE3600_SENSOR_FT9361, FTE3600_SENSOR_FT9536 };
+                                    FTE3600_SENSOR_FT9361, FTE3600_SENSOR_FT9536 };
 
   for (guint i = 0; i < G_N_ELEMENTS (signatures); i++)
     {
@@ -311,6 +363,7 @@ test_runtime (void)
       g_assert_cmpint (result.evidence, ==, FTE3600_IDENTITY_RUNTIME_GEOMETRY);
       g_assert_cmphex (result.response, ==, signatures[i]);
       g_assert_cmpuint (f.exchanges, ==, 4);
+      g_assert_cmpuint (f.wake_commands, ==, 0);
       g_assert_cmpuint (f.resets, ==, 0);
       fixture_clear (&f);
     }
@@ -337,6 +390,138 @@ test_runtime_rejection (void)
 }
 
 static void
+test_wake_runtime (void)
+{
+  const guint16 signatures[] = { 0x5858, 0x6060, 0x4050, 0x4080 };
+  const Fte3600Sensor sensors[] = { FTE3600_SENSOR_FT9338, FTE3600_SENSOR_FT9348,
+                                    FTE3600_SENSOR_FT9361, FTE3600_SENSOR_FT9536 };
+  const gchar *expected = "[10ef140000][10ef150000][10ef140000][10ef150000]"
+                          "[70]W5;[70]W2;"
+                          "[10ef140000][10ef150000][10ef140000][10ef150000]";
+
+  for (guint i = 0; i < G_N_ELEMENTS (signatures); i++)
+    for (guint blank = 0; blank < 2; blank++)
+      {
+        Fixture f;
+        Fte3600Identity result;
+
+        fixture_init (&f);
+        f.runtime[0] = f.runtime[1] = blank ? 0xffff : 0;
+        f.awake[0] = f.awake[1] = signatures[i];
+        result = run_success (&f);
+        g_assert_cmpint (result.sensor, ==, sensors[i]);
+        g_assert_cmpint (result.evidence, ==, FTE3600_IDENTITY_RUNTIME_GEOMETRY);
+        g_assert_cmphex (result.response, ==, signatures[i]);
+        g_assert_cmpstr (f.events->str, ==, expected);
+        g_assert_cmpuint (f.resets + f.boot_reads + f.mcu_reads, ==, 0);
+        fixture_clear (&f);
+      }
+}
+
+static void
+test_wake_settle (void)
+{
+  for (guint attempt = 1; attempt <= 6; attempt++)
+    {
+      Fixture f;
+      Fte3600Identity result;
+
+      fixture_init (&f);
+      f.mcu[attempt - 1] = 0xa55a;
+      f.settled[0] = f.settled[1] = 0x5858;
+      result = run_success (&f);
+      g_assert_cmpint (result.sensor, ==, FTE3600_SENSOR_FT9338);
+      g_assert_cmpuint (f.wake_commands, ==, attempt * 2);
+      g_assert_cmpuint (f.mcu_reads, ==, attempt);
+      g_assert_cmpuint (f.awake_reads, ==, 2);
+      g_assert_cmpuint (f.settled_reads, ==, 4);
+      g_assert_cmpuint (f.waits, ==, attempt * 3);
+      g_assert_cmpuint (f.resets + f.boot_reads, ==, 0);
+      g_assert_true (g_str_has_suffix (f.events->str,
+                                       "[10ef20000000]W350;[10ef140000][10ef150000]"
+                                       "[10ef140000][10ef150000]"));
+      fixture_clear (&f);
+    }
+}
+
+static void
+test_wake_rejection (void)
+{
+  const guint16 signatures[][2] = { { 0x1234, 0x1234 }, { 0x00ff, 0x00ff },
+                                    { 0x5858, 0x6060 }, { 0x5858, 0 },
+                                    { 0x6060, 0xffff }, { 0x5858, 0x1234 } };
+
+  for (guint settled = 0; settled < 2; settled++)
+    for (guint i = 0; i < G_N_ELEMENTS (signatures); i++)
+      {
+        Fixture f;
+        g_autoptr(GError) error = NULL;
+
+        fixture_init (&f);
+        if (settled)
+          {
+            f.mcu[0] = 0xa55a;
+            memcpy (f.settled, signatures[i], sizeof f.settled);
+          }
+        else
+          {
+            memcpy (f.awake, signatures[i], sizeof f.awake);
+          }
+        error = run_failure (&f, i < 2 ? G_IO_ERROR_NOT_SUPPORTED : G_IO_ERROR_INVALID_DATA);
+        g_assert_cmpuint (f.wake_commands, ==, 2);
+        g_assert_cmpuint (f.mcu_reads, ==, settled);
+        g_assert_cmpuint (f.resets + f.boot_reads, ==, 0);
+        fixture_clear (&f);
+      }
+}
+
+static void
+test_wake_cancel (void)
+{
+  for (guint variant = 0; variant < 6; variant++)
+    {
+      Fixture f;
+      g_autoptr(GError) error = NULL;
+
+      fixture_init (&f);
+      if (variant == 0)
+        f.cancel_exchange = 4; /* Before the first command. */
+      else if (variant < 3)
+        f.cancel_wake = variant;
+      else
+        f.cancel_wait_ms = variant == 3 ? 5 : variant == 4 ? 2 : 350;
+      f.mcu[0] = 0xa55a;
+      error = run_failure (&f, G_IO_ERROR_CANCELLED);
+      g_assert_cmpuint (f.wake_commands, ==, variant == 0 ? 0 : 2);
+      g_assert_cmpuint (f.resets + f.boot_reads + f.settled_reads, ==, 0);
+      if (variant > 0 && variant < 5)
+        {
+          g_assert_cmpuint (f.awake_reads + f.mcu_reads, ==, 0);
+          g_assert_true (g_str_has_suffix (f.events->str, "[70]W5;[70]W2;"));
+        }
+      fixture_clear (&f);
+    }
+}
+
+static void
+test_wake_settled_blank (void)
+{
+  Fixture f;
+  Fte3600Identity result;
+
+  fixture_init (&f);
+  f.mcu[0] = 0xa55a;
+  result = run_success (&f);
+  g_assert_cmpint (result.evidence, ==, FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP);
+  g_assert_cmpuint (f.wake_commands, ==, 2);
+  g_assert_cmpuint (f.mcu_reads, ==, 1);
+  g_assert_cmpuint (f.settled_reads, ==, 2);
+  g_assert_cmpuint (f.boot_reads, ==, 2);
+  g_assert_nonnull (strstr (f.events->str, "W350;[10ef140000][10ef150000][900000]"));
+  fixture_clear (&f);
+}
+
+static void
 test_boot38_trace (void)
 {
   const gchar *app = "[10ef140000][10ef150000][10ef140000][10ef150000]";
@@ -349,7 +534,19 @@ test_boot38_trace (void)
     {
       Fixture f;
       Fte3600Identity result;
-      g_autofree gchar *expected = g_strconcat (app, round, round, NULL);
+      g_autoptr(GString) expected = g_string_new (app);
+
+      for (guint attempt = 0; attempt < 6; attempt++)
+        {
+          g_string_append (expected, "[70]W5;[70]W2;");
+          if (attempt == 0)
+            g_string_append (expected, "[10ef140000][10ef150000]");
+          g_string_append (expected, "[10ef20000000]");
+          if (attempt < 5)
+            g_string_append (expected, "W5;");
+        }
+      g_string_append (expected, round);
+      g_string_append (expected, round);
 
       fixture_init (&f);
       f.runtime[0] = f.runtime[1] = all_ones ? 0xffff : 0;
@@ -359,7 +556,9 @@ test_boot38_trace (void)
       g_assert_cmpint (result.evidence, ==, FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP);
       g_assert_cmphex (result.response, ==, f.family[0]);
       g_assert_cmphex (result.otp, ==, 0x11);
-      g_assert_cmpstr (f.events->str, ==, expected);
+      g_assert_cmpstr (f.events->str, ==, expected->str);
+      g_assert_cmpuint (f.wake_commands, ==, 12);
+      g_assert_cmpuint (f.mcu_reads, ==, 6);
       g_assert_nonnull (strstr (f.reports->str, "candidate evidence only"));
       fixture_clear (&f);
     }
@@ -480,6 +679,7 @@ static void
 test_preflight (void)
 {
   Fixture f;
+
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f);
@@ -509,7 +709,9 @@ test_cancel (void)
       f.cancel_read = variant == 3;
       error = run_failure (&f, G_IO_ERROR_CANCELLED);
       if (variant == 0)
-        g_assert_cmpuint (f.exchanges + f.resets, ==, 0);
+        {
+          g_assert_cmpuint (f.exchanges + f.resets, ==, 0);
+        }
       else
         {
           g_assert_nonnull (strstr (f.events->str, "R1;W20;R0;"));
@@ -528,11 +730,12 @@ static void
 test_transfer_failure (void)
 {
   Fixture reference;
-  guint exchanges;
+  guint exchanges, first_rom_exchange;
 
   fixture_init (&reference);
   run_success (&reference);
   exchanges = reference.exchanges;
+  first_rom_exchange = reference.first_rom_exchange;
   fixture_clear (&reference);
   /* Fail every transaction, including OTP enable, normal disable and each
    * second-round query. Errors never become a candidate or trigger a retry. */
@@ -546,6 +749,11 @@ test_transfer_failure (void)
       error = run_failure (&f, G_IO_ERROR_FAILED);
       g_assert_nonnull (strstr (error->message, "SPI exchange"));
       g_assert_false (f.otp_active);
+      if (step < first_rom_exchange)
+        {
+          g_assert_cmpuint (f.exchanges, ==, step);
+          g_assert_cmpuint (f.resets + f.boot_reads, ==, 0);
+        }
       fixture_clear (&f);
     }
 }
@@ -573,7 +781,14 @@ test_cleanup_failure (void)
 static void
 test_wait_failure (void)
 {
-  for (guint step = 1; step <= 6; step++)
+  Fixture reference;
+  guint waits;
+
+  fixture_init (&reference);
+  run_success (&reference);
+  waits = reference.waits;
+  fixture_clear (&reference);
+  for (guint step = 1; step <= waits; step++)
     {
       Fixture f;
       g_autoptr(GError) error = NULL;
@@ -590,6 +805,7 @@ static void
 test_callback_contract (void)
 {
   Fixture f;
+
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f);
@@ -607,6 +823,11 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/medion-identify/runtime", test_runtime);
   g_test_add_func ("/medion-identify/runtime-rejection", test_runtime_rejection);
+  g_test_add_func ("/medion-identify/wake/runtime", test_wake_runtime);
+  g_test_add_func ("/medion-identify/wake/settle", test_wake_settle);
+  g_test_add_func ("/medion-identify/wake/rejection", test_wake_rejection);
+  g_test_add_func ("/medion-identify/wake/cancel", test_wake_cancel);
+  g_test_add_func ("/medion-identify/wake/settled-blank", test_wake_settled_blank);
   g_test_add_func ("/medion-identify/boot38-trace", test_boot38_trace);
   g_test_add_func ("/medion-identify/a8", test_a8);
   g_test_add_func ("/medion-identify/unknown-otp", test_unknown_otp);

@@ -59,7 +59,9 @@ typedef struct
   Fte3600MatchInput            input;
   Fte3600Template             *verify_template;
   Fte3600BriskStatus           extract_status;
+  Fte3600IpaStatus             ipa_extract_status;
   Fte3600TemplateStatus        compare_status;
+  Fte3600EngineMode            engine_mode;
   Fte3600TemplateCompareResult comparison;
 } Fte3600VerifyJob;
 #endif
@@ -136,6 +138,20 @@ fte3600_match_input_take (FpiDeviceFte3600  *self,
 }
 
 static void
+fte3600_finish_open_error (FpiDeviceFte3600 *self, GError *error)
+{
+  if (self->spi_fd >= 0)
+    {
+      if (close (self->spi_fd) < 0)
+        fp_warn ("Failed to close FTE3600 SPI device after open failure: %s",
+                 g_strerror (errno));
+      self->spi_fd = -1;
+    }
+  fpi_fte3600_release_transport (self);
+  fpi_device_open_complete (FP_DEVICE (self), error);
+}
+
+static void
 fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
@@ -146,7 +162,12 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       self->idle_verified = FALSE;
       fpi_fte3600_deassert_hardware_reset_best_effort (
         self, "recovering from initialization failure");
-      fte3600_start_reset (self, FTE3600_RESET_FOR_OPEN_ERROR, error);
+      /* A failed RAM recovery has already performed its bounded cleanup.
+       * Its application is unverified; do not send runtime reset commands. */
+      if (self->session_failed)
+        fte3600_finish_open_error (self, error);
+      else
+        fte3600_start_reset (self, FTE3600_RESET_FOR_OPEN_ERROR, error);
       return;
     }
 
@@ -261,6 +282,8 @@ fte3600_enroll_worker (GTask        *task,
 {
   Fte3600EnrollJob *job = task_data;
   Fte3600BriskFeatureSet features = { 0 };
+  Fte3600IpaFeatureSet ipa_features = { 0 };
+  const Fte3600IpaFeatureSet *p_ipa = NULL;
 
   (void) source_object;
   (void) cancellable;
@@ -270,6 +293,12 @@ fte3600_enroll_worker (GTask        *task,
 
   job->extract_status =
     fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
+#if FTE3600_ENABLE_IPA_AUTH
+  if (job->input.profile->sensor == FTE3600_SENSOR_FT9361 &&
+      fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features) == FTE3600_IPA_OK)
+    p_ipa = &ipa_features;
+#endif
+
   fte3600_match_input_clear (&job->input);
   if (g_task_return_error_if_cancelled (task))
     goto out;
@@ -281,8 +310,10 @@ fte3600_enroll_worker (GTask        *task,
     }
   else
     {
-      job->status = fpi_fte3600_template_add_features (job->enroll_template,
-                                                       &features, NULL);
+      job->status = fpi_fte3600_template_add_dual_features (job->enroll_template,
+                                                            &features,
+                                                            p_ipa,
+                                                            NULL);
       if (g_task_return_error_if_cancelled (task))
         goto out;
 
@@ -299,6 +330,7 @@ fte3600_enroll_worker (GTask        *task,
 
 out:
   fpi_fte3600_secure_clear (&features, sizeof (features));
+  fpi_fte3600_secure_clear (&ipa_features, sizeof (ipa_features));
 }
 
 static void
@@ -390,7 +422,7 @@ fte3600_enroll_process (FpiDeviceFte3600 *self,
 
     wire_data = g_bytes_get_data (job->encoded_template, &wire_size);
     if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-        wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
+        wire_size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE)
       {
         fte3600_complete_action_error (
           self, fpi_device_error_new_msg (
@@ -548,7 +580,7 @@ fte3600_verify_get_wire (FpiDeviceFte3600 *self,
   wire_data = g_variant_get_fixed_array (data, &wire_size,
                                          sizeof (*wire_data));
   if (wire_data == NULL || wire_size < FTE3600_TEMPLATE_WIRE_HEADER_SIZE ||
-      wire_size > FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE)
+      wire_size > FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE)
     return fpi_device_error_new_msg (
       FP_DEVICE_ERROR_DATA_INVALID,
       "FTE3600 verification template has an invalid length");
@@ -644,6 +676,8 @@ fte3600_verify_worker (GTask        *task,
 {
   Fte3600VerifyJob *job = task_data;
   Fte3600BriskFeatureSet features = { 0 };
+  Fte3600IpaFeatureSet ipa_features = { 0 };
+  const Fte3600IpaFeatureSet *p_ipa = NULL;
 
   (void) source_object;
   (void) cancellable;
@@ -651,15 +685,53 @@ fte3600_verify_worker (GTask        *task,
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  job->extract_status =
-    fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
+  if (!fpi_fte3600_engine_mode_parse (g_getenv ("FP_FTE3600_MATCHER"),
+                                      &job->engine_mode))
+    {
+      g_task_return_error (task, fpi_device_error_new_msg (
+                             FP_DEVICE_ERROR_NOT_SUPPORTED, "Unknown FTE3600 matcher mode"));
+      goto out;
+    }
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY && !FTE3600_ENABLE_IPA_AUTH)
+    {
+      g_task_return_error (task, fpi_device_error_new_msg (
+                             FP_DEVICE_ERROR_NOT_SUPPORTED,
+                             "IPA authentication requires its separate experimental build opt-in"));
+      goto out;
+    }
+
+  job->extract_status = FTE3600_BRISK_INSUFFICIENT_FEATURES;
+  job->ipa_extract_status = FTE3600_IPA_ERR_TOO_FEW_POINTS;
+
+  if (job->engine_mode != FTE3600_ENGINE_MODE_IPA_ONLY)
+    job->extract_status =
+      fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
+
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
+      job->input.profile->sensor == FTE3600_SENSOR_FT9361)
+    {
+      job->ipa_extract_status =
+        fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features);
+      if (job->ipa_extract_status == FTE3600_IPA_OK)
+        p_ipa = &ipa_features;
+    }
+
   if (g_task_return_error_if_cancelled (task))
     goto out;
 
-  if (job->extract_status == FTE3600_BRISK_OK)
-    job->compare_status = fpi_fte3600_template_compare_features_for_profile (
-      job->verify_template, job->input.profile, &features,
-      FTE3600_TEMPLATE_LOAD_AUTHENTICATION, &job->comparison);
+  if (job->extract_status == FTE3600_BRISK_INVALID_ARGUMENT ||
+      job->ipa_extract_status == FTE3600_IPA_ERR_PARAM)
+    {
+      job->compare_status = FTE3600_TEMPLATE_INVALID_WIRE;
+    }
+  else
+    {
+      job->compare_status = fpi_fte3600_template_compare_with_mode (
+        job->verify_template,
+        job->extract_status == FTE3600_BRISK_OK ? &features : NULL,
+        p_ipa, FTE3600_TEMPLATE_LOAD_AUTHENTICATION,
+        job->engine_mode, &job->comparison);
+    }
 
   if (!g_task_return_error_if_cancelled (task))
     g_task_return_boolean (task, TRUE);
@@ -667,6 +739,7 @@ fte3600_verify_worker (GTask        *task,
 out:
   fte3600_match_input_clear (&job->input);
   fpi_fte3600_secure_clear (&features, sizeof (features));
+  fpi_fte3600_secure_clear (&ipa_features, sizeof (ipa_features));
 }
 
 static void
@@ -720,13 +793,7 @@ fte3600_verify_complete (GObject      *source_object,
       return;
     }
 
-  /* 3. Comparison could not be cleanly executed: check template status or extractor status */
-  if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
-    {
-      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
-      return;
-    }
-
+  /* 3. Check extractor status first for capture quality issues (e.g. low contrast) */
   switch (job->extract_status)
     {
     case FTE3600_BRISK_LOW_CONTRAST:
@@ -747,6 +814,12 @@ fte3600_verify_complete (GObject      *source_object,
 
     case FTE3600_BRISK_OK:
       break;
+    }
+
+  if (job->compare_status == FTE3600_TEMPLATE_RETRY_INSUFFICIENT_FEATURES)
+    {
+      fte3600_verify_report_retry (self, FP_DEVICE_RETRY_CENTER_FINGER);
+      return;
     }
 
   if (job->compare_status != FTE3600_TEMPLATE_OK)
@@ -964,16 +1037,7 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
                    reset_error->message);
           g_clear_error (&reset_error);
         }
-      if (self->spi_fd >= 0)
-        {
-          if (close (self->spi_fd) < 0)
-            fp_warn (
-              "Failed to close FTE3600 SPI device after open failure: %s",
-              g_strerror (errno));
-          self->spi_fd = -1;
-        }
-      fpi_fte3600_release_transport (self);
-      fpi_device_open_complete (dev, operation_error);
+      fte3600_finish_open_error (self, operation_error);
       return;
 
     case FTE3600_RESET_FOR_CLOSE:

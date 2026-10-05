@@ -3,7 +3,8 @@
  */
 #include <stdarg.h>
 
-int medion_cli_main (int argc, char **argv);
+int medion_cli_main (int    argc,
+                     char **argv);
 #define main medion_cli_main
 #include "../examples/fte3600-medion.c"
 #undef main
@@ -13,15 +14,17 @@ enum { MOCK_SPI_FD = 19 };
 typedef struct
 {
   const guint8 *tx;
-  gsize length;
-  guint calls;
-  gint result;
-  gint failure_errno;
+  gsize         length;
+  guint         calls;
+  gint          result;
+  gint          failure_errno;
 } ExchangeMock;
 
 static ExchangeMock exchange_mock;
 
-int __wrap_ioctl (int fd, unsigned long request, ...);
+int __wrap_ioctl (int           fd,
+                  unsigned long request,
+                  ...);
 
 int
 __wrap_ioctl (int fd, unsigned long request, ...)
@@ -68,6 +71,7 @@ test_exchange (gconstpointer data)
   IdentifyIo io = { .device = &device };
   const guint8 tx[] = { 0x10, 0xef, 0x20, 0, 0, 0 };
   guint8 rx[sizeof tx];
+
   g_autoptr(GError) error = NULL;
 
   memset (rx, 0xff, sizeof rx);
@@ -86,6 +90,7 @@ test_transfer_failure (gconstpointer data)
   FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
   IdentifyIo io = { .device = &device };
   const guint8 tx[] = { 0x09, 0xf6, 0xf4, 0 };
+
   g_autoptr(GError) error = NULL;
 
   exchange_mock = (ExchangeMock){
@@ -103,6 +108,7 @@ test_transfer_length_mismatch (gconstpointer data)
   FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
   IdentifyIo io = { .device = &device };
   const guint8 tx[] = { 0x08, 0xf7, 0xf3, 0 };
+
   g_autoptr(GError) error = NULL;
 
   exchange_mock = (ExchangeMock){
@@ -114,12 +120,47 @@ test_transfer_length_mismatch (gconstpointer data)
 }
 
 static void
+test_wake_transfer (void)
+{
+  FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 64 };
+  IdentifyIo io = { .device = &device };
+  const guint8 tx[] = { 0x70 };
+
+  for (gint result = -1; result <= 1; result++)
+    {
+      guint8 rx[sizeof tx];
+      g_autoptr(GError) error = NULL;
+
+      exchange_mock = (ExchangeMock){
+        .tx = tx, .length = sizeof tx, .result = result, .failure_errno = EINTR,
+      };
+      if (result == 1)
+        {
+          g_assert_true (identify_exchange (&io, tx, rx, sizeof tx, &error));
+          g_assert_no_error (error);
+        }
+      else
+        {
+          g_assert_false (identify_exchange (&io, tx, rx, sizeof tx, &error));
+          g_assert_error (error, G_IO_ERROR,
+                          (result == 0 ? G_IO_ERROR_PARTIAL_INPUT : g_io_error_from_errno (EINTR)));
+        }
+      /* A single-byte wake is full duplex too: zero is a short transfer, and
+       * EINTR never replays a command that may already have reached hardware. */
+      g_assert_cmpuint (exchange_mock.calls, ==, 1);
+    }
+}
+
+static void
 test_invalid_request (void)
 {
   FpiDeviceFte3600 device = { .spi_fd = MOCK_SPI_FD, .max_transfer = 4 };
   IdentifyIo io = { .device = &device };
   const guint8 tx[5] = { 0 };
-  const struct { const guint8 *tx; gsize length; } cases[] = {
+
+  const struct { const guint8 *tx;
+                 gsize         length;
+  } cases[] = {
     { NULL, 4 }, { tx, 0 }, { tx, 5 }, { tx, G_MAXSIZE },
   };
 
@@ -137,7 +178,7 @@ test_invalid_request (void)
 typedef struct
 {
   GCancellable *cancellable;
-  guint calls;
+  guint         calls;
 } PendingCancel;
 
 static gboolean
@@ -200,6 +241,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/medion-identify-io/length/zero", GINT_TO_POINTER (0), test_transfer_length_mismatch);
   g_test_add_data_func ("/medion-identify-io/length/short", GINT_TO_POINTER (3), test_transfer_length_mismatch);
   g_test_add_data_func ("/medion-identify-io/length/long", GINT_TO_POINTER (5), test_transfer_length_mismatch);
+  g_test_add_func ("/medion-identify-io/wake-transfer", test_wake_transfer);
   g_test_add_func ("/medion-identify-io/invalid-request", test_invalid_request);
   g_test_add_func ("/medion-identify-io/cancel-dispatch", test_cancel_dispatch);
   g_test_add_func ("/medion-identify-io/wait-finishes-pulse", test_wait_finishes_pulse);

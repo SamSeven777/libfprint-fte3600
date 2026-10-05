@@ -12,19 +12,21 @@
 typedef struct
 {
   const Fte3600MedionIdentifyIo *io;
-  gboolean touched;
-  gboolean otp_pending;
-  gboolean otp_38;
+  gboolean                       touched;
+  gboolean                       otp_pending;
+  gboolean                       otp_38;
 } Diagnostic;
 
 typedef struct
 {
   Fte3600Identity identity;
-  guint8 boot_marker;
-  guint16 family;
+  guint8          boot_marker;
+  guint16         family;
 } Observation;
 
-static void report (Diagnostic *diag, const gchar *format, ...) G_GNUC_PRINTF (2, 3);
+static void report (Diagnostic  *diag,
+                    const gchar *format,
+                    ...) G_GNUC_PRINTF (2, 3);
 
 static void
 report (Diagnostic *diag, const gchar *format, ...)
@@ -196,6 +198,96 @@ register_write (Diagnostic *diag, gboolean boot38, guint8 reg, guint8 value,
 }
 
 static gboolean
+read_geometry (Diagnostic *diag, guint16 *geometry, GError **error)
+{
+  guint8 high, low;
+
+  if (!register_read (diag, TRUE, FALSE, FTE3600_REG_SENSOR_ID_HIGH, &high, error) ||
+      !register_read (diag, TRUE, FALSE, FTE3600_REG_SENSOR_ID_LOW, &low, error))
+    return FALSE;
+  *geometry = ((guint16) high << 8) | low;
+  return TRUE;
+}
+
+/* A positive response must repeat unchanged. A first blank response carries no
+ * identity and may enter the MCU/settle fallback; unknown nonempty data may not
+ * authorize ROM writes. */
+static gboolean
+awake_identity (Diagnostic *diag, Fte3600Identity *identity, GError **error)
+{
+  guint16 first, second;
+
+  if (!read_geometry (diag, &first, error))
+    return FALSE;
+  if (first == 0 || first == 0xffff)
+    return TRUE;
+  *identity = fpi_fte3600_identify_runtime (first >> 8, first & 0xff);
+  if (identity->sensor == FTE3600_SENSOR_UNKNOWN)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "Unknown nonempty awake geometry %04x; no ROM writes attempted", first);
+      return FALSE;
+    }
+  if (!read_geometry (diag, &second, error))
+    return FALSE;
+  if (first != second)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "Awake geometry changed: %04x versus %04x", first, second);
+      return FALSE;
+    }
+  return proceed (diag, error);
+}
+
+static gboolean
+wake_application (Diagnostic *diag, Fte3600Identity *identity, GError **error)
+{
+  guint8 tx[FTE3600_COMMAND_MAX_SIZE], rx[sizeof tx];
+  gsize length;
+
+  for (guint attempt = 0; attempt < FTE3600_LEGACY_WAKE_MAX_ATTEMPTS; attempt++)
+    {
+      if (!proceed (diag, error))
+        return FALSE;
+      report (diag, "legacy software wake attempt %u/%u", attempt + 1,
+              FTE3600_LEGACY_WAKE_MAX_ATTEMPTS);
+      length = fpi_fte3600_build_command (tx, sizeof tx, FTE3600_COMMAND_SOFT_RESET, error);
+      /* Like the normal driver, finish the bounded pair before observing
+       * cancellation. A failed transfer is never retried or followed by ROM. */
+      if (!length || !exchange (diag, tx, rx, length, FALSE, error) ||
+          !delay (diag, FTE3600_SOFT_RESET_INTERVAL_MS, error) ||
+          !exchange (diag, tx, rx, length, FALSE, error) ||
+          !delay (diag, FTE3600_LEGACY_WAKE_REPLY_MS, error) ||
+          !proceed (diag, error))
+        return FALSE;
+      if (attempt == 0)
+        {
+          if (!awake_identity (diag, identity, error))
+            return FALSE;
+          if (identity->sensor != FTE3600_SENSOR_UNKNOWN)
+            return TRUE;
+        }
+
+      length = fpi_fte3600_build_app_read (tx, sizeof tx, FTE3600_REG_MCU_STATUS, 2, error);
+      if (!length || !exchange (diag, tx, rx, length, TRUE, error))
+        return FALSE;
+      report (diag, "app read 20/21 = %02x %02x", rx[FTE3600_REG_RESULT_OFFSET],
+              rx[FTE3600_REG_RESULT_OFFSET + 1]);
+      if (rx[FTE3600_REG_RESULT_OFFSET] == FTE3600_MCU_IDLE_HIGH &&
+          rx[FTE3600_REG_RESULT_OFFSET + 1] == FTE3600_MCU_IDLE_LOW)
+        {
+          if (!proceed (diag, error) || !delay (diag, FTE3600_LEGACY_WAKE_GEOMETRY_MS, error))
+            return FALSE;
+          return awake_identity (diag, identity, error);
+        }
+      if (attempt + 1 < FTE3600_LEGACY_WAKE_MAX_ATTEMPTS &&
+          (!proceed (diag, error) || !delay (diag, FTE3600_LEGACY_WAKE_RETRY_MS, error)))
+        return FALSE;
+    }
+  return proceed (diag, error);
+}
+
+static gboolean
 disable_otp (Diagnostic *diag, gboolean cancellable, GError **error)
 {
   if (!register_write (diag, diag->otp_38, FTE3600_BOOT_REG_OTP_CONTROL, 0,
@@ -348,11 +440,12 @@ rom_round (Diagnostic *diag, Observation *observation, GError **error)
 
 gboolean
 fte3600_medion_identify_legacy (const Fte3600MedionIdentifyIo *io,
-                               Fte3600Identity *result, GError **error)
+                                Fte3600Identity *result, GError **error)
 {
   Diagnostic diag = { .io = io };
   Observation observed[2] = { 0 };
   guint16 runtime[2];
+
   g_autoptr(GError) failure = NULL;
 
   if (result)
@@ -373,14 +466,8 @@ fte3600_medion_identify_legacy (const Fte3600MedionIdentifyIo *io,
 
   report (&diag, "application geometry; no firmware will be loaded");
   for (guint round = 0; round < G_N_ELEMENTS (runtime); round++)
-    {
-      guint8 high, low;
-
-      if (!register_read (&diag, TRUE, FALSE, FTE3600_REG_SENSOR_ID_HIGH, &high, &failure) ||
-          !register_read (&diag, TRUE, FALSE, FTE3600_REG_SENSOR_ID_LOW, &low, &failure))
-        goto out;
-      runtime[round] = ((guint16) high << 8) | low;
-    }
+    if (!read_geometry (&diag, &runtime[round], &failure))
+      goto out;
   if (runtime[0] != runtime[1])
     {
       g_set_error (&failure, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
@@ -400,6 +487,14 @@ fte3600_medion_identify_legacy (const Fte3600MedionIdentifyIo *io,
       g_set_error (&failure, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                    "Unknown nonempty runtime geometry %04x; no ROM writes attempted", runtime[0]);
       goto out;
+    }
+
+  if (!wake_application (&diag, &observed[0].identity, &failure))
+    goto out;
+  if (observed[0].identity.sensor != FTE3600_SENSOR_UNKNOWN)
+    {
+      *result = observed[0].identity;
+      return TRUE;
     }
 
   memset (observed, 0, sizeof observed);
@@ -437,8 +532,8 @@ fte3600_medion_identify_legacy (const Fte3600MedionIdentifyIo *io,
   return TRUE;
 
 out:
-  /* Each ROM round already ran cleanup, even on failure. Application-only
-   * failures did not change hardware and need no reset or OTP write. */
+  /* Each ROM round already ran cleanup, even on failure. Application reads or
+   * software-wake failures must not trigger a GPIO reset or OTP write. */
   if (!failure)
     g_set_error_literal (&failure, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Legacy diagnostic failed without a reported reason");
