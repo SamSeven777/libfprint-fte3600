@@ -8,20 +8,65 @@ hardware observations. Use [installation](install.md) to build and test, and
 is dated; it is not a claim that no newer external report exists.
 
 The current implementation uses ACPI resources and runtime/ROM chip discovery;
-there is no DMI admission table. The current transport has compile and mock-test
-evidence in the [release validation record](validation-release-2026-10-05.md),
-but no physical-device validation in that record.
+there is no DMI admission table. The
+[release validation record](validation-release-2026-10-05.md) records software
+checks. The newer A1 maintainer report and unmodified-main GPD capture report
+below provide limited hardware evidence for the current transport; their
+scope is separate from that earlier record.
 
 The transport migrated from the custom SPI bridge; its details are described in
 [ACPI glue / stock spidev](acpi-spidev.md). ABI 2 supports both GpioInt and
 ordinary ACPI IRQ/Interrupt resources, with a reset GPIO and a separate UIO
 interrupt device. FW9369 final shutdown now masks/acknowledges known events
-and sends C1; FT9368 has the confirmed bounded wake retry. These changes have
-software-test evidence, not a new hardware result. The
+and sends C1; FT9368 has the confirmed bounded wake retry. Hardware evidence
+is limited to the particular devices and actions reported below. The
 [coverage record](windows-lifecycle-coverage.md) distinguishes the implemented
 fixes from remaining lifecycle differences.
 
-## Latest GPD result, checked on 2026-10-04
+## Current hardware reports, checked on 2026-10-05
+
+### One-Netbook A1: maintainer-reported current-main testing
+
+On 2026-10-05, the maintainer reported hardware testing of current main on the
+One-Netbook A1. This establishes a current-transport test report, rather than
+only a result from the earlier DMI/profile implementation. No detailed action
+matrix or measurements accompanied this statement, so it does not establish
+specific cold-start, authentication, power or suspend/resume results. The more
+detailed historical A1 results below retain their original scope.
+
+### GPD Pocket 3: unmodified main capture and close/reopen
+
+In [the October 5 report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5997820414),
+iwansugiarto tested main `7ea5cfc` without a local patch on Omarchy/Arch,
+kernel `7.2.5-3-omarchy`. `CONFIG_UIO=m` and `CONFIG_SPI_SPIDEV=m` were enabled.
+Secure Boot was off and SELinux was absent. The test used temporary spidev
+binding and `insmod`, without installing DKMS, udev rules or the library into
+the system. It therefore validates this manual test path, not a packaged or
+confined-fprintd installation.
+
+The glue reported ABI 2, `ngpio=1`, `status=ready`, `generation=0`,
+`cs_control=1`, `acpi_mode=0`, `irq_active_low=1` and `irq_source=acpi`.
+Two root `img-capture` runs discarded their images to `/dev/null`. Both
+identified FW9369 (raw ID `9362`), selected SPI mode `0x4`, completed
+initialization and baseline calibration, received the finger IRQ, captured,
+closed and exited with status 0. C1 shutdown produced no warning.
+
+Identification took about 15 ms on the first run and 440 ms on reopen. After
+shutdown, rediscovery exhausted six legacy wake pairs on each CS polarity
+(twelve `0x70` pairs in total) before the special-family `0x5a` wake obtained
+an identity. Reopen succeeded, but this extra discovery work remains
+unoptimized.
+
+Close released the host IRQ handler and its entry disappeared from
+`/proc/interrupts`; the earlier closed-device counter increase was no longer
+visible. This is evidence of host IRQ cleanup, not a measurement of sensor
+sleep, physical interrupt output or power consumption. Discarded images do
+not establish image quality. Enrollment, verification, suspend/resume and
+access from confined fprintd were not tested in this report.
+
+<a id="latest-gpd-result-checked-on-2026-10-04"></a>
+
+## Historical GPD result, checked on 2026-10-04
 
 The tester's [resource correction](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987576100)
 and [capture result](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987625692)
@@ -67,8 +112,9 @@ not the older Tiger Lake profile's 179/24; the IRQ interpretation was corrected
 by the newer ordinary-Interrupt report above. These observations apply to the reported board,
 not automatically to every Pocket 3 variant.
 
-**The reported GPD protocol and CS requirements are implemented; the newer
-patched-main test above provides limited physical capture evidence.** Discovery sends the factory's 12-byte ID query,
+**The reported GPD protocol and CS requirements are implemented.** The
+October 4 patched-main and October 5 unmodified-main tests above provide
+capture evidence for their respective transports and revisions. Discovery sends the factory's 12-byte ID query,
 tries both native CS polarities if the controller/glue advertise polarity control,
 and requires two matching
 `9362` responses. The FW9369 backend performs AFE/FDT and image calibration,

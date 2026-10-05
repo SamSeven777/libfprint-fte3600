@@ -10,9 +10,12 @@ is detected at runtime; there is no laptop-model whitelist. The glue is not
 included in the upstream kernel and still requires a trusted module signature
 where Secure Boot requires one.
 
-Capture backends exist for all eight profiles. Physical validation varies by
-device, and reports from older transports do not validate the current one.
-Read the [support and hardware status](docs/fte3600/status.md) before testing.
+Capture backends exist for all eight profiles. On 2026-10-05, the maintainer
+reported current-main hardware testing on One-Netbook A1, and a GPD Pocket 3
+report demonstrated capture and close/reopen on unmodified main `7ea5cfc`.
+These reports do not establish all-device compatibility, image quality or a
+complete authentication/power test matrix. Read the
+[support and hardware status](docs/fte3600/status.md) for their scope before testing.
 
 <a id="build-and-use"></a>
 

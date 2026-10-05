@@ -57,7 +57,9 @@ The experimental transport requires stock `spidev`, kernel UIO support
 libgpiod is not a dependency: userspace uses the GPIO character-device v2 ABI
 for reset and the standard UIO event counter for IRQ notification.
 Follow [ACPI glue and stock spidev](acpi-spidev.md)
-before installing. This transport has not yet been validated on hardware.
+before installing. See [hardware status](status.md#current-hardware-reports-checked-on-2026-10-05)
+for current-main A1 maintainer testing and the GPD capture/reopen report, with
+their exact scope and remaining installation and hardware-test limits.
 Record the exact commit used for the build; older revisions use a different
 custom SPI bridge interface and must follow the migration procedure.
 
