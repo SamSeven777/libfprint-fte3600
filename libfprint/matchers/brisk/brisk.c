@@ -1143,17 +1143,16 @@ static guint
 hamming_distance (const guint8 *first,
                   const guint8 *second)
 {
-  static const guint8 popcount[16] = {
-    0, 1, 1, 2, 1, 2, 2, 3,
-    1, 2, 2, 3, 2, 3, 3, 4,
-  };
   guint distance = 0;
+  guint64 w1, w2;
 
-  for (guint i = 0; i < FPI_BRISK_DESCRIPTOR_BYTES; i++)
+  G_STATIC_ASSERT (FPI_BRISK_DESCRIPTOR_BYTES % sizeof (guint64) == 0);
+
+  for (guint i = 0; i < FPI_BRISK_DESCRIPTOR_BYTES; i += sizeof (guint64))
     {
-      const guint value = first[i] ^ second[i];
-
-      distance += popcount[value & 0x0f] + popcount[value >> 4];
+      memcpy (&w1, first + i, sizeof (w1));
+      memcpy (&w2, second + i, sizeof (w2));
+      distance += (guint) __builtin_popcountll (w1 ^ w2);
     }
 
   return distance;

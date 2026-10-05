@@ -12,3 +12,4 @@
 /* Each of the shared factory's two consecutive C6 helpers permits 31
  * write/delay/read attempts. Exhaustion does not suppress the ID read. */
 #define FTE3600_SPECIAL_MODE_ATTEMPTS 31
+#define FTE3600_SPECIAL_MODE_CONFIG_PASSES 2

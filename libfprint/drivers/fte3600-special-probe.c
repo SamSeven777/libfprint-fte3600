@@ -244,7 +244,7 @@ special_handler (FpiSsm *ssm, FpDevice *dev)
       /* The factory invokes the C6 helper twice before reading the ID and
        * does not use either helper's exhausted-readback result as a gate.
        * Each helper has its own counter; transport errors still fail closed. */
-      if (++data->mode_configurations < 2)
+      if (++data->mode_configurations < FTE3600_SPECIAL_MODE_CONFIG_PASSES)
         {
           data->mode_attempts = 0;
           fpi_ssm_jump_to_state (ssm, SPECIAL_MODE_WRITE);

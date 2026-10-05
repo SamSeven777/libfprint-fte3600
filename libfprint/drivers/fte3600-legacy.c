@@ -951,9 +951,21 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
         fp_image_new (self->sensor->width, self->sensor->height);
       self->captured_image->flags |= FPI_IMAGE_PARTIAL;
 
-      for (gsize i = 0; i < self->image_size; i++)
-        self->captured_image->data[i] =
-          (guint8) ~self->capture_rx[FTE3600_IMAGE_DATA_OFFSET + i];
+      {
+        const guint8 *src = &self->capture_rx[FTE3600_IMAGE_DATA_OFFSET];
+        guint8 *dst = self->captured_image->data;
+        gsize i = 0;
+
+        for (; i + sizeof (guint64) <= self->image_size; i += sizeof (guint64))
+          {
+            guint64 word;
+            memcpy (&word, src + i, sizeof (word));
+            word = ~word;
+            memcpy (dst + i, &word, sizeof (word));
+          }
+        for (; i < self->image_size; i++)
+          dst[i] = (guint8) ~src[i];
+      }
 
       fp_dbg ("Captured FTE3600 image (turnaround %02x %02x)",
               self->capture_rx[6], self->capture_rx[7]);

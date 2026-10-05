@@ -23,13 +23,10 @@ void
 fpi_fte3600_secure_clear (gpointer data,
                           gsize    size)
 {
-  volatile guint8 *bytes = data;
-
-  if (data == NULL)
+  if (data == NULL || size == 0)
     return;
 
-  while (size-- > 0)
-    *bytes++ = 0;
+  explicit_bzero (data, size);
 }
 
 void
