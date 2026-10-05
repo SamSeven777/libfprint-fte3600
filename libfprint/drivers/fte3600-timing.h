@@ -25,6 +25,15 @@
 #define FTE3600_INIT_MCU_POLL_MS 2
 #define FTE3600_INIT_MCU_MAX_ATTEMPTS 20
 
+/* Linux retains the 2 ms post-pair reply wait used by the A1 wake path.
+ * Windows Detect instead reads status immediately after the second 70.
+ * Its six-attempt bound, failed-round interval and idle-to-geometry delay
+ * supply the fallback for an application whose first response stays blank. */
+#define FTE3600_LEGACY_WAKE_REPLY_MS 2
+#define FTE3600_LEGACY_WAKE_MAX_ATTEMPTS 6
+#define FTE3600_LEGACY_WAKE_RETRY_MS 5
+#define FTE3600_LEGACY_WAKE_GEOMETRY_MS 350
+
 /* Linux retry policy. These bounds prevent a stalled device or repeated
  * spurious IRQ from extending an action indefinitely; they are not silicon
  * specifications or build-time feature switches. */

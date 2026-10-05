@@ -3858,6 +3858,66 @@ test_driver_add_timeout_cancelled_timeout (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+typedef struct
+{
+  FpDevice *device;
+  gint64    requested_at;
+  guint     interval_ms;
+  guint     dispatch_count;
+} TimeoutMinimumWaitData;
+
+static void
+test_driver_timeout_minimum_wait_cb (FpDevice *device, gpointer user_data)
+{
+  TimeoutMinimumWaitData *data = user_data;
+
+  g_assert_true (device == data->device);
+  g_assert_cmpint (g_get_monotonic_time (), >=,
+                   data->requested_at + data->interval_ms * (gint64) 1000);
+  data->dispatch_count++;
+}
+
+static gboolean
+test_driver_timeout_after_synchronous_work (gpointer user_data)
+{
+  TimeoutMinimumWaitData *data = user_data;
+  GSource *source;
+
+  /* A driver can finish synchronous I/O long after this dispatch's cached
+   * time. The following minimum delay must begin after that I/O completes. */
+  g_source_get_time (g_main_current_source ());
+  g_usleep (40000);
+  data->requested_at = g_get_monotonic_time ();
+  source = fpi_device_add_timeout (data->device, data->interval_ms,
+                                   test_driver_timeout_minimum_wait_cb,
+                                   data, NULL);
+
+  /* Check the deadline as well as dispatch time, so a loaded test machine
+   * cannot hide an incorrectly shortened timeout by running its callback late. */
+  g_assert_cmpint (g_source_get_ready_time (source), >=,
+                   data->requested_at + data->interval_ms * (gint64) 1000);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+test_driver_add_timeout_minimum_wait (void)
+{
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(GSource) source = g_idle_source_new ();
+  TimeoutMinimumWaitData data = { .device = device, .interval_ms = 20 };
+
+  g_main_context_push_thread_default (context);
+  g_source_set_callback (source, test_driver_timeout_after_synchronous_work,
+                         &data, NULL);
+  g_source_attach (source, context);
+  while (!data.dispatch_count)
+    g_main_context_iteration (context, TRUE);
+  g_assert_cmpuint (data.dispatch_count, ==, 1);
+  g_main_context_pop_thread_default (context);
+}
+
 static void
 test_driver_add_timeout_cancelled (void)
 {
@@ -4187,6 +4247,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/driver/action_error/fail", test_driver_action_error_fallback_all);
 
   g_test_add_func ("/driver/timeout", test_driver_add_timeout);
+  g_test_add_func ("/driver/timeout/minimum-wait", test_driver_add_timeout_minimum_wait);
   g_test_add_func ("/driver/timeout/cancelled", test_driver_add_timeout_cancelled);
 
   g_test_add_func ("/driver/error_types", test_driver_error_types);

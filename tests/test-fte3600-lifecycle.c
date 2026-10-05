@@ -31,6 +31,7 @@
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
 #include "drivers/fte3600-template.h"
+#include "drivers/fte3600-ipa.h"
 #include "fte3600-test-image.h"
 #endif
 
@@ -104,6 +105,31 @@ typedef struct
 
 static const ProbeFixture *probe_fixture;
 static gboolean boot38_fixture;
+static gboolean wake_fixture;
+static gboolean stale_wake_fixture;
+
+typedef enum {
+  LEGACY_WAKE_OK,
+  LEGACY_WAKE_IO_ERROR,
+  LEGACY_WAKE_SHORT,
+  LEGACY_WAKE_CANCEL,
+  LEGACY_WAKE_UNKNOWN,
+  LEGACY_WAKE_UNSTABLE,
+  LEGACY_WAKE_EXHAUSTED,
+} LegacyWakeFault;
+
+typedef struct
+{
+  const gchar    *name;
+  guint           model;
+  gboolean        required_high;
+  gboolean        cs_control;
+  guint           ready_attempt;
+  LegacyWakeFault fault;
+  guint           fault_command;
+} LegacyWakeFixture;
+
+static const LegacyWakeFixture *legacy_wake_fixture;
 
 static struct
 {
@@ -118,6 +144,18 @@ static struct
   guint            special_resets;
   guint8           special_mode;
   gboolean         special_wake;
+  guint            wake_commands[2];
+  guint            wake_status_reads[2];
+  guint            wake_early_geometry_reads[2];
+  guint            wake_geometry_reads;
+  guint            sleeping_geometry_reads;
+  guint            resets_before_wake;
+  guint            wake_rom_queries;
+  gint64           wake_command_time[2];
+  gint64           wake_status_time[2];
+  gint64           wake_ready_time;
+  guint8           wake_previous_opcode;
+  gboolean         wake_fault_injected;
   gboolean         probe_started;
   guint            ioctl_count;
   guint            mode_writes;
@@ -147,6 +185,15 @@ static struct
   guint            claims;
   guint            releases;
   guint            resets;
+  gboolean         inactive;
+  guint            inactive_wake_commands;
+  gint64           wake_first;
+  gint64           wake_last;
+  guint            awake_id_reads;
+  guint            fail_wake_at;
+  gboolean         cancel_wake;
+  gboolean         unstable_wake;
+  guint            discovery_wakes;
   guint            hardware_asserts;
   guint            hardware_deasserts;
   guint            images;
@@ -319,6 +366,150 @@ __wrap_g_unix_fd_source_new (gint fd, GIOCondition condition)
   return __real_g_unix_fd_source_new (fd, condition);
 }
 
+/* The fake only exposes geometry after this chip's actual wake handshake.
+ * It never borrows production timing constants or returns an identity merely
+ * because the driver's state machine expects one. */
+static int
+sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
+{
+  const LegacyWakeFixture *fixture = legacy_wake_fixture;
+  gboolean high = !!(sensor.spi_mode & SPI_CS_HIGH);
+  gboolean selected = high == fixture->required_high;
+  guint8 previous = sensor.wake_previous_opcode;
+  gint64 now = g_get_monotonic_time ();
+
+  if (sensor.wake_fault_injected)
+    {
+      /* Cancellation cannot split the two-command wake handshake. Nothing
+       * after its final command may reach the transport. */
+      g_assert_cmpint (fixture->fault, ==, LEGACY_WAKE_CANCEL);
+      g_assert_cmpuint (tx[0], ==, 0x70);
+      g_assert_cmpuint (sensor.wake_commands[high] % 2, ==, 1);
+    }
+  sensor.wake_previous_opcode = tx[0];
+  if (rx)
+    memset (rx, 0, length);
+  switch (tx[0])
+    {
+    case 0x70:
+      g_assert_cmpuint (length, ==, 1);
+      if (!sensor.wake_commands[0] && !sensor.wake_commands[1])
+        sensor.resets_before_wake = sensor.hardware_asserts;
+      sensor.wake_commands[high]++;
+      g_assert_cmpuint (sensor.wake_commands[high], <=, 12);
+      if (sensor.wake_commands[high] % 2 == 0)
+        {
+          g_assert_cmpuint (previous, ==, 0x70);
+          g_assert_cmpint (now - sensor.wake_command_time[high], >=, 5000);
+        }
+      else if (sensor.wake_commands[high] > 1)
+        {
+          g_assert_cmpuint (previous, ==, 0x10);
+          g_assert_cmpint (now - sensor.wake_status_time[high], >=, 5000);
+        }
+      sensor.wake_command_time[high] = now;
+      if (selected && sensor.wake_commands[high] == fixture->fault_command)
+        {
+          sensor.wake_fault_injected = TRUE;
+          if (fixture->fault == LEGACY_WAKE_CANCEL)
+            {
+              g_cancellable_cancel (sensor.cancellable);
+            }
+          else if (fixture->fault == LEGACY_WAKE_SHORT)
+            {
+              return length - 1;
+            }
+          else
+            {
+              g_assert_cmpint (fixture->fault, ==, LEGACY_WAKE_IO_ERROR);
+              errno = EIO;
+              return -1;
+            }
+        }
+      return length;
+
+    case 0x10:
+      g_assert_nonnull (rx);
+      if (tx[2] == 0x20)
+        {
+          g_assert_cmpuint (length, ==, 6);
+          g_assert_cmpuint (previous, ==, sensor.wake_status_reads[high] ? 0x70 : 0x10);
+          if (!sensor.wake_status_reads[high])
+            g_assert_cmpuint (sensor.wake_early_geometry_reads[high], ==, 2);
+          g_assert_cmpint (now - sensor.wake_command_time[high], >=, 2000);
+          g_assert_cmpuint (sensor.wake_commands[high], ==, 2 * (sensor.wake_status_reads[high] + 1));
+          sensor.wake_status_reads[high]++;
+          sensor.wake_status_time[high] = now;
+          if (selected && fixture->fault != LEGACY_WAKE_EXHAUSTED &&
+              sensor.wake_status_reads[high] >= fixture->ready_attempt)
+            {
+              rx[4] = 0xa5;
+              rx[5] = 0x5a;
+              sensor.wake_ready_time = now;
+            }
+        }
+      else
+        {
+          g_assert_true (tx[2] == 0x14 || tx[2] == 0x15);
+          g_assert_cmpuint (length, ==, 5);
+          if (selected && sensor.wake_ready_time)
+            {
+              g_assert_cmpint (now - sensor.wake_ready_time, >=, 350000);
+              sensor.wake_geometry_reads++;
+              g_assert_cmpuint (tx[2], ==, sensor.wake_geometry_reads % 2 ? 0x14 : 0x15);
+              rx[4] = tx[2] == 0x14 ? sensor.model->width : sensor.model->height;
+              if (fixture->fault == LEGACY_WAKE_UNSTABLE && sensor.wake_geometry_reads > 2)
+                rx[4] = 0x7f;
+            }
+          else if (sensor.wake_commands[high])
+            {
+              /* The immediate A1 fast path must remain blank for a sensor
+               * which needs MCU readiness and the later settling interval. */
+              g_assert_cmpuint (sensor.wake_commands[high], ==, 2);
+              g_assert_cmpint (now - sensor.wake_command_time[high], >=, 2000);
+              sensor.wake_early_geometry_reads[high]++;
+              g_assert_cmpuint (sensor.wake_early_geometry_reads[high], <=, 2);
+              g_assert_cmpuint (tx[2], ==, sensor.wake_early_geometry_reads[high] % 2 ? 0x14 : 0x15);
+              if (selected && fixture->fault == LEGACY_WAKE_UNKNOWN)
+                {
+                  sensor.wake_geometry_reads++;
+                  rx[4] = 0x7f;
+                }
+            }
+          else
+            {
+              sensor.sleeping_geometry_reads++;
+            }
+        }
+      return length;
+
+    case 0x90:
+      /* Only a deliberately exhausted wake test may reach ROM. Fail its
+       * first read so the test cannot accidentally obtain a ROM identity. */
+      g_assert_cmpint (fixture->fault, ==, LEGACY_WAKE_EXHAUSTED);
+      sensor.wake_rom_queries++;
+      errno = EIO;
+      return -1;
+
+    case 0xff:
+    case 0x91:
+    case 0x5a:
+    case 0xa5:
+    case 0xc0:
+    case 0x08:
+    case 0x09:
+    case 0x04:
+      /* Other application/factory protocols do not identify this device. */
+      if (sensor.wake_commands[0] || sensor.wake_commands[1])
+        g_assert_true (fixture->fault == LEGACY_WAKE_UNKNOWN ||
+                       fixture->fault == LEGACY_WAKE_EXHAUSTED);
+      return length;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
 int
 __wrap_ioctl (int fd, unsigned long operation, ...)
 {
@@ -347,7 +538,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         .speed_hz = FTE3600_SPI_SPEED_HZ,
         .bits_per_word = 8,
         .mode = sensor.bad_mode ? SPI_MODE_3 : sensor.spi_mode,
-        .capabilities = probe_fixture && probe_fixture->cs_control ? FTE3600_BRIDGE_CAP_CS_POLARITY : 0,
+        .capabilities = ((probe_fixture && probe_fixture->cs_control) ||
+                         (legacy_wake_fixture && legacy_wake_fixture->cs_control)) ? FTE3600_BRIDGE_CAP_CS_POLARITY : 0,
       };
       return 0;
     }
@@ -355,11 +547,11 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     return set_reset (*(guint32 *) argument);
   if (operation == FTE3600_IOC_SET_CS_POLARITY)
     {
-      g_assert_nonnull (probe_fixture);
-      g_assert_true (probe_fixture->cs_control);
+      g_assert_true ((probe_fixture && probe_fixture->cs_control) ||
+                     (legacy_wake_fixture && legacy_wake_fixture->cs_control));
       g_assert_cmpuint (*(guint32 *) argument, <=, 1);
       sensor.cs_changes++;
-      if (probe_fixture->fail_cs)
+      if (probe_fixture && probe_fixture->fail_cs)
         {
           errno = EIO;
           return -1;
@@ -390,6 +582,14 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     sensor.special_wake = TRUE;
   if (tx[0] == 0x90)
     sensor.probe_started = TRUE;
+  if (probe_fixture && tx[0] == 0x70)
+    sensor.resets++;
+  if (legacy_wake_fixture)
+    {
+      result = sleeping_legacy_transfer (tx, rx, transfer->len);
+      g_mutex_unlock (&sensor.lock);
+      return result;
+    }
   if (probe_fixture)
     {
       guint16 id = probe_fixture->id;
@@ -465,10 +665,35 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       break;
 
     case 0x70:
+      /* ROM fixtures have no running application. A failed special-family
+       * negotiation may pulse GPIO reset, but its cleanup must not fabricate
+       * application readiness before the intended ROM identification. */
+      if (sensor.rom_probe && !sensor.probe_started)
+        {
+          sensor.discovery_wakes++;
+          g_assert_cmpuint (sensor.discovery_wakes, <=, 12);
+          break;
+        }
       {
         gint64 when = g_get_monotonic_time ();
 
         g_array_append_val (sensor.soft_reset_times, when);
+        if (sensor.inactive)
+          {
+            sensor.inactive_wake_commands++;
+            if (sensor.inactive_wake_commands == 1)
+              sensor.wake_first = when;
+            else
+              g_assert_cmpint (when - sensor.wake_first, >=, 5000);
+            sensor.wake_last = when;
+            if (sensor.cancel_wake)
+              g_cancellable_cancel (sensor.cancellable);
+            if (sensor.fail_wake_at == sensor.inactive_wake_commands)
+              {
+                result = -1;
+                break;
+              }
+          }
       }
       sensor.resets++;
       sensor.armed = FALSE;
@@ -504,9 +729,31 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     case 0x10:
       g_assert_nonnull (rx);
       memset (rx, 0, transfer->len);
+      if (sensor.inactive)
+        {
+          if (sensor.inactive_wake_commands < 2)
+            {
+              if (stale_wake_fixture)
+                memset (rx, 1, transfer->len);
+              break;
+            }
+          g_assert_cmpint (g_get_monotonic_time () - sensor.wake_last, >=, 2000);
+          sensor.inactive = FALSE;
+        }
+      if (wake_fixture && (tx[2] == FT9361_REG_SENSOR_ID_HIGH || tx[2] == FT9361_REG_SENSOR_ID_LOW))
+        {
+          sensor.awake_id_reads++;
+          if (sensor.unstable_wake && sensor.awake_id_reads > 2)
+            break;
+        }
       if (tx[2] == FT9361_REG_MCU_STATUS)
         {
-          if (sensor.cleanup_started && sensor.fail_cleanup_status)
+          if (sensor.rom_probe && !sensor.probe_started)
+            {
+              /* Keep the six wake attempts unready. Only the separate ROM
+               * scenario can make its application available later. */
+            }
+          else if (sensor.cleanup_started && sensor.fail_cleanup_status)
             {
               if (sensor.fail_cleanup_status == 2)
                 result = -1;
@@ -654,6 +901,7 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   sensor.otp = sensor.model->otp;
   sensor.spi_fd = -1;
   sensor.firmware_fd = -1;
+  sensor.inactive = wake_fixture;
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
   sensor.registers[FT9361_REG_FW_VERSION] = sensor.model->firmware_version;
@@ -678,7 +926,8 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   device = g_object_new (fpi_device_fte3600_get_type (),
                          "fpi-udev-data-spidev", "/mock/fte3600-spi", NULL);
   g_async_initable_init_async (G_ASYNC_INITABLE (device), G_PRIORITY_DEFAULT,
-                               NULL, init_complete, &initialized);
+                               legacy_wake_fixture ? sensor.cancellable : NULL,
+                               init_complete, &initialized);
   while (!initialized.complete)
     g_main_context_iteration (NULL, TRUE);
   if (initialized.error)
@@ -737,6 +986,83 @@ finish_device (FpDevice *device)
   g_mutex_clear (&sensor.lock);
   probe_fixture = NULL;
   boot38_fixture = FALSE;
+  legacy_wake_fixture = NULL;
+}
+
+static void
+test_sleeping_legacy_discovery (gconstpointer data)
+{
+  const LegacyWakeFixture *fixture = data;
+
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+  guint expected_commands = fixture->fault == LEGACY_WAKE_CANCEL ? 2 :
+                            fixture->fault_command ? fixture->fault_command :
+                            fixture->fault == LEGACY_WAKE_EXHAUSTED ? 12 : 2 * fixture->ready_attempt;
+
+  legacy_wake_fixture = fixture;
+  device = new_device_for_model_checked (fixture->model, FTE3600_BRIDGE_MAX_TRANSFER, &error);
+  switch (fixture->fault)
+    {
+    case LEGACY_WAKE_OK:
+      g_assert_no_error (error);
+      g_assert_nonnull (strstr (fp_device_get_name (device), models[fixture->model].name));
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 4);
+      g_assert_cmpuint (sensor.spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
+      break;
+
+    case LEGACY_WAKE_UNKNOWN:
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 2);
+      break;
+
+    case LEGACY_WAKE_UNSTABLE:
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 4);
+      break;
+
+    case LEGACY_WAKE_IO_ERROR:
+    case LEGACY_WAKE_EXHAUSTED:
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 0);
+      break;
+
+    case LEGACY_WAKE_SHORT:
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 0);
+      break;
+
+    case LEGACY_WAKE_CANCEL:
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+      g_assert_cmpuint (sensor.wake_geometry_reads, ==, 0);
+      break;
+    }
+  if (fixture->fault != LEGACY_WAKE_OK)
+    g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+  g_assert_cmpuint (sensor.wake_commands[fixture->required_high], ==, expected_commands);
+  g_assert_cmpuint (sensor.wake_commands[!fixture->required_high], ==,
+                    fixture->required_high || (fixture->cs_control && fixture->fault == LEGACY_WAKE_EXHAUSTED) ? 12 : 0);
+  g_assert_cmpuint (sensor.wake_status_reads[fixture->required_high], ==,
+                    fixture->fault_command || fixture->fault == LEGACY_WAKE_UNKNOWN ? 0 : expected_commands / 2);
+  g_assert_cmpuint (sensor.sleeping_geometry_reads, ==, fixture->cs_control ? 4 : 2);
+  g_assert_cmpuint (sensor.wake_early_geometry_reads[fixture->required_high], ==,
+                    fixture->fault_command ? 0 : 2);
+  g_assert_cmpuint (sensor.wake_early_geometry_reads[!fixture->required_high], ==,
+                    fixture->required_high || (fixture->cs_control && fixture->fault == LEGACY_WAKE_EXHAUSTED) ? 2 : 0);
+  if (fixture->fault == LEGACY_WAKE_CANCEL)
+    g_assert_cmpint (g_get_monotonic_time () - sensor.wake_command_time[fixture->required_high], >=, 2000);
+  g_assert_cmpuint (sensor.wake_rom_queries, ==, fixture->fault == LEGACY_WAKE_EXHAUSTED ? 1 : 0);
+  /* Wake runs before the factory-mode negotiation. Only an unknown or fully
+   * exhausted application can reach that later negotiation and its cleanup. */
+  g_assert_cmpuint (sensor.resets_before_wake, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==,
+                    fixture->fault == LEGACY_WAKE_UNKNOWN || fixture->fault == LEGACY_WAKE_EXHAUSTED ?
+                    (fixture->cs_control ? 2 : 1) : 0);
+  g_assert_cmpuint (sensor.hardware_deasserts, ==, sensor.hardware_asserts);
+  g_assert_false (sensor.reset_asserted);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_cmpuint (sensor.images, ==, 0);
+  finish_device (device);
 }
 
 static void
@@ -777,7 +1103,8 @@ test_special_discovery (gconstpointer data)
       g_assert_no_error (error);
       g_assert_nonnull (strstr (fp_device_get_name (device), fixture->name));
       g_assert_cmpuint (sensor.special_reads, ==, 2);
-      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 3 : 1) : 0);
+      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 5 : 1) : 0);
+      g_assert_cmpuint (sensor.resets, ==, fixture->mode_required ? (fixture->cs_control ? 24 : 12) : 0);
       g_assert_cmpuint (sensor.spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
       g_assert_true (fp_device_has_feature (device, FP_DEVICE_FEATURE_CAPTURE));
       g_assert_cmpint (fp_device_has_feature (device, FP_DEVICE_FEATURE_VERIFY), ==,
@@ -814,6 +1141,64 @@ open_device (FpDevice *device)
   g_assert_true (fp_device_open_sync (device, NULL, &error));
   g_assert_no_error (error);
   g_assert_true (fp_device_is_open (device));
+}
+
+static void
+test_inactive_discovery (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  wake_fixture = TRUE;
+  stale_wake_fixture = scenario == 5;
+  device = new_device_checked (&error);
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (fp_device_get_name (device), "FT9361"));
+  g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+  g_assert_cmpuint (sensor.awake_id_reads, ==, 4);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+
+  /* Enumeration's successful identity must not hide an inactive device at
+   * the next open, nor make a failed/unstable wake authorize ROM recovery. */
+  sensor.inactive = TRUE;
+  sensor.inactive_wake_commands = 0;
+  sensor.awake_id_reads = 0;
+  sensor.fail_wake_at = scenario == 1 ? 1 : scenario == 2 ? 2 : 0;
+  sensor.unstable_wake = scenario == 3;
+  sensor.cancel_wake = scenario == 4;
+  if (scenario == 0 || scenario == 5)
+    {
+      open_device (device);
+      g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      sensor.inactive = TRUE;
+      sensor.inactive_wake_commands = 0;
+      sensor.awake_id_reads = 0;
+      open_device (device);
+      g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+    }
+  else
+    {
+      g_assert_false (fp_device_open_sync (device, sensor.cancellable, &error));
+      g_assert_nonnull (error);
+      if (scenario == 3)
+        g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      if (scenario == 4)
+        {
+          g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+          g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+        }
+      g_assert_false (fp_device_is_open (device));
+    }
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_false (sensor.probe_started);
+  finish_device (device);
+  wake_fixture = FALSE;
+  stale_wake_fixture = FALSE;
 }
 
 static void
@@ -1228,10 +1613,12 @@ test_rom_discovery (gconstpointer data)
         g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
       else
         g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+      /* Application wake is counted separately from backend resets. */
       g_assert_cmpuint (sensor.resets, ==, 0);
     }
   g_assert_false (sensor.otp_enabled);
   g_assert_false (sensor.reset_asserted);
+  g_assert_cmpuint (sensor.discovery_wakes, ==, 12);
   g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 4 ? 2 : 1);
   g_assert_cmpuint (sensor.hardware_deasserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 4 ? 2 : 1);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -1455,6 +1842,10 @@ test_enroll_verify_images (gconstpointer fixture)
   for (guint i = 0; i < FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES; i++)
     {
       Fte3600BriskFeatureSet features;
+      const Fte3600IpaFeatureSet *p_ipa = NULL;
+#if FTE3600_ENABLE_IPA_AUTH
+      Fte3600IpaFeatureSet ipa_features;
+#endif
       guint8 *frame = frames + i * image_size;
       const FpiBriskImage view = { frame, image_size, profile->width, profile->height, profile->width };
 
@@ -1471,7 +1862,12 @@ test_enroll_verify_images (gconstpointer fixture)
         }
       g_assert_cmpint (fpi_fte3600_brisk_extract_for_profile (profile, &view,
                                                               &features), ==, FTE3600_BRISK_OK);
-      g_assert_cmpint (fpi_fte3600_template_add_features (expected, &features, NULL), ==,
+#if FTE3600_ENABLE_IPA_AUTH
+      if (profile->sensor == FTE3600_SENSOR_FT9361 &&
+          fpi_fte3600_ipa_extract (view.data, view.length, &ipa_features) == FTE3600_IPA_OK)
+        p_ipa = &ipa_features;
+#endif
+      g_assert_cmpint (fpi_fte3600_template_add_dual_features (expected, &features, p_ipa, NULL), ==,
                        i + 1 == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES ? FTE3600_TEMPLATE_OK :
                        FTE3600_TEMPLATE_NEED_MORE_SAMPLES);
     }
@@ -1564,7 +1960,9 @@ test_open_error (gconstpointer data)
   if (sensor.bad_id)
     {
       g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (sensor.resets, ==, 0);
+      g_assert_cmpuint (sensor.resets, ==, 2);
+      g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+      g_assert_false (sensor.probe_started);
     }
 
   sensor.fail_config = sensor.fail_claim = sensor.bad_id = FALSE;
@@ -1577,6 +1975,25 @@ test_open_error (gconstpointer data)
 int
 main (int argc, char **argv)
 {
+  static const LegacyWakeFixture sleeping[] = {
+    { .name = "FT9361-original", .model = 0, .ready_attempt = 1 },
+    { .name = "FT9361-alternate", .model = 0, .ready_attempt = 1, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "FT9348-original", .model = 1, .ready_attempt = 2 },
+    { .name = "FT9348-alternate", .model = 1, .ready_attempt = 2, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "FT9338-original", .model = 2, .ready_attempt = 3 },
+    { .name = "FT9338-alternate", .model = 2, .ready_attempt = 3, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "FT9536-sixth-attempt", .model = 3, .ready_attempt = 6 },
+    { .name = "FT9536-alternate-sixth-attempt", .model = 3, .ready_attempt = 6, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "first-wake-error", .fault = LEGACY_WAKE_IO_ERROR, .fault_command = 1 },
+    { .name = "second-wake-error", .fault = LEGACY_WAKE_IO_ERROR, .fault_command = 2 },
+    { .name = "alternate-wake-short", .fault = LEGACY_WAKE_SHORT, .fault_command = 2, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "first-wake-cancel", .fault = LEGACY_WAKE_CANCEL, .fault_command = 1 },
+    { .name = "alternate-second-wake-cancel", .fault = LEGACY_WAKE_CANCEL, .fault_command = 2, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "unknown-geometry", .ready_attempt = 1, .fault = LEGACY_WAKE_UNKNOWN },
+    { .name = "unstable-geometry", .ready_attempt = 1, .fault = LEGACY_WAKE_UNSTABLE },
+    { .name = "six-attempts-exhausted", .fault = LEGACY_WAKE_EXHAUSTED },
+    { .name = "both-polarities-exhausted", .fault = LEGACY_WAKE_EXHAUSTED, .cs_control = TRUE },
+  };
   static const ProbeFixture probes[] = {
     { .name = "FT9369", .id = 0x9362, .required_high = TRUE, .cs_control = TRUE, .success = TRUE },
     { .name = "FT9365", .id = 0x9365, .success = TRUE },
@@ -1599,6 +2016,11 @@ main (int argc, char **argv)
   };
 
   g_test_init (&argc, &argv, NULL);
+  for (guint i = 0; i < G_N_ELEMENTS (sleeping); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/sleeping/%s", sleeping[i].name);
+      g_test_add_data_func (path, &sleeping[i], test_sleeping_legacy_discovery);
+    }
   g_test_add_func ("/fte3600-lifecycle/discovery/FT9536-cold-boot-a", test_boot38_cold_enumeration);
   for (guint i = 0; i < G_N_ELEMENTS (probes); i++)
     {
@@ -1658,6 +2080,11 @@ main (int argc, char **argv)
     {
       g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/rom-%u", scenario);
       g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_rom_discovery);
+    }
+  for (guint scenario = 0; scenario < 6; scenario++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-lifecycle/discovery/inactive-%u", scenario);
+      g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_inactive_discovery);
     }
   for (guint scenario = 0; scenario < 4; scenario++)
     {

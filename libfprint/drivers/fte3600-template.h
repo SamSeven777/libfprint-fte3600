@@ -10,6 +10,7 @@
 #include <glib.h>
 
 #include "fte3600-brisk.h"
+#include "fte3600-ipa.h"
 
 G_BEGIN_DECLS
 
@@ -22,16 +23,25 @@ G_BEGIN_DECLS
  * for twelve maximum-sized records for safe future parsing, while v1/v2
  * strictly require eight and cannot exceed CURRENT_MAX_WIRE_SIZE. Wire v2
  * preserves this layout, requires a registered model/geometry pair, and uses
- * the final reserved u32 as the image-processing revision. */
+ * the final reserved u32 as the image-processing revision.
+ * Wire v3 uses a 48-byte header and dual-engine container storing both
+ * BRISK and 2D-IPA features with Grand Synergy v3 fusion policy. */
 #define FTE3600_TEMPLATE_WIRE_VERSION 1
 #define FTE3600_TEMPLATE_PROFILE_WIRE_VERSION 2
+#define FTE3600_TEMPLATE_WIRE_VERSION_V3 3
 #define FTE3600_TEMPLATE_WIRE_HEADER_SIZE 40
+#define FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE 48
+#define FTE3600_TEMPLATE_FUSION_POLICY_VERSION 3
 #define FTE3600_TEMPLATE_FEATURE_RECORD_SIZE 44
+#define FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE 8
+#define FTE3600_TEMPLATE_IPA_FEATURE_RECORD_SIZE 140
 #define FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES 8
 #define FTE3600_TEMPLATE_MIN_PHYSICAL_FEATURES 11
 #define FTE3600_TEMPLATE_MAX_ORIENTATIONS_PER_LOCATION 36
 #define FTE3600_TEMPLATE_MAX_WIRE_SIZE 84616
 #define FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE 56424
+#define FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE 101296
+#define FTE3600_TEMPLATE_V3_MAX_WIRE_SIZE 151920
 
 typedef enum {
   FTE3600_TEMPLATE_OK,
@@ -54,6 +64,15 @@ typedef enum {
 
 typedef struct _Fte3600Template Fte3600Template;
 
+typedef enum {
+  FTE3600_ENGINE_MODE_BRISK_ONLY  = 0,
+  FTE3600_ENGINE_MODE_IPA_ONLY    = 1,
+  FTE3600_ENGINE_MODE_DUAL_FUSION = 2,
+} Fte3600EngineMode;
+
+gboolean fpi_fte3600_engine_mode_parse (const gchar       *value,
+                                        Fte3600EngineMode *mode);
+
 #define FTE3600_TEMPLATE_SUBTEMPLATE_NONE G_MAXUINT
 #define FTE3600_TEMPLATE_SUBTEMPLATE_MOSAIC (G_MAXUINT - 1)
 
@@ -63,7 +82,11 @@ typedef struct
   guint                   diagnostic_passes;
   guint                   best_subtemplate; /* Index, MOSAIC, or NONE. */
   Fte3600BriskMatchResult best;
+  Fte3600IpaMatchResult   best_ipa;
+  gboolean                brisk_accepted;
+  gboolean                ipa_accepted;
   gboolean                authentication_accepted;
+  Fte3600EngineMode       engine_mode;
 } Fte3600TemplateCompareResult;
 
 /* Template operations that inspect floating-point feature fields temporarily
@@ -117,6 +140,29 @@ Fte3600TemplateStatus fpi_fte3600_template_compare_features_for_profile (const F
                                                                          const Fte3600BriskFeatureSet *query,
                                                                          Fte3600TemplateLoadPurpose    purpose,
                                                                          Fte3600TemplateCompareResult *result);
+
+Fte3600TemplateStatus fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
+                                                              const Fte3600BriskFeatureSet *brisk_features,
+                                                              const Fte3600IpaFeatureSet   *ipa_features,
+                                                              Fte3600BriskMatchResult      *nearest_match);
+
+Fte3600TemplateStatus fpi_fte3600_template_compare_with_mode (const Fte3600Template        *templ,
+                                                              const Fte3600BriskFeatureSet *query_brisk,
+                                                              const Fte3600IpaFeatureSet   *query_ipa,
+                                                              Fte3600TemplateLoadPurpose    purpose,
+                                                              Fte3600EngineMode             mode,
+                                                              Fte3600TemplateCompareResult *result);
+
+Fte3600TemplateStatus fpi_fte3600_template_compare_dual_features (const Fte3600Template        *templ,
+                                                                  const Fte3600BriskFeatureSet *query_brisk,
+                                                                  const Fte3600IpaFeatureSet   *query_ipa,
+                                                                  Fte3600TemplateLoadPurpose    purpose,
+                                                                  Fte3600TemplateCompareResult *result);
+
+Fte3600TemplateStatus fpi_fte3600_template_compare_ipa_features (const Fte3600Template        *templ,
+                                                                 const Fte3600IpaFeatureSet   *query_ipa,
+                                                                 Fte3600TemplateLoadPurpose    purpose,
+                                                                 Fte3600TemplateCompareResult *result);
 
 /* The mosaic is reconstructed in canonical order when enrollment completes.
  * Returns a borrowed reference, or NULL before completion/without a mosaic. */

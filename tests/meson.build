@@ -455,6 +455,14 @@ if 'fte3600' in drivers
     )
     test('brisk-core', brisk_core_test, suite: ['unit-tests'], env: envs)
 
+    ipa_core_test = executable('test-ipa-core',
+        sources: 'test-ipa-core.c',
+        dependencies: ipa_core_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+    test('ipa-core', ipa_core_test, suite: ['unit-tests'], env: envs)
+
     fte3600_protocol_test = executable('test-fte3600-protocol',
         sources: ['test-fte3600-protocol.c', '../libfprint/drivers/fte3600-protocol.c'],
         dependencies: gio_dep,
@@ -549,7 +557,8 @@ if 'fte3600' in drivers
         fte3600_lifecycle_test,
         suite: ['unit-tests'],
         env: envs,
-        timeout: 30,
+        # Discovery tests retain real wake/settle delays across both CS modes.
+        timeout: 60,
     )
 
     fte3600_brisk_test = executable('test-fte3600-brisk',
@@ -574,8 +583,9 @@ if 'fte3600' in drivers
             '../libfprint/drivers/fte3600-template.c',
             '../libfprint/drivers/fte3600-brisk.c',
             '../libfprint/drivers/fte3600-match-profile.c',
+            '../libfprint/drivers/fte3600-ipa.c',
         ],
-        dependencies: brisk_core_dep,
+        dependencies: [brisk_core_dep, ipa_core_dep],
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )
@@ -592,8 +602,9 @@ if 'fte3600' in drivers
             '../libfprint/drivers/fte3600-brisk.c',
             '../libfprint/drivers/fte3600-match-profile.c',
             '../libfprint/drivers/fte3600-sensor.c',
+            '../libfprint/drivers/fte3600-ipa.c',
         ],
-        dependencies: brisk_core_dep,
+        dependencies: [brisk_core_dep, ipa_core_dep],
         c_args: common_cflags + fte3600_personal_auth_cflags,
         install: false,
     )
