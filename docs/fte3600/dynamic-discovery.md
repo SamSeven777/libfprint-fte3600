@@ -22,7 +22,8 @@ reads, or turn an unknown response into firmware-upload authorization.
    using `ff00`/`9180`. Each positive application identity must repeat unchanged.
    Raw `9391` also requires register `1816 != 0fff`; the 9395 variant is rejected.
    Empty/unrecognized responses try the alternate CS polarity when supported.
-   Successful discovery keeps that polarity. Failure restores the original.
+   Successful discovery keeps that polarity for the current open session.
+   Failure restores the original; the kernel also restores it on final close.
    If these probes cannot identify a chip, discovery first
    retries the legacy application after `70`, a minimum 5 ms wait, `70`, and
    a minimum 2 ms wait. This first wake runs once per supported CS polarity,
@@ -87,7 +88,12 @@ The bridge starts with ACPI SPI mode/chip select, caps speed at 1 MHz and uses
 8-bit words. Optional ABI 1 capability `CAP_CS_POLARITY` allows changing only
 the physical active level of CS under the exclusive session lock. It does not
 alter reset polarity, CPOL/CPHA, clock or word size. A failed `spi_setup` rolls
-back; failure to restore invalidates the session. The backends accept mode 0.
+back; failure to roll back invalidates the session. On final file release,
+including process exit, the kernel restores the CS polarity recorded at open.
+If `dup`/`fork` leaves another file reference alive, restoration waits for its
+release. A failed restoration retains the target and blocks a new open until
+setup succeeds; merely changing the software mode bits does not clear the error.
+The backends accept mode 0.
 Its maximum transaction
 is the smaller of the controller transfer/message limits and 32,768 bytes.
 Capture needs 7,752 / 9,224 / 5,128 / 8,200 bytes for
@@ -144,7 +150,14 @@ The info structure remains 32 bytes; the capability consumes a formerly zero
 reserved slot. Old ABI 1 bridges advertise no CS control. There are no arbitrary GPIO
 number, arbitrary SPI configuration, memory-map or multi-transfer ioctls. Nodes are
 root-only. Removal invalidates the fd; suspend invalidates an open session,
-which must be closed and reopened after resume. Kernel buffers containing
+which must be closed and reopened after resume. Suspend attempts CS restoration
+before the parent controller sleeps. A close while suspended performs no GPIO
+or SPI setup; resume retries any pending restoration, and a later open retries
+again if needed. Resume failure never revives the old session. Removal attempts
+restoration only while the controller is awake and still attached; subsequent
+file release cannot access the removed hardware. Restoring the saved polarity
+does not establish that the ACPI value is electrically correct, or isolate
+other devices on a shared SPI bus during discovery. Kernel buffers containing
 transaction data are cleared on free; this is not a complete erasure claim.
 
 ## Build and migrate

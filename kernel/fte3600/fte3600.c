@@ -31,11 +31,11 @@ struct fte3600 {
 	struct acpi_gpio_params reset_param;
 	struct acpi_gpio_mapping mapping[2];
 	struct fte3600_bridge_info info;
+	struct fte3600_cs_state cs;
 	int irq;
 	bool opened;
 	bool suspended;
 	bool invalidated;
-	bool configuration_invalid;
 	bool has_gpio_mapping;
 	char *name;
 };
@@ -141,6 +141,29 @@ static irqreturn_t fte3600_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int fte3600_setup(void *context)
+{
+	struct fte3600 *f = context;
+
+	return spi_setup(f->spi);
+}
+
+/* Caller holds lock, with a live SPI device and an awake controller. */
+static int fte3600_restore_cs(struct fte3600 *f)
+{
+	int ret;
+
+	ret = fte3600_cs_restore(&f->cs, &f->spi->mode, fte3600_setup, f);
+	if (ret) {
+		f->invalidated = true;
+		dev_warn(&f->spi->dev,
+			 "Could not restore session CS polarity: %d\n", ret);
+	} else {
+		f->info.mode = f->spi->mode;
+	}
+	return ret;
+}
+
 static int fte3600_open(struct inode *inode, struct file *file)
 {
 	struct fte3600 *f = container_of(file->private_data, struct fte3600, misc);
@@ -154,16 +177,14 @@ static int fte3600_open(struct inode *inode, struct file *file)
 	else if (f->opened)
 		ret = -EBUSY;
 	else {
-		/* Reopening cannot make an unknown electrical configuration valid. */
-		if (f->configuration_invalid) {
-			ret = spi_setup(f->spi);
-			if (ret)
-				goto unlock;
-		}
+		/* A failed close must not make its trial polarity the new baseline. */
+		ret = fte3600_restore_cs(f);
+		if (ret)
+			goto unlock;
+		fte3600_cs_begin(&f->cs, f->spi->mode);
 		kref_get(&f->ref);
 		f->opened = true;
 		f->invalidated = false;
-		f->configuration_invalid = false;
 		atomic_set(&f->pending, 0);
 		file->private_data = f;
 	}
@@ -177,8 +198,13 @@ static int fte3600_release(struct inode *inode, struct file *file)
 	struct fte3600 *f = file->private_data;
 
 	mutex_lock(&f->lock);
-	if (f->spi && !f->suspended)
+	/* VFS calls release on the last file reference, including process exit.
+	 * During suspend, leave restoration for resume (or a later open).
+	 */
+	if (f->spi && !f->suspended) {
 		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
+		fte3600_restore_cs(f);
+	}
 	f->opened = false;
 	mutex_unlock(&f->lock);
 	kref_put(&f->ref, fte3600_free);
@@ -229,7 +255,6 @@ static long fte3600_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 	struct fte3600 *f = file->private_data;
 	void __user *ptr = (void __user *)arg;
 	u32 value;
-	u32 old_mode;
 	long ret = 0;
 
 	mutex_lock(&f->lock);
@@ -251,18 +276,12 @@ static long fte3600_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 			ret = -EINVAL;
 			break;
 		}
-		old_mode = f->spi->mode;
-		f->spi->mode = (old_mode & ~SPI_CS_HIGH) |
-			(value ? SPI_CS_HIGH : 0);
-		ret = spi_setup(f->spi);
-		if (ret) {
-			f->spi->mode = old_mode;
-			/* A failed rollback leaves electrical state unknown. */
-			if (spi_setup(f->spi)) {
-				f->invalidated = true;
-				f->configuration_invalid = true;
-			}
-		} else {
+		ret = fte3600_cs_set(&f->cs, &f->spi->mode, value,
+				     fte3600_setup, f);
+		if (f->cs.configuration_invalid) {
+			f->invalidated = true;
+			wake_up_interruptible(&f->wait);
+		} else if (!ret) {
 			f->info.mode = f->spi->mode;
 			atomic_set(&f->pending, 0);
 		}
@@ -385,6 +404,8 @@ static int fte3600_probe(struct spi_device *spi)
 	init_waitqueue_head(&f->wait);
 	atomic_set(&f->pending, 0);
 	f->spi = spi;
+	/* Probe established a known mode before publishing the device. */
+	fte3600_cs_begin(&f->cs, spi->mode);
 	f->info.abi_version = FTE3600_BRIDGE_ABI;
 	f->info.max_transfer = min_t(size_t, FTE3600_BRIDGE_MAX_TRANSFER,
 		min(spi_max_transfer_size(spi), spi_max_message_size(spi)));
@@ -469,9 +490,11 @@ static void fte3600_remove(struct spi_device *spi)
 	struct fte3600 *f = spi_get_drvdata(spi);
 
 	mutex_lock(&f->lock);
-	f->spi = NULL;
-	if (!f->suspended)
+	if (!f->suspended) {
 		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
+		fte3600_restore_cs(f);
+	}
+	f->spi = NULL;
 	mutex_unlock(&f->lock);
 	wake_up_interruptible(&f->wait);
 	misc_deregister(&f->misc);
@@ -488,11 +511,15 @@ static int fte3600_suspend(struct device *dev)
 
 	mutex_lock(&f->lock);
 	if (!f->suspended) {
-		f->suspended = true;
-		f->invalidated = f->opened;
+		f->invalidated |= f->opened;
 		/* The IRQ thread never takes this mutex or accesses the sensor. */
 		disable_irq(f->irq);
 		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
+		/* Parent SPI controller is still awake here. A failed restoration
+		 * stays pending for resume; it must not prevent system suspend.
+		 */
+		fte3600_restore_cs(f);
+		f->suspended = true;
 		atomic_set(&f->pending, 0);
 	}
 	mutex_unlock(&f->lock);
@@ -503,16 +530,21 @@ static int fte3600_suspend(struct device *dev)
 static int fte3600_resume(struct device *dev)
 {
 	struct fte3600 *f = dev_get_drvdata(dev);
+	int ret = 0;
 
 	mutex_lock(&f->lock);
 	if (f->suspended) {
 		gpiod_set_value_cansleep(f->reset, FTE3600_RESET_DEASSERTED);
 		atomic_set(&f->pending, 0);
+		/* The parent has resumed. Even if setup fails, allow a new open
+		 * to retry, keep the old session invalid and balance IRQ disable.
+		 */
 		f->suspended = false;
+		ret = fte3600_restore_cs(f);
 		enable_irq(f->irq);
 	}
 	mutex_unlock(&f->lock);
-	return 0;
+	return ret;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(fte3600_pm, fte3600_suspend, fte3600_resume);

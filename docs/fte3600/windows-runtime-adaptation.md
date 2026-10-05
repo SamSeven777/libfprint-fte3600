@@ -177,12 +177,15 @@ SPI/GPIO 目标创建函数分别在 `0x30511–0x305F5` 和 `0x30065–0x30149`
 ## 对 libfprint 扩展的影响
 
 后续实现已把资源适配与芯片协议分开：内核桥接层从 ACPI 获取 SPI/GPIO/IRQ，
-用户态探测真实传感器；DMI 机型白名单已移除。当前只实现 FT9361 后端，
-加载固件前还要求 ROM 家族及 OTP 检查，不能把所有 `FTE3600` 都当作 FT9361。
+用户态探测真实传感器；DMI 机型白名单已移除。当前有八个传感器后端，
+各自的识别、固件授权和采集参数见硬件清单与协议说明；实现不等于实机验证。
+加载固件前要求与相应路径匹配的身份依据，不能把所有 `FTE3600` 都当作 FT9361。
 具体协议、资源约束和测试边界见 [动态发现说明](dynamic-discovery.md)。
 
-GpioIo 本身没有极性字段。当前 reset 使用已知的 active-low 约定，允许
-`_DSD` 的 `reset-gpios` 属性优先指定；这项板级假设仍需实机确认。
+GpioIo 本身没有极性字段。当前 reset 使用 active-low 描述符，将逻辑
+`0/1/0` 转换成 Windows 已确认的物理 H/L/H。若 `_DSD` 提供 reset 属性，
+它必须指向同一 reset 资源且标为 active-low，冲突会在驱动引脚前被拒绝；
+没有属性时才添加驱动映射。实际布线和波形仍需实机确认。
 参考 [Linux ACPI GPIO 文档](https://www.kernel.org/doc/html/latest/firmware-guide/acpi/gpio-properties.html)。
 
 ## 已证实与尚待确认

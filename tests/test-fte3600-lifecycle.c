@@ -95,6 +95,7 @@ typedef struct
   gboolean     required_high;
   gboolean     cs_control;
   gboolean     unstable;
+  gboolean     unstable_variant;
   gboolean     corrupt_crc;
   gboolean     fail_cs;
   guint32      limit;
@@ -131,6 +132,14 @@ typedef struct
 
 static const LegacyWakeFixture *legacy_wake_fixture;
 
+typedef struct
+{
+  gboolean original_high;
+  gboolean required_high;
+} CsFixture;
+
+static const CsFixture *cs_fixture;
+
 static struct
 {
   GMutex           lock;
@@ -139,8 +148,13 @@ static struct
   const MockModel *model;
   guint            spi_transactions;
   guint32          spi_mode;
+  guint32          original_spi_mode;
+  guint32          last_closed_spi_mode;
   guint            cs_changes;
+  guint            selected_geometry_reads;
+  guint            wrong_cs_transfers;
   guint            special_reads;
+  guint            special_variant_reads;
   guint            special_resets;
   guint8           special_mode;
   gboolean         special_wake;
@@ -175,6 +189,8 @@ static struct
   guint            fail_probe_packet;
   guint            cancel_probe_packet;
   guint            firmware_opens;
+  guint            firmware_open_spi_transactions;
+  guint            firmware_open_resets;
   gsize            firmware_file_size;
   gint             firmware_fd;
   gboolean         otp_enabled;
@@ -229,6 +245,8 @@ __wrap_open (const char *path, int flags, ...)
       g_assert_nonnull (sensor.model->firmware_path);
       g_assert_cmpstr (path, ==, sensor.model->firmware_path);
       sensor.firmware_opens++;
+      sensor.firmware_open_spi_transactions = sensor.spi_transactions;
+      sensor.firmware_open_resets = sensor.resets;
       if (sensor.firmware_file_size)
         {
           g_autofree gchar *temporary_path = NULL;
@@ -262,6 +280,7 @@ __wrap_open (const char *path, int flags, ...)
   g_assert_cmpint (sensor.spi_fd, ==, -1);
   sensor.spi_fd = dup (sensor.irq_pipe[0]);
   g_assert_cmpint (sensor.spi_fd, >=, 0);
+  sensor.original_spi_mode = sensor.spi_mode;
   sensor.opens++;
   return sensor.spi_fd;
 }
@@ -281,7 +300,11 @@ __wrap_close (int fd)
       return __real_close (fd);
     }
   g_assert_cmpint (fd, ==, sensor.spi_fd);
-  /* Kernel close deasserts reset even after an interrupted operation. */
+  /* The last bridge close releases reset and restores only the CS bit saved
+   * at successful open, including after successful enumeration. */
+  sensor.last_closed_spi_mode = sensor.spi_mode;
+  sensor.spi_mode = (sensor.spi_mode & ~SPI_CS_HIGH) |
+                    (sensor.original_spi_mode & SPI_CS_HIGH);
   sensor.reset_asserted = FALSE;
   sensor.claimed = FALSE;
   sensor.releases++;
@@ -539,7 +562,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         .bits_per_word = 8,
         .mode = sensor.bad_mode ? SPI_MODE_3 : sensor.spi_mode,
         .capabilities = ((probe_fixture && probe_fixture->cs_control) ||
-                         (legacy_wake_fixture && legacy_wake_fixture->cs_control)) ? FTE3600_BRIDGE_CAP_CS_POLARITY : 0,
+                         (legacy_wake_fixture && legacy_wake_fixture->cs_control) ||
+                         cs_fixture) ? FTE3600_BRIDGE_CAP_CS_POLARITY : 0,
       };
       return 0;
     }
@@ -548,7 +572,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   if (operation == FTE3600_IOC_SET_CS_POLARITY)
     {
       g_assert_true ((probe_fixture && probe_fixture->cs_control) ||
-                     (legacy_wake_fixture && legacy_wake_fixture->cs_control));
+                     (legacy_wake_fixture && legacy_wake_fixture->cs_control) ||
+                     cs_fixture);
       g_assert_cmpuint (*(guint32 *) argument, <=, 1);
       sensor.cs_changes++;
       if (probe_fixture && probe_fixture->fail_cs)
@@ -556,7 +581,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
           errno = EIO;
           return -1;
         }
-      sensor.spi_mode = *(guint32 *) argument ? SPI_CS_HIGH : SPI_MODE_0;
+      sensor.spi_mode = (sensor.spi_mode & ~SPI_CS_HIGH) |
+                        (*(guint32 *) argument ? SPI_CS_HIGH : 0);
       return 0;
     }
   if (operation == FTE3600_IOC_GET_EVENTS)
@@ -578,6 +604,19 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   result = transfer->len;
   g_mutex_lock (&sensor.lock);
   sensor.spi_transactions++;
+  if (cs_fixture)
+    {
+      if (!!(sensor.spi_mode & SPI_CS_HIGH) != cs_fixture->required_high)
+        {
+          sensor.wrong_cs_transfers++;
+          if (rx)
+            memset (rx, 0, transfer->len);
+          g_mutex_unlock (&sensor.lock);
+          return result;
+        }
+      if (tx[0] == 0x10 && (tx[2] == 0x14 || tx[2] == 0x15))
+        sensor.selected_geometry_reads++;
+    }
   if (tx[0] == 0x5a)
     sensor.special_wake = TRUE;
   if (tx[0] == 0x90)
@@ -621,8 +660,15 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         }
       else if (selected && tx[0] == 0x04 && tx[2] == 0x98 && tx[3] == 0x16)
         {
-          rx[6] = probe_fixture->variant >> 8;
-          rx[7] = probe_fixture->variant;
+          guint16 variant = probe_fixture->variant +
+                            (probe_fixture->unstable_variant && sensor.special_variant_reads);
+          guint16 crc;
+          sensor.special_variant_reads++;
+          rx[6] = variant >> 8;
+          rx[7] = variant;
+          crc = fpi_fte3600_ft93xx_crc16 (rx + 6, 2);
+          rx[8] = crc >> 8;
+          rx[9] = crc ^ (probe_fixture->corrupt_crc ? 1 : 0);
         }
       else if (selected && id == 0x9368 && tx[0] == 0x91 && transfer->len == 39)
         {
@@ -897,6 +943,7 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   g_assert_cmpuint (model, <, G_N_ELEMENTS (models));
   sensor.model = &models[model];
   sensor.buffer_size = buffer_size;
+  sensor.spi_mode = cs_fixture && cs_fixture->original_high ? SPI_CS_HIGH : SPI_MODE_0;
   sensor.rom_family = 0x95a8;
   sensor.otp = sensor.model->otp;
   sensor.spi_fd = -1;
@@ -977,6 +1024,8 @@ finish_device (FpDevice *device)
   g_assert_false (sensor.claimed);
   g_assert_cmpuint (sensor.opens, ==, sensor.closes);
   g_assert_cmpuint (sensor.claims, ==, sensor.releases);
+  g_assert_cmpuint (sensor.spi_mode & SPI_CS_HIGH, ==,
+                    sensor.original_spi_mode & SPI_CS_HIGH);
   g_assert_cmpuint (sensor.irq_source, ==, 0);
   __real_close (sensor.irq_pipe[0]);
   __real_close (sensor.irq_pipe[1]);
@@ -987,6 +1036,7 @@ finish_device (FpDevice *device)
   probe_fixture = NULL;
   boot38_fixture = FALSE;
   legacy_wake_fixture = NULL;
+  cs_fixture = NULL;
 }
 
 static void
@@ -1008,7 +1058,7 @@ test_sleeping_legacy_discovery (gconstpointer data)
       g_assert_no_error (error);
       g_assert_nonnull (strstr (fp_device_get_name (device), models[fixture->model].name));
       g_assert_cmpuint (sensor.wake_geometry_reads, ==, 4);
-      g_assert_cmpuint (sensor.spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
+      g_assert_cmpuint (sensor.last_closed_spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
       break;
 
     case LEGACY_WAKE_UNKNOWN:
@@ -1038,7 +1088,8 @@ test_sleeping_legacy_discovery (gconstpointer data)
       break;
     }
   if (fixture->fault != LEGACY_WAKE_OK)
-    g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+    g_assert_cmpuint (sensor.last_closed_spi_mode, ==, SPI_MODE_0);
+  g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
   g_assert_cmpuint (sensor.wake_commands[fixture->required_high], ==, expected_commands);
   g_assert_cmpuint (sensor.wake_commands[!fixture->required_high], ==,
                     fixture->required_high || (fixture->cs_control && fixture->fault == LEGACY_WAKE_EXHAUSTED) ? 12 : 0);
@@ -1078,12 +1129,13 @@ test_boot38_cold_enumeration (void)
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   g_assert_cmpint (fp_device_has_feature (device, FP_DEVICE_FEATURE_VERIFY), ==,
                    FTE3600_ENABLE_PERSONAL_AUTH);
-  g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
-                         "*Sensor reset after open failure also failed:*");
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
-  g_test_assert_expected_messages ();
   g_assert_cmpuint (sensor.firmware_opens, ==, 1);
+  /* A failed recovery must terminate open without any runtime commands,
+   * including the outer initialization error handler's reset sequence. */
+  g_assert_cmpuint (sensor.spi_transactions, ==, sensor.firmware_open_spi_transactions);
+  g_assert_cmpuint (sensor.resets, ==, sensor.firmware_open_resets);
   g_assert_false (sensor.reset_asserted);
   finish_device (device);
 }
@@ -1105,7 +1157,8 @@ test_special_discovery (gconstpointer data)
       g_assert_cmpuint (sensor.special_reads, ==, 2);
       g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 5 : 1) : 0);
       g_assert_cmpuint (sensor.resets, ==, fixture->mode_required ? (fixture->cs_control ? 24 : 12) : 0);
-      g_assert_cmpuint (sensor.spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
+      g_assert_cmpuint (sensor.last_closed_spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
+      g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
       g_assert_true (fp_device_has_feature (device, FP_DEVICE_FEATURE_CAPTURE));
       g_assert_cmpint (fp_device_has_feature (device, FP_DEVICE_FEATURE_VERIFY), ==,
                        FTE3600_ENABLE_PERSONAL_AUTH);
@@ -1124,12 +1177,27 @@ test_special_discovery (gconstpointer data)
   else
     {
       g_assert_nonnull (error);
+      g_assert_cmpuint (sensor.last_closed_spi_mode, ==, SPI_MODE_0);
       g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+      if (fixture->mode_required &&
+          (fixture->unstable || fixture->unstable_variant || fixture->corrupt_crc))
+        {
+          if (fixture->corrupt_crc)
+            g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+          else
+            g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+          /* A failed confirmation is not an empty sensor: after cleanup,
+           * no legacy ROM query or firmware fallback may follow. */
+          g_assert_false (sensor.probe_started);
+          g_assert_cmpuint (sensor.special_reads, ==, 2);
+        }
     }
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
-  /* A known ID rejection and repeated-ID check must not pulse reset. */
+  /* Read-only rejection needs no reset. Stateful factory negotiation must
+   * clean up each failed polarity, including failed identity confirmation. */
   if (fixture->id && (!fixture->required_high || fixture->cs_control))
-    g_assert_cmpuint (sensor.hardware_asserts, ==, fixture->mode_required && fixture->required_high ? 1 : 0);
+    g_assert_cmpuint (sensor.hardware_asserts, ==,
+                      fixture->mode_required ? fixture->required_high + !fixture->success : 0);
   finish_device (device);
 }
 
@@ -1236,6 +1304,58 @@ test_capture_reopen (void)
       g_assert_false (sensor.claimed);
     }
   g_assert_cmpuint (sensor.images, ==, 2);
+  finish_device (device);
+}
+
+static void
+test_cs_restore_reopen (gconstpointer data)
+{
+  const CsFixture *fixture = data;
+  guint32 original_mode = fixture->original_high ? SPI_CS_HIGH : SPI_MODE_0;
+  guint32 selected_mode = fixture->required_high ? SPI_CS_HIGH : SPI_MODE_0;
+  FpDevice *device;
+
+  cs_fixture = fixture;
+  device = new_device ();
+  g_assert_nonnull (strstr (fp_device_get_name (device), "FT9361"));
+  g_assert_cmpuint (sensor.opens, ==, 1);
+  g_assert_cmpuint (sensor.closes, ==, 1);
+  g_assert_cmpuint (sensor.cs_changes, ==, 1);
+  g_assert_cmpuint (sensor.selected_geometry_reads, ==, 4);
+  g_assert_cmpuint (sensor.last_closed_spi_mode, ==, selected_mode);
+  g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
+
+  for (guint round = 0; round < 2; round++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(FpImage) image = NULL;
+      guint geometry_reads = sensor.selected_geometry_reads;
+      guint wrong_cs_transfers = sensor.wrong_cs_transfers;
+
+      /* Probe has already closed its descriptor. Each application open must
+       * begin at the original polarity, negotiate again, and reread identity
+       * before initializing the backend rather than reuse the probed mode. */
+      open_device (device);
+      g_assert_cmpuint (sensor.original_spi_mode, ==, original_mode);
+      g_assert_cmpuint (sensor.spi_mode, ==, selected_mode);
+      g_assert_cmpuint (sensor.cs_changes, ==, round + 2);
+      g_assert_cmpuint (sensor.wrong_cs_transfers, >, wrong_cs_transfers);
+      g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, >=, 4);
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+      g_assert_cmpuint (fp_image_get_width (image), ==, 64);
+      g_assert_cmpuint (fp_image_get_height (image), ==, 80);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (sensor.last_closed_spi_mode, ==, selected_mode);
+      g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
+      g_assert_cmpuint (sensor.opens, ==, round + 2);
+      g_assert_cmpuint (sensor.closes, ==, round + 2);
+    }
+  g_assert_cmpuint (sensor.images, ==, 2);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
 
@@ -1975,6 +2095,10 @@ test_open_error (gconstpointer data)
 int
 main (int argc, char **argv)
 {
+  static const CsFixture polarities[] = {
+    { .original_high = FALSE, .required_high = TRUE },
+    { .original_high = TRUE, .required_high = FALSE },
+  };
   static const LegacyWakeFixture sleeping[] = {
     { .name = "FT9361-original", .model = 0, .ready_attempt = 1 },
     { .name = "FT9361-alternate", .model = 0, .ready_attempt = 1, .required_high = TRUE, .cs_control = TRUE },
@@ -2013,6 +2137,10 @@ main (int argc, char **argv)
     { .name = "FT9369", .id = 0x9362, .mode_required = TRUE, .success = TRUE },
     { .name = "FT9365", .id = 0x9365, .mode_required = TRUE, .success = TRUE },
     { .name = "FT9769", .id = 0x9392, .mode_required = TRUE, .required_high = TRUE, .cs_control = TRUE, .success = TRUE },
+    { .name = "cold-id-disappears", .id = 0x9362, .mode_required = TRUE, .unstable = TRUE },
+    { .name = "cold-alternate-id-disappears", .id = 0x9362, .mode_required = TRUE, .unstable = TRUE, .required_high = TRUE, .cs_control = TRUE },
+    { .name = "cold-variant-changes", .id = 0x9391, .variant = 0x123, .mode_required = TRUE, .unstable_variant = TRUE },
+    { .name = "cold-variant-bad-crc", .id = 0x9391, .variant = 0x123, .mode_required = TRUE, .corrupt_crc = TRUE },
   };
 
   g_test_init (&argc, &argv, NULL);
@@ -2028,6 +2156,10 @@ main (int argc, char **argv)
       g_test_add_data_func (path, &probes[i], test_special_discovery);
     }
   g_test_add_func ("/fte3600-lifecycle/capture-reopen-without-dmi", test_capture_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/bridge/cs-restore-reopen-low-baseline",
+                        &polarities[0], test_cs_restore_reopen);
+  g_test_add_data_func ("/fte3600-lifecycle/bridge/cs-restore-reopen-high-baseline",
+                        &polarities[1], test_cs_restore_reopen);
   for (guint model = 0; model < G_N_ELEMENTS (models); model++)
     {
       g_autofree gchar *change = g_strdup_printf ("/fte3600-lifecycle/families/%s/changed-sensor", models[model].name);

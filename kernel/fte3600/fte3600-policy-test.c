@@ -158,6 +158,293 @@ static void test_reset_metadata(void)
 	assert(!fte3600_reset_reference_valid(true, 3, 0x100000001ULL, 0, 1, 1));
 }
 
+struct setup_call {
+	unsigned int mode;
+	int result;
+};
+
+struct setup_mock {
+	unsigned int *mode;
+	const struct setup_call *calls;
+	unsigned int count;
+	unsigned int next;
+	unsigned int applied_mode;
+};
+
+/* The callback observes the mode presented to spi_setup(), not a separately
+ * computed expected state. Failed setup leaves controller state unspecified;
+ * applied_mode is consulted only after a successful setup or rollback.
+ */
+static int mock_setup(void *context)
+{
+	struct setup_mock *mock = context;
+	const struct setup_call *call;
+
+	assert(mock->next < mock->count);
+	call = &mock->calls[mock->next++];
+	assert(*mock->mode == call->mode);
+	if (!call->result)
+		mock->applied_mode = *mock->mode;
+	return call->result;
+}
+
+static void test_cs_restore_unchanged(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			unsigned int mode = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = { .mode = &mode };
+
+			fte3600_cs_begin(&state, mode);
+			assert(state.original_cs == (high ? SPI_CS_HIGH : 0));
+			assert(!state.configuration_invalid);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mode == (clock | SPI_LSB_FIRST |
+					(high ? SPI_CS_HIGH : 0)));
+			assert(mock.next == 0);
+		}
+	}
+}
+
+static void test_cs_repeated_toggles(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			const unsigned int original = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			const unsigned int trial = original ^ SPI_CS_HIGH;
+			const struct setup_call calls[] = {
+				{ trial, 0 }, { original, 0 },
+				{ trial, 0 }, { original, 0 },
+			};
+			unsigned int mode = original;
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = {
+				.mode = &mode, .calls = calls, .count = 4,
+				.applied_mode = original,
+			};
+
+			fte3600_cs_begin(&state, mode);
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == 0);
+			assert(mode == trial && mock.applied_mode == trial);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(fte3600_cs_set(&state, &mode, high,
+					     mock_setup, &mock) == 0);
+			assert(mode == original && mock.applied_mode == original);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.next == 2);
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == 0);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mode == original && mock.applied_mode == original);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(!state.configuration_invalid);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.next == mock.count);
+		}
+	}
+}
+
+static void test_cs_change_failure_rollback(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			const unsigned int original = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			const struct setup_call calls[] = {
+				{ original ^ SPI_CS_HIGH, -ETIMEDOUT },
+				{ original, 0 },
+			};
+			unsigned int mode = original;
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = {
+				.mode = &mode, .calls = calls, .count = 2,
+			};
+
+			fte3600_cs_begin(&state, mode);
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == -ETIMEDOUT);
+			assert(mode == original && mock.applied_mode == original);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(!state.configuration_invalid);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.next == mock.count);
+		}
+	}
+}
+
+static void test_cs_failed_rollback_recovery(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			const unsigned int original = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			const struct setup_call calls[] = {
+				{ original ^ SPI_CS_HIGH, -EINVAL },
+				{ original, -EIO },
+				{ original, 0 },
+			};
+			unsigned int mode = original;
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = {
+				.mode = &mode, .calls = calls, .count = 3,
+			};
+
+			fte3600_cs_begin(&state, mode);
+			/* Report the attempted change's error, not rollback's error. */
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == -EINVAL);
+			assert(mode == original);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(state.configuration_invalid);
+			assert(mock.next == 2);
+			/* Neither another trial nor an apparent no-op may use an
+			 * unverified controller configuration. */
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == -EHOSTDOWN);
+			assert(fte3600_cs_set(&state, &mode, high,
+					     mock_setup, &mock) == -EHOSTDOWN);
+			assert(mock.next == 2);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			/* The software bit already equals original, but rollback
+			 * failed: restore must still call setup and prove recovery. */
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.applied_mode == original);
+			assert(!state.configuration_invalid);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.next == mock.count);
+		}
+	}
+}
+
+static void test_cs_failed_return_rolls_back_trial(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			const unsigned int original = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			const unsigned int trial = original ^ SPI_CS_HIGH;
+			const struct setup_call calls[] = {
+				{ trial, 0 }, { original, -EIO },
+				{ trial, 0 }, { original, 0 },
+			};
+			unsigned int mode = original;
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = {
+				.mode = &mode, .calls = calls, .count = 4,
+			};
+
+			fte3600_cs_begin(&state, mode);
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == 0);
+			/* A failed set rolls back the immediately preceding mode,
+			 * which need not be the session's eventual restore target. */
+			assert(fte3600_cs_set(&state, &mode, high,
+					     mock_setup, &mock) == -EIO);
+			assert(mode == trial && mock.applied_mode == trial);
+			assert(!state.configuration_invalid);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(mock.next == 3);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mode == original && mock.applied_mode == original);
+			assert(!state.configuration_invalid);
+			assert(mock.next == mock.count);
+		}
+	}
+}
+
+static void test_cs_restore_failure_retry(void)
+{
+	unsigned int clock, high;
+
+	for (clock = 0; clock < 4; clock++) {
+		for (high = 0; high < 2; high++) {
+			const unsigned int original = clock | SPI_LSB_FIRST |
+				(high ? SPI_CS_HIGH : 0);
+			const struct setup_call calls[] = {
+				{ original ^ SPI_CS_HIGH, 0 },
+				{ original, -EIO },
+				{ original, -ETIMEDOUT },
+				{ original, 0 },
+			};
+			unsigned int mode = original;
+			struct fte3600_cs_state state = { 0 };
+			struct setup_mock mock = {
+				.mode = &mode, .calls = calls, .count = 4,
+			};
+
+			fte3600_cs_begin(&state, mode);
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == 0);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == -EIO);
+			assert(mode == original);
+			assert(state.configuration_invalid);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(fte3600_cs_set(&state, &mode, !high,
+					     mock_setup, &mock) == -EHOSTDOWN);
+			assert(mock.next == 2);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == -ETIMEDOUT);
+			assert(mode == original);
+			assert(state.configuration_invalid);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(mock.next == 3);
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mode == original && mock.applied_mode == original);
+			assert(!state.configuration_invalid);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			/* Begin a new session only after successful recovery. */
+			fte3600_cs_begin(&state, mode);
+			assert(state.original_cs == (original & SPI_CS_HIGH));
+			assert(fte3600_cs_restore(&state, &mode, mock_setup,
+						  &mock) == 0);
+			assert(mock.next == mock.count);
+		}
+	}
+}
+
+static void test_cs_restore_preserves_current_mode(void)
+{
+	const struct setup_call calls[] = {
+		{ SPI_CPOL | SPI_3WIRE | SPI_CS_HIGH, 0 },
+	};
+	unsigned int mode = SPI_CPHA | SPI_LSB_FIRST | SPI_CS_HIGH;
+	struct fte3600_cs_state state = { 0 };
+	struct setup_mock mock = { .mode = &mode, .calls = calls, .count = 1 };
+
+	fte3600_cs_begin(&state, mode);
+	mode = SPI_CPOL | SPI_3WIRE;
+	assert(fte3600_cs_restore(&state, &mode, mock_setup, &mock) == 0);
+	assert(mode == (SPI_CPOL | SPI_3WIRE | SPI_CS_HIGH));
+	assert(mock.applied_mode == mode);
+	assert(state.original_cs == SPI_CS_HIGH);
+	assert(!state.configuration_invalid);
+	assert(mock.next == mock.count);
+}
+
 int main(void)
 {
 	test_resource_order();
@@ -165,6 +452,13 @@ int main(void)
 	test_transfer_bounds();
 	test_transfer_completion();
 	test_reset_metadata();
-	puts("FTE3600 bridge policy: resources, reset metadata and SPI boundaries passed");
+	test_cs_restore_unchanged();
+	test_cs_repeated_toggles();
+	test_cs_change_failure_rollback();
+	test_cs_failed_rollback_recovery();
+	test_cs_failed_return_rolls_back_trial();
+	test_cs_restore_failure_retry();
+	test_cs_restore_preserves_current_mode();
+	puts("FTE3600 bridge policy: resources, reset metadata, SPI boundaries and CS recovery passed");
 	return 0;
 }

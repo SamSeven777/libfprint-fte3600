@@ -38,6 +38,58 @@ enum fte3600_reset_state {
 	FTE3600_RESET_ASSERTED = 1,
 };
 
+/* The caller serializes access and supplies setup only while the controller
+ * is available. A mode value alone cannot prove hardware state after an error.
+ */
+struct fte3600_cs_state {
+	unsigned int original_cs;
+	bool configuration_invalid;
+};
+
+/* Start a session only after any previous restoration has succeeded. */
+static inline void
+fte3600_cs_begin(struct fte3600_cs_state *cs, unsigned int mode)
+{
+	cs->original_cs = mode & SPI_CS_HIGH;
+}
+
+static inline int
+fte3600_cs_set(struct fte3600_cs_state *cs, unsigned int *mode, bool high,
+	       int (*setup)(void *), void *context)
+{
+	unsigned int old_mode = *mode;
+	int ret;
+
+	if (cs->configuration_invalid)
+		return -EHOSTDOWN;
+	*mode = (old_mode & ~SPI_CS_HIGH) | (high ? SPI_CS_HIGH : 0);
+	ret = setup(context);
+	if (ret) {
+		*mode = old_mode;
+		/* A failed rollback must block further sensor transactions. */
+		cs->configuration_invalid = setup(context) != 0;
+	}
+	return ret;
+}
+
+static inline int
+fte3600_cs_restore(struct fte3600_cs_state *cs, unsigned int *mode,
+		   int (*setup)(void *), void *context)
+{
+	int ret;
+
+	if ((*mode & SPI_CS_HIGH) == cs->original_cs &&
+	    !cs->configuration_invalid)
+		return 0;
+	*mode = (*mode & ~SPI_CS_HIGH) | cs->original_cs;
+	ret = setup(context);
+	/* Keep the saved target on failure. Even with matching software bits,
+	 * the next restoration must program the controller again.
+	 */
+	cs->configuration_invalid = ret != 0;
+	return ret;
+}
+
 struct fte3600_resources {
 	unsigned int gpio_index;
 	unsigned int reset_index;

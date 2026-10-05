@@ -186,6 +186,16 @@ through one action completion, attempts necessary cleanup, and clears image
 buffers. Reopen establishes a fresh hardware state. Removal and suspend are
 also terminal for an open bridge session.
 
+The kernel owns CS session cleanup. Final file release restores the polarity
+saved at open, including after process termination. Suspend attempts restoration
+while its controller is awake; deferred or failed setup is retried on resume
+and before a new open. A setup failure retains the original target and blocks
+communication until recovery, without resetting an invalidated old session.
+Only `SPI_CS_HIGH` changes; the bridge ABI and other SPI settings are unchanged.
+The shared CS policy is exercised with injected setup failures in host tests;
+actual GPIO, IRQ, process-exit and power-management behavior still need hardware
+validation.
+
 ## Validation
 
 `scripts/check-fte3600.sh` compiles with warnings as errors and runs both

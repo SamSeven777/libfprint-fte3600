@@ -37,12 +37,12 @@ enum {
   REC_VALIDATE, REC_RELEASE, REC_HIGH, REC_ASSERT, REC_LOW, REC_DEASSERT,
   REC_SYNC, REC_C8, REC_CA, REC_CB, REC_B9_PREPARE, REC_B9_COMMIT,
   REC_CONFIG_WAIT, REC_UPLOAD, REC_UPLOAD_WAIT, REC_READBACK, REC_VERIFY,
-  REC_CLEANUP_RELEASE1, REC_CLEANUP_HIGH1, REC_CLEANUP_ASSERT1,
-  REC_CLEANUP_LOW1, REC_CLEANUP_DEASSERT1, REC_CLEANUP_GAP,
-  REC_CLEANUP_RELEASE2, REC_CLEANUP_HIGH2, REC_CLEANUP_ASSERT2,
-  REC_CLEANUP_LOW2, REC_CLEANUP_DEASSERT2, REC_START_WAIT,
+  REC_START_RELEASE1, REC_START_HIGH1, REC_START_ASSERT1,
+  REC_START_LOW1, REC_START_DEASSERT1, REC_START_GAP,
+  REC_START_RELEASE2, REC_START_HIGH2, REC_START_ASSERT2,
+  REC_START_LOW2, REC_START_DEASSERT2, REC_START_WAIT,
   REC_READ_MCU, REC_CHECK_MCU, REC_READ_WIDTH, REC_CHECK_WIDTH,
-  REC_READ_HEIGHT, REC_CHECK_HEIGHT, REC_DONE, REC_NSTATES,
+  REC_READ_HEIGHT, REC_CHECK_HEIGHT, REC_CLEANUP_RELEASE, REC_DONE, REC_NSTATES,
 };
 
 static void
@@ -311,7 +311,12 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
   Recovery *data = fpi_ssm_get_data (ssm);
   guint step = fpi_ssm_get_cur_state (ssm);
 
-  if (step < REC_CLEANUP_RELEASE1 && !(step >= REC_HIGH && step <= REC_DEASSERT) &&
+  /* A reset pulse already in progress must finish before cancellation is
+   * observed. Starting the application is ordinary work, never error cleanup. */
+  if (step < REC_CLEANUP_RELEASE &&
+      !(step >= REC_HIGH && step <= REC_DEASSERT) &&
+      !(step >= REC_START_HIGH1 && step <= REC_START_DEASSERT1) &&
+      !(step >= REC_START_HIGH2 && step <= REC_START_DEASSERT2) &&
       fpi_fte3600_fail_if_cancelled (ssm, dev))
     return;
   switch (step)
@@ -334,26 +339,26 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case REC_HIGH:
-    case REC_CLEANUP_HIGH1:
-    case REC_CLEANUP_HIGH2:
+    case REC_START_HIGH1:
+    case REC_START_HIGH2:
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_HIGH_MS);
       return;
 
     case REC_ASSERT:
-    case REC_CLEANUP_ASSERT1:
-    case REC_CLEANUP_ASSERT2:
+    case REC_START_ASSERT1:
+    case REC_START_ASSERT2:
       fpi_fte3600_set_hardware_reset (ssm, self, TRUE);
       return;
 
     case REC_LOW:
-    case REC_CLEANUP_LOW1:
-    case REC_CLEANUP_LOW2:
+    case REC_START_LOW1:
+    case REC_START_LOW2:
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
       return;
 
     case REC_DEASSERT:
-    case REC_CLEANUP_DEASSERT1:
-    case REC_CLEANUP_DEASSERT2:
+    case REC_START_DEASSERT1:
+    case REC_START_DEASSERT2:
       fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
       return;
 
@@ -421,19 +426,12 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
         fpi_ssm_next_state (ssm);
       return;
 
-    case REC_CLEANUP_RELEASE1:
-      if (!data->touched)
-        {
-          fpi_ssm_jump_to_state (ssm, REC_DONE);
-          return;
-        }
-      G_GNUC_FALLTHROUGH;
-
-    case REC_CLEANUP_RELEASE2:
+    case REC_START_RELEASE1:
+    case REC_START_RELEASE2:
       fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
       return;
 
-    case REC_CLEANUP_GAP:
+    case REC_START_GAP:
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_GAP_MS);
       return;
 
@@ -452,7 +450,6 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
       else if (++data->attempts < FTE3600_BOOT38_POLL_ATTEMPTS)
         fpi_ssm_jump_to_state_delayed (ssm, REC_READ_MCU, FTE3600_BOOT38_POLL_MS);
       else
-        /* Later identity checks cannot clear this retained cleanup error. */
         boot38_fail (ssm, "FT9338-family application did not reach idle after RAM recovery");
       return;
 
@@ -478,9 +475,26 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
         }
       else
         {
-          self->idle_verified = fpi_ssm_get_error (ssm) == NULL;
+          self->idle_verified = TRUE;
           fpi_ssm_next_state (ssm);
         }
+      return;
+
+    case REC_CLEANUP_RELEASE:
+      if (fpi_ssm_get_error (ssm))
+        {
+          /* Neither an incomplete upload nor a failed RAM comparison may
+           * trigger application startup. Tell the parent to close this session
+           * without issuing the runtime reset/status sequence either. */
+          self->session_failed = TRUE;
+          self->idle_verified = FALSE;
+          if (data->touched)
+            {
+              fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
+              return;
+            }
+        }
+      fpi_ssm_next_state (ssm);
       return;
 
     case REC_DONE:
@@ -517,7 +531,7 @@ FpiSsm *
 fpi_fte3600_legacy38_recovery_new (FpiDeviceFte3600 *self)
 {
   FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), recovery_handler,
-                                  REC_NSTATES, REC_CLEANUP_RELEASE1, "FT9338-family verified RAM recovery");
+                                  REC_NSTATES, REC_CLEANUP_RELEASE, "FT9338-family verified RAM recovery");
 
   fpi_ssm_set_data (ssm, g_new0 (Recovery, 1), (GDestroyNotify) recovery_free);
   return ssm;

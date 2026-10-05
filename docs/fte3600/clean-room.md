@@ -53,7 +53,10 @@ Size/hash checks establish that the input equals the expected image, not a
 right to redistribute it, a signature-verification claim, or compatibility
 with every device sharing the ACPI ID. The repository excludes firmware and
 vendor binaries. Acquisition/distribution terms must be checked separately.
-The implemented recovery targets volatile RAM, not persistent flash/OTP.
+Legacy FT9338/FT9536 and FT9348/FT9361 recovery targets volatile RAM.
+FT9368 has a separate, explicitly requested update path that writes application
+flash after identifying a running application; see [FT9368 protocol](ft9368-protocol.md).
+These are different operations. No OTP programming is implemented.
 
 ## Privacy and validation limits
 
@@ -63,4 +66,3 @@ GLib/GBytes serialization copies, process dumps and framework-managed storage
 may retain biometric-derived data. Do not publish real images, templates,
 descriptors or memory dumps. Existing upstream fixtures retain their own
 provenance. See [hardware and validation status](status.md) for evidence limits.
-

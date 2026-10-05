@@ -138,6 +138,20 @@ fte3600_match_input_take (FpiDeviceFte3600  *self,
 }
 
 static void
+fte3600_finish_open_error (FpiDeviceFte3600 *self, GError *error)
+{
+  if (self->spi_fd >= 0)
+    {
+      if (close (self->spi_fd) < 0)
+        fp_warn ("Failed to close FTE3600 SPI device after open failure: %s",
+                 g_strerror (errno));
+      self->spi_fd = -1;
+    }
+  fpi_fte3600_release_transport (self);
+  fpi_device_open_complete (FP_DEVICE (self), error);
+}
+
+static void
 fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
@@ -148,7 +162,12 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       self->idle_verified = FALSE;
       fpi_fte3600_deassert_hardware_reset_best_effort (
         self, "recovering from initialization failure");
-      fte3600_start_reset (self, FTE3600_RESET_FOR_OPEN_ERROR, error);
+      /* A failed RAM recovery has already performed its bounded cleanup.
+       * Its application is unverified; do not send runtime reset commands. */
+      if (self->session_failed)
+        fte3600_finish_open_error (self, error);
+      else
+        fte3600_start_reset (self, FTE3600_RESET_FOR_OPEN_ERROR, error);
       return;
     }
 
@@ -1018,16 +1037,7 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
                    reset_error->message);
           g_clear_error (&reset_error);
         }
-      if (self->spi_fd >= 0)
-        {
-          if (close (self->spi_fd) < 0)
-            fp_warn (
-              "Failed to close FTE3600 SPI device after open failure: %s",
-              g_strerror (errno));
-          self->spi_fd = -1;
-        }
-      fpi_fte3600_release_transport (self);
-      fpi_device_open_complete (dev, operation_error);
+      fte3600_finish_open_error (self, operation_error);
       return;
 
     case FTE3600_RESET_FOR_CLOSE:
