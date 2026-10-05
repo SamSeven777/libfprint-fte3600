@@ -43,10 +43,10 @@ static void
 clear_image_memory (gpointer memory,
                     gsize    size)
 {
-  volatile guint8 *bytes = memory;
+  if (memory == NULL || size == 0)
+    return;
 
-  while (size-- > 0)
-    *bytes++ = 0;
+  explicit_bzero (memory, size);
 }
 
 static gboolean
