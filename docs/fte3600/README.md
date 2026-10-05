@@ -2,9 +2,22 @@
 
 [Repository overview](../../README.md) · [Contributing](../../CONTRIBUTING.md)
 
-All maintained documentation is in English. The guides below describe the
-current `main` implementation unless explicitly marked as historical. Existing
-document paths are retained so links in hardware reports remain usable.
+This documentation provides complete architectural, protocol, installation, and clean-room provenance references for the FocalTech FTE3600 Linux driver stack.
+
+## Supported Hardware Matrix
+
+| Sensor Model | Sensor Geometry | Protocol Family | Resolution / ppmm | Firmware Dependency | Hardware Form Factor |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **FT9338** | 88 × 88 | FT9338 (Legacy A8) | 508 DPI (20.0 ppmm) | `ft9338.bin` (14 KB) | Square button capacitive |
+| **FT9348** | 96 × 96 | FT95A8 (A8 Family) | 508 DPI (20.0 ppmm) | `ft9348.bin` (10 KB) | Large square capacitive |
+| **FT9361** | 64 × 80 | FT95A8 (A8 Family) | 508 DPI (20.0 ppmm) | `ft9361.bin` (10 KB) | Rectangular (One-Netbook A1, etc.) |
+| **FT9536** | 64 × 128 | FT9338 (Legacy A8) | 508 DPI (20.0 ppmm) | `ft9536.bin` (12 KB) | Elongated rectangular sensor |
+| **FT9365** | 64 × 80 | FT9365 | 552 DPI (21.73 ppmm) | None (ROM/Host mode) | Samsung Galaxy Book, etc. |
+| **FT9368** | 64 × 80 | FT9368 | Unknown (`0.0`) | `ft9368-app.bin` / `pramboot.bin` | Dual-stage boot capacitive |
+| **FW9369** (ID 9362) | 64 × 80 | FW9369 (Special) | Unknown (`0.0`) | None (ROM mode) | GPD Pocket 3, handhelds |
+| **FT9769** (ID 9391/2) | 40 × 196 | FT9769 | 564 DPI (22.20 ppmm) | None (ROM mode) | Ultra-narrow side power key |
+
+> See [Image resolution metadata (image-resolution.md)](image-resolution.md) for detailed sources.
 
 ## Use and test the driver
 
