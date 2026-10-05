@@ -52,6 +52,35 @@ static gsize block_size = 0;
 
 G_DEFINE_BOXED_TYPE (FpiSpiTransfer, fpi_spi_transfer, fpi_spi_transfer_ref, fpi_spi_transfer_unref)
 
+typedef struct
+{
+  FpiSpiTransferGuard callback;
+} SpiDeviceGuard;
+
+/**
+ * fpi_spi_transfer_set_device_guard:
+ * @device: The device whose transport session is checked
+ * @guard: (nullable): Transport session check, or %NULL to remove it
+ *
+ * Register only while no transfer is in flight. Each newly allocated transfer
+ * snapshots the function, so clearing the registration cannot bypass a guard
+ * already attached to a pending message. Devices without a guard retain the
+ * ordinary spidev transfer behavior.
+ */
+void
+fpi_spi_transfer_set_device_guard (FpDevice *device, FpiSpiTransferGuard guard)
+{
+  SpiDeviceGuard *data = NULL;
+
+  g_return_if_fail (FP_IS_DEVICE (device));
+  if (guard)
+    {
+      data = g_new (SpiDeviceGuard, 1);
+      data->callback = guard;
+    }
+  g_object_set_data_full (G_OBJECT (device), "fpi-spi-device-guard", data, g_free);
+}
+
 static void
 log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
 {
@@ -148,6 +177,11 @@ fpi_spi_transfer_new_with_buffer_size (FpDevice *device, int spidev_fd,
   self->device = device;
   self->spidev_fd = spidev_fd;
   self->buffer_size = buffer_size ? buffer_size : block_size;
+  {
+    SpiDeviceGuard *guard = g_object_get_data (G_OBJECT (device), "fpi-spi-device-guard");
+
+    self->guard = guard ? guard->callback : NULL;
+  }
 
   return self;
 }
@@ -350,7 +384,8 @@ transfer_finish_cb (GObject *source_object, GAsyncResult *res, gpointer user_dat
 }
 
 static int
-transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
+transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
+                gsize *expected)
 {
   struct spi_ioc_transfer xfer[2] = { 0 };
   gsize skip = *transferred;
@@ -414,8 +449,8 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
 
   /* This ioctl cannot be interrupted. */
   status = ioctl (transfer->spidev_fd, SPI_IOC_MESSAGE (transfers), xfer);
-
-  if (status >= 0)
+  *expected = len;
+  if (status >= 0 && (gsize) status == len)
     *transferred += len;
 
   return status;
@@ -444,6 +479,8 @@ transfer_thread_func (GTask        *task,
   gsize full_length;
   gsize transferred = 0;
   int status = 0;
+
+  g_autoptr(GError) error = NULL;
 
   if (transfer->buffer_wr == NULL && transfer->buffer_rd == NULL)
     {
@@ -479,6 +516,11 @@ transfer_thread_func (GTask        *task,
           return;
         }
 
+      if (transfer->guard && !transfer->guard (transfer->device, &error))
+        {
+          g_task_return_error (task, g_steal_pointer (&error));
+          return;
+        }
       status = transfer_full_duplex (transfer);
       if (status < 0)
         {
@@ -499,7 +541,10 @@ transfer_thread_func (GTask        *task,
         }
       else
         {
-          g_task_return_boolean (task, TRUE);
+          if (transfer->guard && !transfer->guard (transfer->device, &error))
+            g_task_return_error (task, g_steal_pointer (&error));
+          else
+            g_task_return_boolean (task, TRUE);
         }
       return;
     }
@@ -511,7 +556,28 @@ transfer_thread_func (GTask        *task,
     full_length += transfer->length_rd;
 
   while (transferred < full_length && status >= 0)
-    status = transfer_chunk (transfer, full_length, &transferred);
+    {
+      gsize expected = 0;
+
+      if (transfer->guard && !transfer->guard (transfer->device, &error))
+        {
+          g_task_return_error (task, g_steal_pointer (&error));
+          return;
+        }
+      status = transfer_chunk (transfer, full_length, &transferred, &expected);
+      if (status >= 0 && (gsize) status != expected)
+        {
+          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT,
+                                   "Short SPI transfer (%d of %" G_GSIZE_FORMAT " bytes)",
+                                   status, expected);
+          return;
+        }
+      if (status >= 0 && transfer->guard && !transfer->guard (transfer->device, &error))
+        {
+          g_task_return_error (task, g_steal_pointer (&error));
+          return;
+        }
+    }
 
   if (status < 0)
     {

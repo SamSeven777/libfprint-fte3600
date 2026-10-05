@@ -505,7 +505,7 @@ fpi_device_get_usb_device (FpDevice *device)
  * Get a subtype-specific hardware resource for this #FpDevice. Only permissible to call if the
  * #FpDevice is of type %FP_DEVICE_TYPE_UDEV.
  *
- * Returns: Depends on @subtype; for SPIDEV/FTE3600/HIDRAW returns a path to the relevant device.
+ * Returns: The device path for SPIDEV, FTE3600, GPIO, UIO or HIDRAW.
  */
 gpointer
 fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
@@ -523,6 +523,12 @@ fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
     case FPI_DEVICE_UDEV_SUBTYPE_FTE3600:
     case FPI_DEVICE_UDEV_SUBTYPE_SPIDEV:
       return priv->udev_data.spidev_path;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_GPIO:
+      return priv->udev_data.gpio_path;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_UIO:
+      return priv->udev_data.uio_path;
 
     default:
       g_return_val_if_reached (NULL);

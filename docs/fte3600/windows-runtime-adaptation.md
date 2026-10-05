@@ -4,6 +4,9 @@
 
 `0a4eb56d843e1c3a2b64e37a1e41053e6f863b9dbd2626c59f7669c35dd55b10`
 
+DLL 自身 PE FileVersion / ProductVersion 为 `1.0.0.3188`；不要把 INF 包版本
+当作文件版本。完整生命周期尚未核对完毕，范围见[覆盖记录](windows-lifecycle-coverage.md)。
+
 ## 结论
 
 **没有按笔记本型号拆分 INF，不等于没有硬件适配。该 DLL 把适配分为总线选择、主板资源绑定、传感器识别和具体实现选择四层。**
@@ -61,6 +64,14 @@ SPI 硬件准备函数位于 `0x2EB20`。可核实的行为如下：
 常量和结构成员布局与 [Microsoft 资源描述符文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_cm_partial_resource_descriptor) 及上述 UMDF 头文件一致。
 
 SPI/GPIO 目标创建函数分别在 `0x30511–0x305F5` 和 `0x30065–0x30149` 把连接 ID 格式化为 Resource Hub 设备路径，调用 WDF 目标创建/打开方法。中断创建函数使用同一索引取原始及转换后的描述符，再调用索引 72 的 `WdfInterruptCreate`。
+
+这里的 Type=2 是 Windows 的通用中断资源，**并不要求原始 ACPI 写成 GpioInt**。
+GPIO来源和普通Interrupt都可以由系统交付这种资源；见
+[微软说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-interrupt-resources)。
+已查的创建路径没有修改描述符flags来纠正极性。当前Linux仅接受GpioInt的限制
+已被GPD新报告证实会阻断正常Interrupt布局，不能再只当作未发生的理论边界。
+资源准备、后台IRQ和芯片电源处理的未完成项见
+[生命周期覆盖表](windows-lifecycle-coverage.md)。
 
 **因此，在这条资源绑定路径中，驱动需要知道资源的用途，不需要把 A1 或 GPD 的物理引脚号写进 INF。** Windows 根据主板 ACPI 配置分配连接 ID；ID 隐含控制器、总线地址、时钟等连接参数，驱动通过该 ID 打开连接。这是 [Microsoft SPB 资源模型](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/spb-peripheral-device-drivers) 描述的机制，与本 DLL 的行为吻合。
 

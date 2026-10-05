@@ -21,10 +21,14 @@
 #define MOCK_FD 9017
 #define MOCK_PATH "/mock/fte3600-auth"
 
+static gboolean shutdown_fixture;
+
 #define WRAPPED(name) __typeof__ (name) __wrap_ ## name
 WRAPPED (open);
 WRAPPED (close);
 WRAPPED (ioctl);
+WRAPPED (fpi_fte3600_transport_open);
+WRAPPED (fpi_fte3600_transport_close);
 WRAPPED (fpi_fte3600_backend_for_sensor);
 WRAPPED (fpi_fte3600_discovery_new);
 #undef WRAPPED
@@ -42,6 +46,8 @@ static struct
   gboolean      finger_down, release_active, duplicate_once;
   const guint8 *frames;
   gboolean      retry_next, retry_armed, failed_cleanup, wrong_geometry, cancel_capture;
+  guint         shutdowns;
+  gboolean      shutdown_error, close_error;
   GCancellable *cancellable;
 } mock;
 
@@ -75,23 +81,33 @@ __wrap_close (int fd)
 int
 __wrap_ioctl (int fd, unsigned long operation, ...)
 {
-  va_list args;
-  struct fte3600_bridge_info *info;
+  /* This suite mocks the entire transport, never individual hardware calls. */
+  g_test_fail ();
+  errno = EIO;
+  return -1;
+}
 
-  g_assert_cmpint (fd, ==, MOCK_FD);
-  g_assert_true (mock.opened);
-  /* Any attempted real SPI/reset/IRQ operation is a test failure. */
-  g_assert_cmpuint (operation, ==, FTE3600_IOC_GET_INFO);
-  va_start (args, operation);
-  info = va_arg (args, gpointer);
-  va_end (args);
-  *info = (struct fte3600_bridge_info){
-    .abi_version = FTE3600_BRIDGE_ABI,
-    .max_transfer = FTE3600_BRIDGE_MAX_TRANSFER,
-    .speed_hz = FTE3600_SPI_SPEED_HZ,
-    .bits_per_word = 8,
-  };
-  return 0;
+gboolean
+__wrap_fpi_fte3600_transport_open (FpiDeviceFte3600 *self, GError **error)
+{
+  g_assert_cmpstr (fpi_device_get_udev_data (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_FTE3600), ==, MOCK_PATH);
+  self->spi_fd = __wrap_open (MOCK_PATH, O_RDWR | O_CLOEXEC);
+  self->max_transfer = 32768;
+  return TRUE;
+}
+
+gboolean
+__wrap_fpi_fte3600_transport_close (FpiDeviceFte3600 *self, GError **error)
+{
+  if (self->spi_fd >= 0)
+    __wrap_close (self->spi_fd);
+  self->spi_fd = -1;
+  if (mock.close_error)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Mock transport close failure");
+      return FALSE;
+    }
+  return TRUE;
 }
 
 static void
@@ -154,6 +170,32 @@ create_reset (FpiDeviceFte3600 *self)
 {
   mock.resets++;
   return fpi_ssm_new (FP_DEVICE (self), idle_run, 1);
+}
+
+static void
+shutdown_run (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+
+  /* Final quiesce must precede descriptor release and must not stand in for
+   * the reusable-idle operation between frames. */
+  g_assert_true (mock.opened);
+  g_assert_cmpint (self->spi_fd, ==, MOCK_FD);
+  g_assert_cmpint (fpi_device_get_current_action (dev), ==, FPI_DEVICE_ACTION_CLOSE);
+  mock.shutdowns++;
+  self->armed = FALSE;
+  self->idle_verified = FALSE;
+  if (mock.shutdown_error)
+    fpi_ssm_mark_failed (ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                   "Mock chip shutdown failure"));
+  else
+    fpi_ssm_mark_completed (ssm);
+}
+
+static FpiSsm *
+create_shutdown (FpiDeviceFte3600 *self)
+{
+  return fpi_ssm_new (FP_DEVICE (self), shutdown_run, 1);
 }
 
 static void
@@ -270,8 +312,15 @@ __wrap_fpi_fte3600_backend_for_sensor (Fte3600Sensor sensor)
     .create_wait_release = create_wait_release,
     .create_reset = create_reset,
   };
+  static Fte3600Backend shutdown_backend;
 
   g_assert_cmpint (sensor, ==, mock.sensor);
+  if (shutdown_fixture)
+    {
+      shutdown_backend = backend;
+      shutdown_backend.create_shutdown = create_shutdown;
+      return &shutdown_backend;
+    }
   return &backend;
 }
 
@@ -318,6 +367,78 @@ finish_device (FpDevice *device)
   g_assert_cmpuint (mock.opens, ==, mock.closes);
   g_assert_cmpuint (mock.allocations, ==, mock.destructions);
   g_clear_object (&mock.cancellable);
+}
+
+static void
+test_final_shutdown (gconstpointer user_data)
+{
+  guint scenario = GPOINTER_TO_UINT (user_data);
+  FpDevice *device;
+  FpiDeviceFte3600 *self;
+
+  g_autoptr(GError) error = NULL;
+
+  shutdown_fixture = TRUE;
+  device = new_device (FTE3600_SENSOR_FT9369);
+  self = FPI_DEVICE_FTE3600 (device);
+  g_assert_true (self->idle_verified);
+  g_assert_cmpuint (mock.shutdowns, ==, 0);
+  if (scenario == 0)
+    {
+      const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (mock.sensor);
+      g_autofree guint8 *pixels = g_malloc0 ((gsize) profile->width * profile->height);
+      g_autoptr(FpImage) image = NULL;
+
+      mock.frames = pixels;
+      mock.n_frames = 1;
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+      g_assert_cmpuint (mock.shutdowns, ==, 0);
+      g_assert_true (self->idle_verified);
+    }
+  if (scenario == 1)
+    self->idle_verified = FALSE;
+  if (scenario == 2 || scenario == 3)
+    mock.shutdown_error = TRUE;
+  if (scenario == 3 || scenario == 5)
+    mock.close_error = TRUE;
+  if (scenario == 4)
+    self->session_failed = TRUE;
+
+  if (scenario == 2 || scenario == 3 || scenario == 5)
+    {
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_assert_cmpstr (error->message, ==, scenario == 5 ?
+                       "Mock transport close failure" : "Mock chip shutdown failure");
+      g_clear_error (&error);
+    }
+  else
+    {
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+    }
+  g_assert_cmpuint (mock.shutdowns, ==, scenario == 4 ? 0 : 1);
+  g_assert_cmpuint (mock.resets, ==, 0);
+  g_assert_false (mock.opened);
+  g_assert_false (fp_device_is_open (device));
+  mock.close_error = FALSE;
+  mock.shutdown_error = FALSE;
+  if (scenario == 0)
+    {
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (self->idle_verified);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (mock.shutdowns, ==, 2);
+    }
+  g_object_unref (device);
+  g_assert_cmpuint (mock.opens, ==, mock.closes);
+  g_assert_cmpuint (mock.allocations, ==, mock.destructions);
+  g_clear_object (&mock.cancellable);
+  shutdown_fixture = FALSE;
 }
 
 #if FTE3600_ENABLE_PERSONAL_AUTH
@@ -380,7 +501,9 @@ make_frames_with_density (const Fte3600MatchProfile *profile, gboolean dense)
           }
     }
   else
-    make_pattern (original, profile->width, profile->height);
+    {
+      make_pattern (original, profile->width, profile->height);
+    }
   for (guint sample = 0; sample < 8; sample++)
     for (guint y = 0; y < profile->height; y++)
       for (guint x = 0; x < profile->width; x++)
@@ -806,6 +929,12 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  for (guint scenario = 0; scenario < 6; scenario++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600-auth-lifecycle/shutdown/%u", scenario);
+
+      g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_final_shutdown);
+    }
   for (guint sensor = FTE3600_SENSOR_UNKNOWN + 1; sensor < FTE3600_SENSOR_COUNT; sensor++)
     {
       g_autofree gchar *path = g_strdup_printf ("/fte3600-auth-lifecycle/%s",

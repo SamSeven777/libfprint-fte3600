@@ -26,7 +26,9 @@
 
 /**
  * FpiDeviceUdevSubtypeFlags:
- * @FPI_DEVICE_UDEV_SUBTYPE_FTE3600: The device uses the FTE3600 resource bridge
+ * @FPI_DEVICE_UDEV_SUBTYPE_FTE3600: The device pairs spidev with FTE3600 ACPI GPIO and IRQ resources
+ * @FPI_DEVICE_UDEV_SUBTYPE_GPIO: The device requires a GPIO character device
+ * @FPI_DEVICE_UDEV_SUBTYPE_UIO: The device requires a UIO interrupt device
  * @FPI_DEVICE_UDEV_SUBTYPE_SPIDEV: The device requires an spidev node
  * @FPI_DEVICE_UDEV_SUBTYPE_HIDRAW: The device requires a hidraw node
  *
@@ -34,6 +36,8 @@
  */
 typedef enum {
   FPI_DEVICE_UDEV_SUBTYPE_FTE3600 = 1 << 2,
+  FPI_DEVICE_UDEV_SUBTYPE_GPIO = 1 << 3,
+  FPI_DEVICE_UDEV_SUBTYPE_UIO = 1 << 4,
   FPI_DEVICE_UDEV_SUBTYPE_SPIDEV = 1 << 0,
   FPI_DEVICE_UDEV_SUBTYPE_HIDRAW = 1 << 1,
 } FpiDeviceUdevSubtypeFlags;

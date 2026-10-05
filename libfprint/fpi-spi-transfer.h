@@ -29,6 +29,21 @@ G_BEGIN_DECLS
 typedef struct _FpiSpiTransfer FpiSpiTransfer;
 typedef struct _FpiSsm         FpiSsm;
 
+/**
+ * FpiSpiTransferGuard:
+ * @device: The device whose transport session is checked
+ * @error: Location for the failure reason
+ *
+ * Runs in the transfer worker before and after each successful SPI message.
+ * The driver must keep its session alive until all transfers complete. Guards
+ * may read immutable session metadata, but must not call main-context device
+ * methods. Return %FALSE and set @error if the session is no longer valid.
+ *
+ * Returns: Whether the transport session is valid
+ */
+typedef gboolean (*FpiSpiTransferGuard)(FpDevice *device,
+                                        GError  **error);
+
 typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
                                        FpDevice       *dev,
                                        gpointer        user_data,
@@ -71,6 +86,7 @@ struct _FpiSpiTransfer
   /* Callbacks */
   gpointer               user_data;
   FpiSpiTransferCallback callback;
+  FpiSpiTransferGuard    guard;
 
   /* Data free function */
   GDestroyNotify free_buffer_wr;
@@ -82,6 +98,8 @@ struct _FpiSpiTransfer
 };
 
 GType              fpi_spi_transfer_get_type (void) G_GNUC_CONST;
+void               fpi_spi_transfer_set_device_guard (FpDevice           *device,
+                                                      FpiSpiTransferGuard guard);
 FpiSpiTransfer     *fpi_spi_transfer_new (FpDevice *device,
                                           int       spidev_fd);
 FpiSpiTransfer     *fpi_spi_transfer_new_with_buffer_size (FpDevice *device,

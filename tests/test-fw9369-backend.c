@@ -2,44 +2,82 @@
 /* Real state machines, packet builders and asynchronous transfer ownership.
  * This fixture models public wire behavior using synthetic samples only. */
 #include <string.h>
+#include <linux/spi/spidev.h>
 #include "drivers/fte3600-fw9369.h"
+#include "drivers/fte3600-protocol.h"
+#include "drivers/fte3600-legacy-recovery.h"
 
 G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE)
 
 static struct
 {
   GCancellable *cancellable;
-  guint8 sfr[256];
-  guint16 words[0x8000];
-  guint transactions;
-  guint images;
-  guint irqs;
-  guint16 release_events[4];
-  guint release_count;
-  guint release_index;
-  guint cancel_release_after;
-  guint idle_commands;
-  guint status_reads;
-  guint fail_transaction;
-  guint fdt_samples;
-  guint fdt_writes;
-  guint drains;
-  gboolean completed;
-  gboolean finger;
-  gboolean smic;
-  gboolean cancel_irq;
-  gboolean cancel_image;
-  gboolean cancel_bank;
-  gboolean fail_image;
-  gboolean unstable;
-  gboolean low_fdt;
-  gboolean low_image;
-  gboolean reject_idle;
-  gboolean fail_release_cleanup;
-  gboolean enrolling;
-  gboolean fail_release_arm;
-  gboolean cancel_release_arm;
-  GError *error;
+  guint8        sfr[256];
+  guint16       words[0x8000];
+  guint         transactions;
+  guint         images;
+  guint         irqs;
+  guint16       irq_events[2];
+  guint         irq_count;
+  guint         irq_index;
+  guint         sleep_irq;
+  guint16       event_after_ack;
+  gboolean      fdt_running;
+  guint         fdt_commands;
+  gboolean      fail_fdt_restart;
+  gboolean      cancel_fdt_restart;
+  guint16       release_events[4];
+  guint         release_count;
+  guint         release_index;
+  guint         cancel_release_after;
+  guint         idle_commands;
+  guint         status_reads;
+  guint         fail_transaction;
+  guint         fdt_samples;
+  guint         fdt_writes;
+  guint         drains;
+  guint         wake_commands;
+  guint         sleep_commands;
+  guint         id_reads;
+  guint         event_reads;
+  guint         unavailable_ids;
+  guint         wakes_at_irq;
+  guint         events_at_irq;
+  guint         wrong_id_transaction;
+  guint16       irq_identity;
+  gint64        sleep_time;
+  gboolean      sleeping;
+  gboolean      sleep_on_irq;
+  gboolean      fail_sleep;
+  gboolean      short_sleep;
+  gboolean      fail_mask;
+  gboolean      fail_ack;
+  gboolean      reject_mask;
+  gboolean      cancel_communication_wake;
+  gboolean      discovering;
+  gboolean      physical_cs_high;
+  gboolean      fail_discovery_wake;
+  gboolean      change_discovery_id;
+  guint         discovery_ids;
+  guint         blank_discovery_ids;
+  guint         reset_edges;
+  guint         failure_transaction;
+  gboolean      completed;
+  gboolean      finger;
+  gboolean      smic;
+  gboolean      cancel_irq;
+  gboolean      cancel_image;
+  gboolean      cancel_bank;
+  gboolean      fail_image;
+  gboolean      unstable;
+  gboolean      low_fdt;
+  gboolean      low_image;
+  gboolean      reject_idle;
+  gboolean      fail_release_cleanup;
+  gboolean      enrolling;
+  gboolean      fail_release_arm;
+  gboolean      cancel_release_arm;
+  GError       *error;
 } mock;
 
 static void
@@ -113,7 +151,16 @@ fpi_fte3600_wait_for_irq (FpiSsm *ssm)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
 
+  /* The sensor cannot produce a new detection event after C0 until C2
+   * restarts FDT. Do not let the mock conceal an unarmed second wait. */
+  g_assert_true (mock.fdt_running);
   mock.irqs++;
+  mock.wakes_at_irq = mock.wake_commands;
+  mock.events_at_irq = mock.event_reads;
+  if (mock.sleep_on_irq || mock.sleep_irq == mock.irqs)
+    mock.sleeping = TRUE;
+  if (mock.irq_identity)
+    mock.words[0x1a8b] = mock.irq_identity;
   self->armed = FALSE;
   if (mock.cancel_irq)
     {
@@ -122,6 +169,20 @@ fpi_fte3600_wait_for_irq (FpiSsm *ssm)
     }
   else
     {
+      if (mock.irq_count)
+        {
+          gboolean release = (mock.words[0x1881] & 0x83) == 0;
+
+          g_assert_cmpuint (mock.words[0x1a83] & (release ? 4 : 2), ==, release ? 4 : 2);
+          if (!mock.words[0x1a82])
+            {
+              g_assert_cmpuint (mock.irq_index, <, mock.irq_count);
+              mock.words[0x1a82] = mock.irq_events[mock.irq_index++];
+            }
+          mock.finger = !!(mock.words[0x1a82] & 2);
+          fpi_ssm_next_state (ssm);
+          return;
+        }
       if ((mock.words[0x1881] & 0x83) == 0)
         {
           g_assert_cmpuint (mock.words[0x1a83] & 4, ==, 4);
@@ -175,9 +236,54 @@ emulate_transfer (FpiSpiTransfer *transfer)
 
   g_assert_cmpint (transfer->length_rd, ==, transfer->length_wr);
   g_assert_true (transfer->full_duplex);
+  if (!mock.discovering)
+    g_assert_cmpint (!!(FPI_DEVICE_FTE3600 (transfer->device)->spi_mode & SPI_CS_HIGH),
+                     ==, mock.physical_cs_high);
+  if (mock.discovering)
+    {
+      FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (transfer->device);
+
+      memset (rx, 0, length);
+      /* Other discovery dialects do not wake this sleeping FW9369. */
+      if (!!(self->spi_mode & SPI_CS_HIGH) != mock.physical_cs_high)
+        return;
+      if (tx[0] == 0x10 || (tx[0] == 0x70 && length == 1) ||
+          (tx[0] == 0xff && length == 4) ||
+          (tx[0] == 0x91 && length == 39) ||
+          (tx[0] == 0x04 && length == 10))
+        return;
+      if (tx[0] == 0x04 && length == 12 && be16 (tx + 2) == 0x9a8b)
+        {
+          if (mock.sleeping)
+            {
+              mock.blank_discovery_ids++;
+            }
+          else if (++mock.discovery_ids == 2 && mock.change_discovery_id)
+            {
+              put16 (rx + 6, 0x9365);
+              return;
+            }
+        }
+      /* ROM/firmware fallback after observing this family is not allowed. */
+      g_assert_true (tx[0] == 0x04 || tx[0] == 0x08 || tx[0] == 0x09 ||
+                     tx[0] == 0x5a || tx[0] == 0xa5 || tx[0] == 0xc0);
+    }
   g_assert_cmpuint (length, >=, 3);
   g_assert_cmpuint (tx[0] ^ tx[1], ==, 0xff);
   memset (rx, 0, length);
+  /* Sleeping hardware can expose a blank ID before wake. Configuration
+   * writes cannot make it awake; normal register/image access is forbidden. */
+  if (mock.sleeping && tx[0] != 0x5a)
+    {
+      if ((tx[0] == 0x04 && be16 (tx + 2) == 0x9a8b) ||
+          (tx[0] == 0x09 && tx[2] == 0xc6))
+        {
+          if (tx[0] == 0x04)
+            mock.id_reads++;
+          return;
+        }
+      g_error ("Access %02x before waking sleeping FW9369", tx[0]);
+    }
   switch (tx[0])
     {
     case 0x08:
@@ -186,27 +292,56 @@ emulate_transfer (FpiSpiTransfer *transfer)
         mock.status_reads++;
       rx[4] = mock.sfr[tx[2]];
       return;
+
     case 0x09:
       g_assert_cmpuint (length, ==, 4);
       mock.sfr[tx[2]] = tx[3];
       if (mock.cancel_bank && tx[2] == 0x9a && tx[3] == 0x5a)
         g_cancellable_cancel (mock.cancellable);
       return;
+
     case 0xc0:
       g_assert_cmpuint (length, ==, 3);
+      mock.fdt_running = FALSE;
       mock.idle_commands++;
       if (!mock.reject_idle)
         mock.sfr[0x80] = 0x50;
       return;
+
     case 0x5a:
+      mock.wake_commands++;
+      mock.sleeping = FALSE;
+      if (mock.irqs && mock.cancel_communication_wake)
+        g_cancellable_cancel (mock.cancellable);
+      g_assert_cmpuint (length, ==, 3);
+      return;
+
+    case 0xc1:
+      g_assert_cmpuint (length, ==, 3);
+      mock.fdt_running = FALSE;
+      if (!mock.fail_mask && !mock.reject_mask)
+        g_assert_cmpuint (mock.words[0x1a83] & 0x7ff, ==, 0);
+      mock.sleeping = TRUE;
+      return;
+
     case 0xa5:
+      g_assert_cmpuint (length, ==, 3);
+      return;
+
     case 0xc2:
       g_assert_cmpuint (length, ==, 3);
+      mock.fdt_running = TRUE;
+      mock.fdt_commands++;
+      if (mock.irqs && mock.cancel_fdt_restart)
+        g_cancellable_cancel (mock.cancellable);
       return;
+
     case 0xc4:
       g_assert_cmpuint (length, ==, 3);
+      mock.fdt_running = FALSE;
       mock.sfr[0x80] = 0x54;
       return;
+
     case 0x06:
       g_assert_cmpuint (length, ==, 10246);
       g_assert_cmpuint (be16 (tx + 2), ==, 0x9a05);
@@ -216,14 +351,16 @@ emulate_transfer (FpiSpiTransfer *transfer)
       g_assert_true (transfer->sensitive);
       for (guint i = 0; i < 5120; i++)
         put16 (rx + 6 + i * 2, mock.low_image ? 0 :
-                mock.finger ? (i % 2 ? 1848 : 2148) : 2048);
+               mock.finger ? (i % 2 ? 1848 : 2148) : 2048);
       mock.images++;
       if (mock.cancel_image)
         g_cancellable_cancel (mock.cancellable);
       return;
+
     case 0x04:
     case 0x05:
       break;
+
     default:
       g_error ("Unestablished FW9369 command %02x", tx[0]);
     }
@@ -239,13 +376,26 @@ emulate_transfer (FpiSpiTransfer *transfer)
           g_assert_true (transfer->sensitive);
           for (guint i = 0; i < 4; i++)
             put16 (rx + 6 + i * 2, mock.low_fdt ? 0 :
-                    512 + (mock.unstable && mock.fdt_samples % 2 ? 40 : 0));
+                   512 + (mock.unstable && mock.fdt_samples % 2 ? 40 : 0));
           mock.fdt_samples++;
         }
       else
         {
           g_assert_cmpuint (length, ==, 12);
           g_assert_cmpuint (be16 (tx + 4), ==, 1);
+          if (address == 0x1a8b)
+            {
+              mock.id_reads++;
+              if (mock.words[address] != 0x9362 && mock.words[address] != 0 && mock.words[address] != 0xffff)
+                mock.wrong_id_transaction = mock.transactions;
+              if (mock.unavailable_ids)
+                {
+                  mock.unavailable_ids--;
+                  return;
+                }
+            }
+          if (address == 0x1a82)
+            mock.event_reads++;
           put16 (rx + 6, mock.words[address]);
         }
       return;
@@ -265,7 +415,16 @@ emulate_transfer (FpiSpiTransfer *transfer)
   g_assert_cmpuint (length, ==, 8);
   g_assert_cmpuint (be16 (tx + 4), ==, 1);
   if (address == 0x1a84)
-    mock.words[0x1a82] &= ~be16 (tx + 6);
+    {
+      mock.words[0x1a82] &= ~be16 (tx + 6);
+      if (mock.irqs == 1 && mock.event_after_ack)
+        {
+          mock.words[0x1a82] |= mock.event_after_ack;
+          mock.event_after_ack = 0;
+        }
+    }
+  else if (address == 0x1a83 && mock.reject_mask)
+    return;
   else
     mock.words[address] = be16 (tx + 6);
   if (address == 0x1885)
@@ -279,10 +438,10 @@ emulate_transfer (FpiSpiTransfer *transfer)
 
 typedef struct
 {
-  FpiSpiTransfer *transfer;
-  GCancellable *cancellable;
+  FpiSpiTransfer        *transfer;
+  GCancellable          *cancellable;
   FpiSpiTransferCallback callback;
-  gpointer user_data;
+  gpointer               user_data;
 } Pending;
 
 static gboolean
@@ -295,6 +454,26 @@ complete_transfer (gpointer user_data)
   mock.transactions++;
   if (pending->cancellable)
     g_cancellable_set_error_if_cancelled (pending->cancellable, &error);
+  if (!error && mock.discovering && mock.fail_discovery_wake && transfer->buffer_wr[0] == 0x5a)
+    {
+      mock.failure_transaction = mock.transactions;
+      error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected discovery wake failure");
+    }
+  if (transfer->buffer_wr[0] == 0xc1)
+    {
+      mock.sleep_commands++;
+      mock.sleep_time = g_get_monotonic_time ();
+      if (!error && (mock.fail_sleep || mock.short_sleep))
+        error = g_error_new_literal (G_IO_ERROR,
+                                     mock.short_sleep ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_FAILED,
+                                     "Injected sleep transfer failure");
+    }
+  if (!error && mock.fail_mask && transfer->buffer_wr[0] == 0x04 &&
+      be16 (transfer->buffer_wr + 2) == 0x9a83)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected mask read failure");
+  if (!error && mock.fail_ack && transfer->buffer_wr[0] == 0x05 &&
+      be16 (transfer->buffer_wr + 2) == 0x9a84)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected event acknowledge failure");
   if (!error && (mock.transactions == mock.fail_transaction ||
                  (mock.fail_image && transfer->buffer_wr[0] == 0x06)))
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected SPI failure");
@@ -302,6 +481,8 @@ complete_transfer (gpointer user_data)
       (be16 (transfer->buffer_wr + 2) & 0x7fff) == 0x1881 &&
       (be16 (transfer->buffer_wr + 6) & 0x83) == 0)
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected release-arm failure");
+  if (!error && mock.irqs && mock.fail_fdt_restart && transfer->buffer_wr[0] == 0xc2)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected FDT restart failure");
   if (!error)
     emulate_transfer (transfer);
   pending->callback (transfer, transfer->device, pending->user_data, error);
@@ -311,15 +492,15 @@ complete_transfer (gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
-void __wrap_fpi_spi_transfer_submit (FpiSpiTransfer *transfer,
-                                     GCancellable *cancellable,
+void __wrap_fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
+                                     GCancellable          *cancellable,
                                      FpiSpiTransferCallback callback,
-                                     gpointer user_data);
+                                     gpointer               user_data);
 void
-__wrap_fpi_spi_transfer_submit (FpiSpiTransfer *transfer,
-                                GCancellable *cancellable,
+__wrap_fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
+                                GCancellable          *cancellable,
                                 FpiSpiTransferCallback callback,
-                                gpointer user_data)
+                                gpointer               user_data)
 {
   Pending *pending = g_new0 (Pending, 1);
 
@@ -328,6 +509,72 @@ __wrap_fpi_spi_transfer_submit (FpiSpiTransfer *transfer,
   pending->callback = callback;
   pending->user_data = user_data;
   g_idle_add (complete_transfer, pending);
+}
+
+/* Thin transport adapters only: all protocol selection lives in production. */
+void
+fpi_fte3600_submit_transfer (FpiSsm *ssm, FpiSpiTransfer *transfer, gboolean cancellable)
+{
+  transfer->ssm = ssm;
+  __wrap_fpi_spi_transfer_submit (transfer, cancellable ? mock.cancellable : NULL,
+                                  fpi_ssm_spi_transfer_cb, NULL);
+}
+
+void
+fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len, gboolean cancellable)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  gsize length = FTE3600_REG_READ_HEADER_SIZE + result_len;
+
+  g_autoptr(GError) error = NULL;
+  FpiSpiTransfer *transfer = fpi_spi_transfer_new_with_buffer_size (
+    FP_DEVICE (self), self->spi_fd, self->max_transfer);
+
+  g_assert_cmpuint (length, <=, sizeof self->small_rx);
+  fpi_spi_transfer_write (transfer, length);
+  g_assert_cmpuint (fpi_fte3600_build_app_read (transfer->buffer_wr, length, reg,
+                                                result_len, &error), ==, length);
+  g_assert_no_error (error);
+  fpi_spi_transfer_read_full (transfer, self->small_rx, length, NULL);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  self->small_rx_valid = TRUE;
+  fpi_fte3600_submit_transfer (ssm, transfer, cancellable);
+}
+
+guint8
+fpi_fte3600_read_result_byte (FpiDeviceFte3600 *self)
+{
+  return self->small_rx[FTE3600_REG_RESULT_OFFSET];
+}
+
+gboolean
+fpi_fte3600_mcu_is_idle (FpiDeviceFte3600 *self)
+{
+  return self->small_rx_valid && self->small_rx[4] == 0xa5 && self->small_rx[5] == 0x5a;
+}
+
+gboolean
+fpi_fte3600_set_cs_polarity (FpiDeviceFte3600 *self, gboolean active_high, GError **error)
+{
+  g_assert_cmpuint (self->spi_mode & (SPI_CPOL | SPI_CPHA), ==, SPI_MODE_3);
+  self->spi_mode = (self->spi_mode & ~SPI_CS_HIGH) | (active_high ? SPI_CS_HIGH : 0);
+  return TRUE;
+}
+
+void
+fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean asserted)
+{
+  mock.reset_edges++;
+  if (asserted)
+    mock.sleeping = FALSE;
+  self->idle_verified = FALSE;
+  fpi_ssm_next_state (ssm);
+}
+
+G_GNUC_NORETURN FpiSsm *
+fpi_fte3600_legacy38_identify_new (FpiDeviceFte3600 *self, gboolean boot_a)
+{
+  g_error ("FW9369 reopen must never enter legacy ROM discovery");
 }
 
 static void
@@ -408,6 +655,7 @@ test_capture (gconstpointer process)
         g_assert_cmpuint (self->capture_rx[j], ==, 0);
     }
   g_assert_cmpuint (mock.fdt_writes, ==, 2);
+  g_assert_cmpuint (mock.sleep_commands, ==, 0);
   g_assert_cmpuint (mock.sfr[0x9a], ==, 0);
   teardown (self);
 }
@@ -421,11 +669,21 @@ test_capture_error (gconstpointer scenario)
   g_assert_no_error (mock.error);
   switch (GPOINTER_TO_UINT (scenario))
     {
-    case 0: mock.cancel_irq = TRUE; break;
-    case 1: mock.cancel_image = TRUE; break;
-    case 2: mock.fail_image = TRUE; break;
-    case 3: mock.fail_transaction = mock.transactions + 10; break;
-    case 4: mock.cancel_bank = TRUE; break;
+    case 0: mock.cancel_irq = TRUE;
+      break;
+
+    case 1: mock.cancel_image = TRUE;
+      break;
+
+    case 2: mock.fail_image = TRUE;
+      break;
+
+    case 3: mock.fail_transaction = mock.transactions + 10;
+      break;
+
+    case 4: mock.cancel_bank = TRUE;
+      break;
+
     default: g_assert_not_reached ();
     }
   run_ssm (self->backend->create_capture (self));
@@ -450,21 +708,45 @@ test_init_error (gconstpointer scenario)
 
   switch (GPOINTER_TO_UINT (scenario))
     {
-    case 0: mock.sfr[0x9b] = 0xff; break;
-    case 1: mock.words[0x1a8b] = 0; break;
-    case 2: mock.unstable = TRUE; break;
-    case 3: mock.fail_transaction = 1; break;
-    case 4: mock.low_fdt = TRUE; break;
-    case 5: mock.low_image = TRUE; break;
+    case 0: mock.sfr[0x9b] = 0xff;
+      break;
+
+    case 1: mock.words[0x1a8b] = 0;
+      break;
+
+    case 2: mock.unstable = TRUE;
+      break;
+
+    case 3: mock.fail_transaction = 1;
+      break;
+
+    case 4: mock.low_fdt = TRUE;
+      break;
+
+    case 5: mock.low_image = TRUE;
+      break;
+
+    case 6: mock.words[0x1a8b] = 0x9365;
+      break;
+
     default: g_assert_not_reached ();
     }
   run_ssm (self->backend->create_init (self));
   g_assert_nonnull (mock.error);
-  g_assert_true (self->idle_verified);
+  g_assert_cmpint (self->idle_verified, ==, GPOINTER_TO_UINT (scenario) != 6);
+  g_assert_cmpint (self->session_failed, ==, GPOINTER_TO_UINT (scenario) == 6);
+  if (GPOINTER_TO_UINT (scenario) == 6)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (mock.wrong_id_transaction, >, 0);
+      g_assert_cmpuint (mock.transactions, ==, mock.wrong_id_transaction);
+    }
   g_assert_cmpuint (mock.transactions, <, 3000);
   run_ssm (self->backend->create_capture (self));
   g_assert_nonnull (mock.error);
   g_assert_null (self->captured_image);
+  if (GPOINTER_TO_UINT (scenario) == 6)
+    g_assert_cmpuint (mock.transactions, ==, mock.wrong_id_transaction);
   teardown (self);
 }
 
@@ -485,6 +767,240 @@ test_cleanup_error (void)
   g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
   g_assert_false (self->idle_verified);
   g_assert_cmpuint (mock.status_reads, ==, 11);
+  teardown (self);
+}
+
+static void
+test_shutdown (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  mock.words[0x1a83] = 0xffff;
+  mock.words[0x1a82] = 0xffff;
+  mock.fail_sleep = scenario == 1 || scenario == 3;
+  mock.short_sleep = scenario == 2;
+  mock.fail_transaction = scenario == 3 ? mock.transactions + 1 : 0;
+  mock.fail_mask = scenario == 4;
+  mock.reject_idle = scenario == 5;
+  if (mock.reject_idle)
+    mock.sfr[0x80] = 0x54;
+  mock.fail_ack = scenario == 6;
+  mock.reject_mask = scenario == 8;
+  if (scenario == 7)
+    g_cancellable_cancel (mock.cancellable);
+  run_ssm (self->backend->create_shutdown (self));
+  g_assert_false (self->idle_verified);
+  g_assert_cmpuint (mock.sleep_commands, ==, 1);
+  g_assert_cmpint (g_get_monotonic_time () - mock.sleep_time, >=, 1000);
+  g_assert_cmpuint (mock.words[0x1a82], ==, scenario == 6 ? 0xffff : 0xf800);
+  if (!mock.fail_mask && !mock.reject_mask)
+    g_assert_cmpuint (mock.words[0x1a83], ==, 0xf800);
+  if (scenario == 0 || scenario == 7)
+    {
+      g_assert_no_error (mock.error);
+      g_assert_true (mock.sleeping);
+      g_cancellable_reset (mock.cancellable);
+      /* A subsequent arm must wake before any FDT/image configuration. */
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_false (mock.sleeping);
+      g_assert_nonnull (self->captured_image);
+      g_assert_cmpuint (mock.sleep_commands, ==, 1);
+    }
+  else if (scenario == 5 || scenario == 8)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+    }
+  else
+    {
+      g_assert_error (mock.error, G_IO_ERROR,
+                      (scenario == 2 ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_FAILED));
+    }
+  if (scenario == 3)
+    g_assert_cmpstr (mock.error->message, ==, "Injected SPI failure");
+  teardown (self);
+}
+
+static void
+test_irq_communication (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+  guint images;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  images = mock.images;
+  mock.id_reads = 0;
+  mock.sleep_on_irq = scenario == 0 || scenario == 3;
+  mock.cancel_communication_wake = scenario == 3;
+  mock.unavailable_ids = scenario == 1 ? 100 : 0;
+  mock.irq_identity = scenario == 2 ? 0x9365 : 0;
+  run_ssm (self->backend->create_capture (self));
+  if (scenario == 0)
+    {
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (mock.id_reads, ==, 4);
+      g_assert_cmpuint (mock.event_reads - mock.events_at_irq, ==, 1);
+      g_assert_nonnull (self->captured_image);
+    }
+  else
+    {
+      if (scenario == 3)
+        g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+      else
+        g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (mock.images, ==, images);
+      g_assert_cmpuint (mock.event_reads, ==, mock.events_at_irq);
+      g_assert_cmpuint (mock.wake_commands - mock.wakes_at_irq, ==,
+                        scenario == 1 ? 10 : scenario == 3 ? 1 : 0);
+      if (scenario == 2)
+        {
+          g_assert_true (self->session_failed);
+          g_assert_false (self->idle_verified);
+          g_assert_cmpuint (mock.transactions, ==, mock.wrong_id_transaction);
+        }
+    }
+  teardown (self);
+}
+
+static void
+test_fdt_recovery (gconstpointer scenario_ptr)
+{
+  const guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  const gboolean release = scenario & 1;
+  const guint kind = scenario / 2;
+  FpiDeviceFte3600 *self = setup (FALSE);
+  guint images, fdt_commands, fdt_writes, drains;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  if (release)
+    {
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_clear_object (&self->captured_image);
+    }
+  mock.irqs = 0;
+  images = mock.images;
+  fdt_commands = mock.fdt_commands;
+  fdt_writes = mock.fdt_writes;
+  drains = mock.drains;
+  /* First deliver an unrelated event (or an empty IRQ); then a real event
+   * for the configured detector. Only the first IRQ needs a wake recovery. */
+  mock.sleep_irq = kind == 2 ? 0 : 1;
+  mock.irq_events[0] = kind == 1 ? 0 : release ? 2 : 4;
+  mock.irq_events[1] = release ? 4 : 2;
+  mock.irq_count = kind == 3 ? 1 : 2;
+  if (kind == 3)
+    mock.event_after_ack = mock.irq_events[1];
+  mock.fail_fdt_restart = kind == 4;
+  mock.cancel_fdt_restart = kind == 5;
+  run_ssm (release ? self->backend->create_wait_release (self) :
+           self->backend->create_capture (self));
+
+  /* Restarting the detector must preserve its mode, baseline and new
+   * latches, rather than executing the arm script or draining IRQs again. */
+  g_assert_cmpuint (mock.fdt_writes, ==, fdt_writes + 1);
+  g_assert_cmpuint (mock.drains, ==, drains + 1);
+  g_assert_cmpuint (mock.fdt_commands, ==,
+                    fdt_commands + (kind == 2 || kind == 4 ? 1 : 2));
+  g_assert_true (self->idle_verified);
+  g_assert_false (self->armed);
+  g_assert_false (mock.fdt_running);
+  if (kind >= 4)
+    {
+      g_assert_error (mock.error, G_IO_ERROR,
+                      (kind == 4 ? G_IO_ERROR_FAILED : G_IO_ERROR_CANCELLED));
+      g_assert_cmpuint (mock.irqs, ==, 1);
+      g_assert_cmpuint (mock.images, ==, images);
+      g_assert_null (self->captured_image);
+    }
+  else
+    {
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (mock.irqs, ==, 2);
+      g_assert_cmpuint (mock.irq_index, ==, mock.irq_count);
+      g_assert_cmpuint (mock.images, ==, images + !release);
+      if (release)
+        g_assert_null (self->captured_image);
+      else
+        g_assert_nonnull (self->captured_image);
+    }
+  teardown (self);
+}
+
+static void
+test_shutdown_discovery_reopen (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  g_autoptr(GError) error = NULL;
+  guint images;
+
+  mock.physical_cs_high = scenario == 3;
+  self->spi_mode = SPI_MODE_3 | (mock.physical_cs_high ? SPI_CS_HIGH : 0);
+  self->transport_capabilities = FTE3600_TRANSPORT_CAP_CS_POLARITY;
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  run_ssm (self->backend->create_shutdown (self));
+  g_assert_no_error (mock.error);
+  g_assert_true (mock.sleeping);
+  g_assert_false (self->idle_verified);
+  images = mock.images;
+
+  /* A close discards host calibration; the actual C1 left the silicon asleep. */
+  self->backend->destroy (self);
+  self->identity = (Fte3600Identity){ 0 };
+  self->spi_mode = SPI_MODE_3; /* New transport session restores its baseline. */
+  g_assert_true (self->backend->prepare_capture (self, &error));
+  g_assert_no_error (error);
+  mock.discovering = TRUE;
+  mock.fail_discovery_wake = scenario == 1;
+  mock.change_discovery_id = scenario == 2;
+  run_ssm (fpi_fte3600_discovery_new (self, FALSE));
+  mock.discovering = FALSE;
+  g_assert_cmpuint (mock.blank_discovery_ids, >=, 1);
+  g_assert_cmpuint (mock.sleep_commands, ==, 1);
+  if (scenario == 0 || scenario == 3)
+    {
+      g_assert_no_error (mock.error);
+      g_assert_false (mock.sleeping);
+      g_assert_cmpuint (self->identity.sensor, ==, FTE3600_SENSOR_FT9369);
+      g_assert_cmpuint (self->identity.response, ==, 0x9362);
+      g_assert_cmpuint (mock.discovery_ids, ==, 2);
+      if (scenario == 0)
+        g_assert_cmpuint (mock.reset_edges, ==, 0);
+      g_assert_cmpuint (self->spi_mode, ==, SPI_MODE_3 | (scenario == 3 ? SPI_CS_HIGH : 0));
+      self->sensor = fpi_fte3600_sensor_get (self->identity.sensor);
+      run_ssm (self->backend->create_init (self));
+      g_assert_no_error (mock.error);
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_nonnull (self->captured_image);
+      g_assert_cmpuint (mock.images, >, images);
+      g_assert_true (self->idle_verified);
+    }
+  else
+    {
+      if (scenario == 1)
+        {
+          g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+          g_assert_cmpuint (mock.transactions, ==, mock.failure_transaction);
+        }
+      else
+        {
+          g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+          g_assert_cmpuint (mock.discovery_ids, ==, 2);
+        }
+      g_assert_cmpuint (self->identity.sensor, ==, FTE3600_SENSOR_UNKNOWN);
+      g_assert_cmpuint (mock.images, ==, images);
+      g_assert_cmpuint (self->spi_mode, ==, SPI_MODE_3);
+    }
   teardown (self);
 }
 
@@ -510,14 +1026,24 @@ test_wait_release (gconstpointer scenario_ptr)
   switch (scenario)
     {
     case 0: break;
-    case 1: mock.cancel_irq = TRUE; break;
+
+    case 1: mock.cancel_irq = TRUE;
+      break;
+
     case 2:
       mock.release_events[1] = 2;
       mock.cancel_release_after = 2;
       break;
-    case 3: mock.release_events[0] = 0x400; break;
-    case 4: mock.fail_transaction = mock.transactions + 1; break;
-    case 5: mock.fail_release_cleanup = TRUE; break;
+
+    case 3: mock.release_events[0] = 0x400;
+      break;
+
+    case 4: mock.fail_transaction = mock.transactions + 1;
+      break;
+
+    case 5: mock.fail_release_cleanup = TRUE;
+      break;
+
     default: g_assert_not_reached ();
     }
   run_ssm (self->backend->create_wait_release (self));
@@ -534,11 +1060,17 @@ test_wait_release (gconstpointer scenario_ptr)
       g_assert_nonnull (self->captured_image);
     }
   else if (scenario == 1 || scenario == 2)
-    g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    {
+      g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    }
   else if (scenario == 4)
-    g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+    {
+      g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+    }
   else
-    g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+    }
   g_assert_cmpint (self->idle_verified, ==, scenario != 5);
   teardown (self);
 }
@@ -558,7 +1090,7 @@ test_enroll_prearm (gconstpointer scenario_ptr)
   mock.cancel_release_arm = scenario == 1;
   mock.fail_release_arm = scenario == 2;
   run_ssm (self->backend->create_capture (self));
-  if (scenario == 0)
+  if (scenario == 0 || scenario == 4)
     {
       g_assert_no_error (mock.error);
       g_assert_nonnull (self->captured_image);
@@ -569,6 +1101,7 @@ test_enroll_prearm (gconstpointer scenario_ptr)
       /* Finger lifts while the host is matching: its already-pending UP
        * must survive until wait_release, without requiring a second edge. */
       mock.words[0x1a82] = 4;
+      mock.sleep_on_irq = scenario == 4;
       fdt_writes = mock.fdt_writes;
       drains = mock.drains;
       run_ssm (self->backend->create_wait_release (self));
@@ -579,6 +1112,7 @@ test_enroll_prearm (gconstpointer scenario_ptr)
       g_assert_cmpuint (mock.words[0x1a82], ==, 0);
       g_assert_true (self->idle_verified);
       g_assert_false (self->armed);
+      mock.sleep_on_irq = FALSE;
       /* Final acquisition must be idle when the core completes enrollment. */
       self->enroll_stages_passed = 7;
       run_ssm (self->backend->create_capture (self));
@@ -611,9 +1145,33 @@ main (int argc, char **argv)
   g_test_add_func ("/fw9369-backend/cleanup-error", test_cleanup_error);
   for (guint i = 0; i < 4; i++)
     {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/shutdown-reopen/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_shutdown_discovery_reopen);
+    }
+  for (guint i = 0; i < 9; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/shutdown/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_shutdown);
+    }
+  for (guint i = 0; i < 4; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/communication/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_irq_communication);
+    }
+  for (guint i = 0; i < 5; i++)
+    {
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/enroll-prearm/%u", i);
 
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_enroll_prearm);
+    }
+  for (guint i = 0; i < 12; i++)
+    {
+      static const gchar *cases[] = { "unrelated", "empty", "awake-control",
+                                     "latched", "restart-error", "restart-cancel" };
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/fdt-recovery/%s/%s",
+                                               i & 1 ? "release" : "capture", cases[i / 2]);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_fdt_recovery);
     }
   for (guint i = 0; i < 6; i++)
     {
@@ -626,7 +1184,7 @@ main (int argc, char **argv)
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/capture-error/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_capture_error);
     }
-  for (guint i = 0; i < 6; i++)
+  for (guint i = 0; i < 7; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/init-error/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_init_error);

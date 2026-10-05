@@ -443,9 +443,10 @@ fte3600_confirm_identity (FpiSsm *ssm, Fte3600Identity identity, guint repeat_st
   else
     {
       self->identity = identity;
-      fp_dbg ("Detected %s with physical %s chip select",
-              fpi_fte3600_sensor_get (identity.sensor)->name,
-              (self->spi_mode & SPI_CS_HIGH) ? "active-high" : "active-low");
+      fp_dbg ("Detected %s (SPI mode 0x%x, CS %s)",
+              fpi_fte3600_sensor_get (identity.sensor)->name, self->spi_mode,
+              (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY) ?
+              "switchable" : "controller-managed");
       fpi_ssm_mark_completed (ssm);
     }
   return TRUE;
@@ -477,7 +478,7 @@ fte3600_rom_probe_done (FpiSsm *child, FpDevice *dev, GError *error)
       fpi_ssm_jump_to_state (parent, IDENTIFY_DONE);
     }
   else if (!data->rom_alternate &&
-           (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY) &&
+           (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY) &&
            g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED))
     {
       g_clear_error (&error);
@@ -636,7 +637,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case IDENTIFY_NEXT_POLARITY:
-      if (!data->alternate && (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY))
+      if (!data->alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
         {
           data->alternate = TRUE;
           if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
@@ -715,7 +716,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case IDENTIFY_LEGACY_WAKE_CHECK_MCU:
-      fp_dbg ("Legacy wake MCU response: %02x %02x (attempt %u/%u, CS %s)",
+      fp_dbg ("Legacy wake MCU response: %02x %02x (attempt %u/%u, reported CS_HIGH %s)",
               self->small_rx[FTE3600_REG_RESULT_OFFSET],
               self->small_rx[FTE3600_REG_RESULT_OFFSET + 1], data->wake_attempts,
               FTE3600_LEGACY_WAKE_MAX_ATTEMPTS,
@@ -756,7 +757,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case IDENTIFY_LEGACY_WAKE_NEXT:
-      if (!data->wake_alternate && (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY))
+      if (!data->wake_alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
         {
           data->wake_alternate = TRUE;
           if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
@@ -791,7 +792,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case IDENTIFY_NEGOTIATE_NEXT:
-      if (!data->negotiation_alternate && (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY))
+      if (!data->negotiation_alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
         {
           data->negotiation_alternate = TRUE;
           if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
@@ -812,7 +813,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
     case IDENTIFY_ROM:
       if (data->unknown_application[data->rom_alternate])
         {
-          if (!data->rom_alternate && (self->bridge_capabilities & FTE3600_BRIDGE_CAP_CS_POLARITY))
+          if (!data->rom_alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
             {
               data->rom_alternate = TRUE;
               if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))

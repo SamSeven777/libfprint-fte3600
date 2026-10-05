@@ -3,3 +3,4 @@
 **/dkms.conf text eol=lf
 **/PKGBUILD text eol=lf
 packaging/arch/*.install text eol=lf
+scripts/fte3600-pair.py text eol=lf

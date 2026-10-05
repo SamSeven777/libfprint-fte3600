@@ -20,32 +20,35 @@
 #define MAX_STABILITY_ATTEMPTS 10
 #define REQUIRED_STABLE_SAMPLES 3
 #define MAX_SPURIOUS_EVENTS 64
+#define COMMUNICATION_WAKE_ATTEMPTS 10
+#define COMMUNICATION_SETTLE_MS 20
 
 typedef struct
 {
-  guint16 baseline[FTE3600_FW9369_PIXELS];
-  guint16 raw[FTE3600_FW9369_PIXELS];
-  guint16 fdt[4];
-  guint16 fdt_previous[4];
-  guint16 fdt_base[4];
-  guint16 process;
-  guint16 events;
-  guint16 id;
-  guint16 spi_mode;
-  guint8 image_dac;
-  guint8 fdt_dac;
-  guint low_dac;
-  guint high_dac;
-  guint attempts;
-  guint stable;
-  guint spurious;
+  guint16  baseline[FTE3600_FW9369_PIXELS];
+  guint16  raw[FTE3600_FW9369_PIXELS];
+  guint16  fdt[4];
+  guint16  fdt_previous[4];
+  guint16  fdt_base[4];
+  guint16  process;
+  guint16  events;
+  guint16  id;
+  guint16  spi_mode;
+  guint8   image_dac;
+  guint8   fdt_dac;
+  guint    low_dac;
+  guint    high_dac;
+  guint    attempts;
+  guint    stable;
+  guint    spurious;
   gboolean smic;
   gboolean calibrated;
   gboolean release_armed;
+  gboolean communication_stopped_fdt;
+  gboolean identity_lost;
 } Fw9369Data;
 
-typedef enum
-{
+typedef enum {
   OP_COMMAND, OP_SFR_WRITE, OP_SFR_READ, OP_WORD_WRITE, OP_WORD_READ,
   OP_UPDATE_WORD, OP_POLL_SFR, OP_POLL_WORD, OP_FDT_READ, OP_FDT_BASE,
   OP_IMAGE_READ,
@@ -54,26 +57,26 @@ typedef enum
 typedef struct
 {
   FwOperation kind;
-  guint16 address;
-  guint16 value;
-  guint16 mask;
-  guint delay_ms;
-  guint attempts;
-  guint16 *result;
-  guint16 source;
+  guint16     address;
+  guint16     value;
+  guint16     mask;
+  guint       delay_ms;
+  guint       attempts;
+  guint16    *result;
+  guint16     source;
 } FwStep;
 
 typedef struct
 {
-  GArray *steps;
-  guint index;
-  guint phase;
-  guint attempts;
-  guint16 value;
-  guint8 rx[FTE3600_FW9369_FDT_WRITE_SIZE];
+  GArray  *steps;
+  guint    index;
+  guint    phase;
+  guint    attempts;
+  guint16  value;
+  guint8   rx[FTE3600_FW9369_FDT_WRITE_SIZE];
   gboolean failed_transfer;
   gboolean best_effort;
-  GError *error;
+  GError  *error;
 } FwScript;
 
 enum { SCRIPT_TRANSFER, SCRIPT_RESULT, SCRIPT_STATES };
@@ -82,6 +85,18 @@ static Fw9369Data *
 get_data (FpiDeviceFte3600 *self)
 {
   return self->backend_data;
+}
+
+static void
+lose_identity (FpiDeviceFte3600 *self)
+{
+  Fw9369Data *data = get_data (self);
+
+  data->identity_lost = TRUE;
+  data->calibrated = FALSE;
+  self->session_failed = TRUE;
+  self->armed = FALSE;
+  self->idle_verified = FALSE;
 }
 
 static void
@@ -126,6 +141,7 @@ script_run (FpiSsm *ssm, FpDevice *dev)
   FwScript *script = fpi_ssm_get_data (ssm);
   FwStep *step;
   guint8 tx[FTE3600_FW9369_FDT_WRITE_SIZE];
+
   g_autoptr(GError) error = NULL;
   gsize length = 0;
   guint16 value;
@@ -145,8 +161,8 @@ script_run (FpiSsm *ssm, FpDevice *dev)
   if (fpi_ssm_get_cur_state (ssm) == SCRIPT_RESULT)
     {
       value = step->kind == OP_SFR_READ || step->kind == OP_POLL_SFR ?
-        script->rx[FTE3600_FW9369_SFR_RESULT_OFFSET] :
-        read_word (script->rx + FTE3600_FW9369_WORD_RESULT_OFFSET);
+              script->rx[FTE3600_FW9369_SFR_RESULT_OFFSET] :
+              read_word (script->rx + FTE3600_FW9369_WORD_RESULT_OFFSET);
       if (!script->failed_transfer)
         {
           if (step->kind == OP_UPDATE_WORD && script->phase == 0)
@@ -166,8 +182,8 @@ script_run (FpiSsm *ssm, FpDevice *dev)
               (value & step->mask) != (script->value & step->mask))
             {
               fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                FP_DEVICE_ERROR_PROTO, "FW9369 register %04x did not retain configuration",
-                step->address));
+                                     FP_DEVICE_ERROR_PROTO, "FW9369 register %04x did not retain configuration",
+                                     step->address));
               return;
             }
           if (step->kind == OP_POLL_WORD || step->kind == OP_POLL_SFR)
@@ -183,8 +199,8 @@ script_run (FpiSsm *ssm, FpDevice *dev)
                     fpi_ssm_mark_failed (ssm, g_steal_pointer (&script->error));
                   else
                     fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                      FP_DEVICE_ERROR_PROTO, "FW9369 register %04x state %04x did not become %04x",
-                      step->address, value, step->value));
+                                           FP_DEVICE_ERROR_PROTO, "FW9369 register %04x state %04x did not become %04x",
+                                           step->address, value, step->value));
                   return;
                 }
             }
@@ -219,16 +235,20 @@ script_run (FpiSsm *ssm, FpDevice *dev)
     case OP_COMMAND:
       length = fpi_fte3600_fw9369_build_command (tx, sizeof tx, step->value, &error);
       break;
+
     case OP_SFR_WRITE:
       length = fpi_fte3600_fw9369_build_sfr_write (tx, sizeof tx, step->address, step->value, &error);
       break;
+
     case OP_SFR_READ:
     case OP_POLL_SFR:
       length = fpi_fte3600_fw9369_build_sfr_read (tx, sizeof tx, step->address, &error);
       break;
+
     case OP_WORD_WRITE:
       length = fpi_fte3600_fw9369_build_word_write (tx, sizeof tx, step->address, step->value, &error);
       break;
+
     case OP_UPDATE_WORD:
       if (script->phase == 1)
         {
@@ -236,19 +256,23 @@ script_run (FpiSsm *ssm, FpDevice *dev)
           break;
         }
       G_GNUC_FALLTHROUGH;
+
     case OP_WORD_READ:
     case OP_POLL_WORD:
       length = fpi_fte3600_fw9369_build_word_read (tx, sizeof tx,
-        step->kind == OP_UPDATE_WORD && script->phase == 0 ? step->source : step->address,
-        &error);
+                                                   step->kind == OP_UPDATE_WORD && script->phase == 0 ? step->source : step->address,
+                                                   &error);
       break;
+
     case OP_FDT_READ:
       length = fpi_fte3600_fw9369_build_fdt_read (tx, sizeof tx, data->smic, &error);
       break;
+
     case OP_FDT_BASE:
       length = fpi_fte3600_fw9369_build_fdt_base (tx, sizeof tx, data->smic,
-                                                data->fdt_base, 4, &error);
+                                                  data->fdt_base, 4, &error);
       break;
+
     case OP_IMAGE_READ:
       length = self->capture_frame_size;
       break;
@@ -417,7 +441,7 @@ fdt_mode (FpiSsm *ssm, Fw9369Data *data, gboolean calibrating)
   scan_rate (ssm, FALSE);
   update_word (ssm, FTE3600_FW9369_WORD_ANALOG, 0x0010, 0);
   copy_word_field (ssm, FTE3600_FW9369_WORD_ANALOG,
-                    FTE3600_FW9369_WORD_FDT_ANALOG, 0x03ff, 900);
+                   FTE3600_FW9369_WORD_FDT_ANALOG, 0x03ff, 900);
   update_word (ssm, FTE3600_FW9369_WORD_FDT_FILTER, 0x03fc, 0);
   sfr_write (ssm, FTE3600_FW9369_SFR_BANK_UNLOCK, 0x5a);
   update_word (ssm, 0x00c0, 0x1fff, 0x0444);
@@ -504,6 +528,132 @@ create_reset (FpiDeviceFte3600 *self)
   return fpi_ssm_new (FP_DEVICE (self), reset_run, RESET_STATES);
 }
 
+enum { SHUTDOWN_STOP, SHUTDOWN_MASK, SHUTDOWN_ACK, SHUTDOWN_SLEEP, SHUTDOWN_DONE, SHUTDOWN_STATES };
+
+static void
+shutdown_run (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  FpiSsm *script;
+
+  /* Each remaining cleanup stage is attempted, retaining the first error.
+   * Successful C1 delivery does not establish a readable sleep-state value. */
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case SHUTDOWN_STOP:
+      fpi_ssm_start_subsm (ssm, create_reset (self));
+      break;
+
+    case SHUTDOWN_MASK:
+      self->idle_verified = FALSE;
+      script = new_script (self, "FW9369 disable events", TRUE);
+      update_word (script, FTE3600_FW9369_WORD_EVENT_MASK,
+                   FTE3600_FW9369_EVENTS_KNOWN, 0);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case SHUTDOWN_ACK:
+      script = new_script (self, "FW9369 acknowledge events", TRUE);
+      word_write (script, FTE3600_FW9369_WORD_EVENT_CLEAR,
+                  FTE3600_FW9369_EVENTS_KNOWN);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case SHUTDOWN_SLEEP:
+      script = new_script (self, "FW9369 deep sleep", TRUE);
+      command (script, FTE3600_FW9369_CMD_IDLE_2);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case SHUTDOWN_DONE:
+      fpi_ssm_mark_completed (ssm);
+      break;
+    }
+}
+
+static FpiSsm *
+create_shutdown (FpiDeviceFte3600 *self)
+{
+  return fpi_ssm_new_full (FP_DEVICE (self), shutdown_run, SHUTDOWN_STATES,
+                           SHUTDOWN_MASK, "FW9369 shutdown");
+}
+
+typedef struct
+{
+  guint confirmations;
+  guint wakes;
+} Communication;
+
+enum { COMM_READ, COMM_CHECK, COMM_WAKE, COMM_SETTLE, COMM_STATES };
+
+static void
+communication_run (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  Fw9369Data *data = get_data (self);
+  Communication *check = fpi_ssm_get_data (ssm);
+  FpiSsm *script;
+
+  if (fpi_fte3600_fail_if_cancelled (ssm, dev))
+    return;
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case COMM_READ:
+      script = new_script (self, "FW9369 check communication", FALSE);
+      add_step (script, OP_SFR_WRITE, FTE3600_FW9369_SFR_SPI_MODE,
+                1, 0, SPI_MODE_DELAY_MS, 0, NULL);
+      add_step (script, OP_WORD_READ, FTE3600_FW9369_WORD_CHIP_ID,
+                0, 0, 0, 0, &data->id);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case COMM_CHECK:
+      if (data->id == FTE3600_FW9369_CHIP_ID)
+        {
+          if (++check->confirmations == 3)
+            fpi_ssm_mark_completed (ssm);
+          else
+            fpi_ssm_jump_to_state (ssm, COMM_READ);
+        }
+      else if ((data->id != 0 && data->id != 0xffff) ||
+               check->wakes == COMMUNICATION_WAKE_ATTEMPTS)
+        {
+          if (data->id != 0 && data->id != 0xffff)
+            lose_identity (self);
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_PROTO,
+                                 "FW9369 communication identity is %04x", data->id));
+        }
+      else
+        {
+          check->confirmations = 0;
+          fpi_ssm_next_state (ssm);
+        }
+      break;
+
+    case COMM_WAKE:
+      check->wakes++;
+      data->communication_stopped_fdt = TRUE;
+      script = new_script (self, "FW9369 restore communication", FALSE);
+      wake (script);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case COMM_SETTLE:
+      fpi_ssm_jump_to_state_delayed (ssm, COMM_READ, COMMUNICATION_SETTLE_MS);
+      break;
+    }
+}
+
+static FpiSsm *
+new_communication (FpiDeviceFte3600 *self)
+{
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), communication_run, COMM_STATES);
+
+  fpi_ssm_set_data (ssm, g_new0 (Communication, 1), g_free);
+  return ssm;
+}
+
 typedef enum { DAC_READY, DAC_RETRY, DAC_FAILED } DacResult;
 
 static DacResult
@@ -532,8 +682,7 @@ start_dac_search (Fw9369Data *data)
   data->stable = 0;
 }
 
-enum
-{
+enum {
   INIT_SPI, INIT_CHECK_SPI, INIT_READ_PROCESS, INIT_CHECK_PROCESS,
   INIT_ANALOG, INIT_FDT_SAMPLE, INIT_FDT_ADJUST, INIT_FDT_STABLE_SAMPLE,
   INIT_FDT_STABLE_CHECK, INIT_IMAGE_SAMPLE, INIT_IMAGE_ADJUST,
@@ -569,15 +718,20 @@ init_run (FpiSsm *ssm, FpDevice *dev)
                 0, 0, 0, 0, &data->id);
       fpi_ssm_start_subsm (ssm, script);
       break;
+
     case INIT_CHECK_SPI:
       if (data->spi_mode != 1 || data->id != FTE3600_FW9369_CHIP_ID)
         {
+          if (data->id != 0 && data->id != 0xffff &&
+              data->id != FTE3600_FW9369_CHIP_ID)
+            lose_identity (self);
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-            FP_DEVICE_ERROR_PROTO, "FW9369 SPI configuration or identity changed"));
+                                 FP_DEVICE_ERROR_PROTO, "FW9369 SPI configuration or identity changed"));
           break;
         }
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_READ_PROCESS:
       script = new_script (self, "FW9369 process identity", FALSE);
       wake (script);
@@ -586,26 +740,30 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       word_write (script, FTE3600_FW9369_WORD_EVENT_CLEAR, 0xffff);
       fpi_ssm_start_subsm (ssm, script);
       break;
+
     case INIT_CHECK_PROCESS:
       data->smic = (data->process >> 2) == 0x13;
       if ((data->process >> 2) != 0 && !data->smic)
         {
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-            FP_DEVICE_ERROR_NOT_SUPPORTED, "FW9369 manufacturing process %02x is not established",
-            data->process));
+                                 FP_DEVICE_ERROR_NOT_SUPPORTED, "FW9369 manufacturing process %02x is not established",
+                                 data->process));
           break;
         }
       start_dac_search (data);
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_ANALOG:
       script = new_script (self, "FW9369 analog setup", FALSE);
       image_mode (script, data);
       fpi_ssm_start_subsm (ssm, script);
       break;
+
     case INIT_FDT_SAMPLE:
       fpi_ssm_start_subsm (ssm, new_fdt_sample (self, TRUE));
       break;
+
     case INIT_FDT_ADJUST:
       average = 0;
       for (guint i = 0; i < G_N_ELEMENTS (data->fdt); i++)
@@ -617,7 +775,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
             fpi_ssm_jump_to_state (ssm, INIT_FDT_SAMPLE);
           else
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 touch ADC calibration failed"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 touch ADC calibration failed"));
           break;
         }
       data->attempts = data->stable = 0;
@@ -625,9 +783,11 @@ init_run (FpiSsm *ssm, FpDevice *dev)
         data->fdt_base[i] = G_MAXUINT16;
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_FDT_STABLE_SAMPLE:
       fpi_ssm_start_subsm (ssm, new_fdt_sample (self, FALSE));
       break;
+
     case INIT_FDT_STABLE_CHECK:
       stable = data->attempts != 0;
       for (guint i = 0; i < G_N_ELEMENTS (data->fdt); i++)
@@ -635,7 +795,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
           if (data->fdt[i] < 300 || data->fdt[i] > 700)
             {
               fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                FP_DEVICE_ERROR_PROTO, "FW9369 FDT baseline outside calibrated range"));
+                                     FP_DEVICE_ERROR_PROTO, "FW9369 FDT baseline outside calibrated range"));
               return;
             }
           stable &= ABS ((gint) data->fdt[i] - data->fdt_previous[i]) <= 5;
@@ -647,7 +807,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
         {
           if (++data->attempts >= MAX_STABILITY_ATTEMPTS)
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 touch calibration is unstable; clear the sensor and reopen"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 touch calibration is unstable; clear the sensor and reopen"));
           else
             fpi_ssm_jump_to_state (ssm, INIT_FDT_STABLE_SAMPLE);
           break;
@@ -657,9 +817,11 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       start_dac_search (data);
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_IMAGE_SAMPLE:
       fpi_ssm_start_subsm (ssm, new_image_scan (self));
       break;
+
     case INIT_IMAGE_ADJUST:
       dac_result = adjust_dac (data, &data->image_dac,
                                fpi_fte3600_fw9369_image_median (data->raw));
@@ -669,7 +831,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
             fpi_ssm_jump_to_state (ssm, INIT_IMAGE_SAMPLE);
           else
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 image ADC calibration failed"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 image ADC calibration failed"));
           break;
         }
       /* Opening requires an uncovered sensor. Temporal stability below only
@@ -680,9 +842,11 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       data->stable = data->attempts = 0;
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_BASE_SAMPLE:
       fpi_ssm_start_subsm (ssm, new_image_scan (self));
       break;
+
     case INIT_BASE_CHECK:
       average = 0;
       for (guint i = 0; i < FTE3600_FW9369_PIXELS; i++)
@@ -695,16 +859,21 @@ init_run (FpiSsm *ssm, FpDevice *dev)
         {
           if (++data->attempts >= MAX_STABILITY_ATTEMPTS)
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 image baseline is unstable; clear the sensor and reopen"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 image baseline is unstable; clear the sensor and reopen"));
           else
             fpi_ssm_jump_to_state (ssm, INIT_BASE_SAMPLE);
           break;
         }
       fpi_ssm_next_state (ssm);
       break;
+
     case INIT_IDLE:
-      fpi_ssm_start_subsm (ssm, create_reset (self));
+      if (data->identity_lost)
+        fpi_ssm_jump_to_state (ssm, INIT_DONE);
+      else
+        fpi_ssm_start_subsm (ssm, create_reset (self));
       break;
+
     case INIT_DONE:
       data->calibrated = fpi_ssm_get_error (ssm) == NULL;
       fpi_fte3600_secure_clear (data->raw, sizeof data->raw);
@@ -721,9 +890,9 @@ create_init (FpiDeviceFte3600 *self)
                            INIT_IDLE, "FW9369 initialization");
 }
 
-enum
-{
-  CAPTURE_ARM, CAPTURE_WAIT, CAPTURE_EVENTS, CAPTURE_ACK, CAPTURE_CHECK,
+enum {
+  CAPTURE_ARM, CAPTURE_RESTART_FDT, CAPTURE_WAIT, CAPTURE_COMMUNICATION,
+  CAPTURE_EVENTS, CAPTURE_ACK, CAPTURE_CHECK,
   CAPTURE_SCAN, CAPTURE_IMAGE, CAPTURE_IDLE, CAPTURE_REARM_RELEASE,
   CAPTURE_REARM_CHECK, CAPTURE_REARM_CLEANUP, CAPTURE_DONE, CAPTURE_STATES,
 };
@@ -734,6 +903,7 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
   Fw9369Data *data = get_data (self);
   gboolean wait_release = GPOINTER_TO_UINT (fpi_ssm_get_data (ssm));
+
   g_autoptr(GError) error = NULL;
   FpiSsm *script;
 
@@ -746,11 +916,12 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
       if (!data->calibrated)
         {
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-            FP_DEVICE_ERROR_PROTO, "FW9369 has no validated baseline"));
+                                 FP_DEVICE_ERROR_PROTO, "FW9369 has no validated baseline"));
           break;
         }
       self->idle_verified = FALSE;
       data->spurious = 0;
+      data->communication_stopped_fdt = FALSE;
       if (wait_release && data->release_armed)
         {
           /* Capture armed this detector before the asynchronous matcher ran.
@@ -758,7 +929,7 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
            * not be lost by draining or configuring the detector again. */
           if (!self->armed)
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 release detector lost its armed state"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 release detector lost its armed state"));
           else
             fpi_ssm_jump_to_state (ssm, CAPTURE_WAIT);
           break;
@@ -771,29 +942,53 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
         }
       fpi_ssm_start_subsm (ssm, new_arm (self, wait_release));
       break;
+
+    case CAPTURE_RESTART_FDT:
+      if (!data->communication_stopped_fdt)
+        {
+          fpi_ssm_next_state (ssm);
+          break;
+        }
+      /* Communication recovery used C0, which stopped the detector. Keep
+       * its configured DOWN/UP mode and baseline, and restart with C2 only.
+       * Do not drain IRQs or clear event latches: a new event may already
+       * have arrived after the preceding status read and acknowledge. */
+      script = new_script (self, "FW9369 resume finger detection", FALSE);
+      command (script, FTE3600_FW9369_CMD_FDT);
+      data->communication_stopped_fdt = FALSE;
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
     case CAPTURE_WAIT:
       self->armed = TRUE;
       fpi_fte3600_wait_for_irq (ssm);
       break;
+
     case CAPTURE_EVENTS:
       script = new_script (self, "FW9369 interrupt status", FALSE);
       add_step (script, OP_WORD_READ, FTE3600_FW9369_WORD_EVENTS,
                 0, 0, 0, 0, &data->events);
       fpi_ssm_start_subsm (ssm, script);
       break;
+
+    case CAPTURE_COMMUNICATION:
+      fpi_ssm_start_subsm (ssm, new_communication (self));
+      break;
+
     case CAPTURE_ACK:
       script = new_script (self, "FW9369 interrupt acknowledge", FALSE);
       word_write (script, FTE3600_FW9369_WORD_EVENT_CLEAR, data->events);
       fpi_ssm_start_subsm (ssm, script);
       break;
+
     case CAPTURE_CHECK:
       if (data->events & (FTE3600_FW9369_EVENT_RESET | FTE3600_FW9369_EVENT_ESD |
                           FTE3600_FW9369_EVENT_INVALID))
         {
           data->calibrated = FALSE;
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-            FP_DEVICE_ERROR_PROTO, "FW9369 lost calibrated state (events %04x); reopen",
-            data->events));
+                                 FP_DEVICE_ERROR_PROTO, "FW9369 lost calibrated state (events %04x); reopen",
+                                 data->events));
           break;
         }
       /* Simultaneous UP and DOWN does not establish event ordering. During
@@ -806,9 +1001,9 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
         {
           if (++data->spurious >= MAX_SPURIOUS_EVENTS)
             fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO, "FW9369 produced repeated unrelated interrupts"));
+                                   FP_DEVICE_ERROR_PROTO, "FW9369 produced repeated unrelated interrupts"));
           else
-            fpi_ssm_jump_to_state (ssm, CAPTURE_WAIT);
+            fpi_ssm_jump_to_state (ssm, CAPTURE_RESTART_FDT);
           break;
         }
       if (wait_release)
@@ -822,9 +1017,11 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_next_state (ssm);
         }
       break;
+
     case CAPTURE_SCAN:
       fpi_ssm_start_subsm (ssm, new_image_scan (self));
       break;
+
     case CAPTURE_IMAGE:
       fpi_fte3600_clear_captured_image (self);
       self->captured_image = fp_image_new (FTE3600_FW9369_WIDTH, FTE3600_FW9369_HEIGHT);
@@ -836,15 +1033,20 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
         {
           fpi_fte3600_clear_captured_image (self);
           fpi_ssm_mark_failed (ssm, fpi_device_retry_new_msg (
-            FP_DEVICE_RETRY_GENERAL, "%s", error->message));
+                                 FP_DEVICE_RETRY_GENERAL, "%s", error->message));
           break;
         }
       fpi_fte3600_secure_clear (data->raw, sizeof data->raw);
       fpi_ssm_next_state (ssm);
       break;
+
     case CAPTURE_IDLE:
-      fpi_ssm_start_subsm (ssm, create_reset (self));
+      if (data->identity_lost)
+        fpi_ssm_jump_to_state (ssm, CAPTURE_DONE);
+      else
+        fpi_ssm_start_subsm (ssm, create_reset (self));
       break;
+
     case CAPTURE_REARM_RELEASE:
       if (wait_release || fpi_ssm_get_error (ssm) ||
           fpi_device_get_current_action (dev) != FPI_DEVICE_ACTION_ENROLL ||
@@ -864,9 +1066,12 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
         }
       fpi_ssm_start_subsm (ssm, new_arm (self, TRUE));
       break;
+
     case CAPTURE_REARM_CHECK:
       if (fpi_ssm_get_error (ssm))
-        fpi_ssm_next_state (ssm);
+        {
+          fpi_ssm_next_state (ssm);
+        }
       else
         {
           data->release_armed = TRUE;
@@ -874,9 +1079,11 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_jump_to_state (ssm, CAPTURE_DONE);
         }
       break;
+
     case CAPTURE_REARM_CLEANUP:
       fpi_ssm_start_subsm (ssm, create_reset (self));
       break;
+
     case CAPTURE_DONE:
       if (fpi_ssm_get_error (ssm))
         fpi_fte3600_clear_captured_image (self);
@@ -898,7 +1105,7 @@ static FpiSsm *
 create_wait_release (FpiDeviceFte3600 *self)
 {
   FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), capture_run, CAPTURE_STATES,
-                                 CAPTURE_IDLE, "FW9369 wait for finger release");
+                                  CAPTURE_IDLE, "FW9369 wait for finger release");
 
   fpi_ssm_set_data (ssm, GUINT_TO_POINTER (TRUE), NULL);
   return ssm;
@@ -915,7 +1122,7 @@ prepare_capture (FpiDeviceFte3600 *self, GError **error)
       return FALSE;
     }
   if (!fpi_fte3600_fw9369_build_image_read (self->capture_tx,
-                                           self->capture_frame_size, error))
+                                            self->capture_frame_size, error))
     return FALSE;
   self->backend_data = g_new0 (Fw9369Data, 1);
   return TRUE;
@@ -943,6 +1150,7 @@ fpi_fte3600_fw9369_backend (void)
     .create_capture = create_capture,
     .create_wait_release = create_wait_release,
     .create_reset = create_reset,
+    .create_shutdown = create_shutdown,
   };
 
   return &backend;

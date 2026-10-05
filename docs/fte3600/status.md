@@ -1,8 +1,36 @@
 # FTE3600 hardware and validation status
 
 The current implementation uses ACPI resources and runtime/ROM chip discovery;
-there is no DMI admission table. The bridge has compile and mock-test evidence,
-but no physical-device validation in this change. See [dynamic discovery](dynamic-discovery.md).
+there is no DMI admission table. The current transport has compile and mock-test
+evidence, but no physical-device validation in this change.
+
+The transport migrated from the custom SPI bridge; its details are described in
+[ACPI glue / stock spidev](acpi-spidev.md). ABI 2 supports both GpioInt and
+ordinary ACPI IRQ/Interrupt resources, with a reset GPIO and a separate UIO
+interrupt device. FW9369 final shutdown now masks/acknowledges known events
+and sends C1; FT9368 has the confirmed bounded wake retry. These changes have
+software-test evidence, not a new hardware result. The
+[coverage record](windows-lifecycle-coverage.md) distinguishes the implemented
+fixes from remaining lifecycle differences.
+
+## Latest GPD result, checked on 2026-10-04
+
+The tester's [resource correction](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987576100)
+and [capture result](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987625692)
+supersede the earlier assumption that this board uses the GpioInt branch of
+its ACPI templates. Its active resource is ordinary `Interrupt(Edge, ActiveLow)`.
+With a local patch adding that IRQ resource to main `1ce4c74`, unmodified
+userspace identified `9362` using physical active-high CS, initialized,
+captured and completed two close/reopen runs. IRQ polarity needed no override.
+This is evidence for that patched revision on that board, not for the current
+ACPI glue / stock-spidev transport.
+
+Images were discarded, so image quality, enrollment, verification and system
+suspend/resume remain untested in that report. Closed-device IRQ counts still
+rose at roughly 10 per second; no accompanying sensor-event registers identify
+the cause. Do not report either a proven sleep fix or an IRQ-polarity fault.
+
+## Historical platform profiles
 
 The following table records **historical observations from the previous
 spidev/GPIO-profile implementation**, not current routing rules or evidence
@@ -19,25 +47,26 @@ Those model strings and routes are retained as historical evidence only.
 The current driver obtains each controller/pin from ACPI. A shared ACPI ID does
 not establish chip identity, and successful operation still needs hardware tests.
 
-## Issue evidence checked on 2026-10-04
+## Earlier issue evidence checked on 2026-10-04
 
-The [latest GPD Pocket 3 report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5981476115)
+The [earlier GPD Pocket 3 report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5981476115)
 provides a positive identity for one **i7-1195G7 / G1621-02** board: SRAM query
 `04 fb 9a 8b 00 01` returns big-endian `93 62` with active-high SPI chip select.
 Both an eight-byte full-duplex transfer and write-then-read under one chip
 select work. Active-low returns zero, although this board's ACPI says
-`PolarityLow`. Its reset/IRQ resources are INT34C5 lines 14/323, not the older
-Tiger Lake profile's 179/24. These observations apply to the reported board,
+`PolarityLow`. The initial reset/IRQ interpretation was INT34C5 lines 14/323,
+not the older Tiger Lake profile's 179/24; the IRQ interpretation was corrected
+by the newer ordinary-Interrupt report above. These observations apply to the reported board,
 not automatically to every Pocket 3 variant.
 
-**The reported GPD protocol and CS requirements are now implemented; physical
-operation remains unverified.** Discovery sends the factory's 12-byte ID query,
+**The reported GPD protocol and CS requirements are implemented; the newer
+patched-main test above provides limited physical capture evidence.** Discovery sends the factory's 12-byte ID query,
 tries both physical CS polarities if necessary, and requires two matching
 `9362` responses. The FW9369 backend performs AFE/FDT and image calibration,
 reads 16-bit samples, and independently constructs an 8-bit image. It requires
-an uncovered sensor during opening to establish its baseline. The updated
-kernel bridge provides bounded CS control; an older ABI 1 bridge remains usable
-at its existing polarity but cannot perform this negotiation. Reset GPIO
+an uncovered sensor during opening to establish its baseline. On this branch,
+CS negotiation uses stock spidev and requires the matched ABI2 reset/UIO glue;
+old custom bridge interfaces are not accepted by this transport. Reset GPIO
 active-low and SPI CS active-high are separate electrical signals.
 
 **Medion E3224 remains unconfirmed.** Separate reset/IRQ controllers are handled

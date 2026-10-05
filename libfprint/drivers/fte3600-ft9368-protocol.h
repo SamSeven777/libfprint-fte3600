@@ -9,6 +9,7 @@
 #define FTE3600_FT9368_PIXELS (FTE3600_FT9368_WIDTH * FTE3600_FT9368_HEIGHT)
 #define FTE3600_FT9368_HEADER 7
 #define FTE3600_FT9368_INFO_SIZE 32
+#define FTE3600_FT9368_WAKE_CHECK_SIZE 4
 #define FTE3600_FT9368_APP_SIZE 27120
 #define FTE3600_FT9368_PRAM_SIZE 6096
 #define FTE3600_FT9368_APP_CHUNK 256
@@ -88,6 +89,9 @@ gsize fpi_fte3600_ft9368_pram_select (guint8 *out,
 gboolean fpi_fte3600_ft9368_parse_info (const guint8      *data,
                                         gsize              length,
                                         Fte3600Ft9368Info *info);
+/* Factory wake readiness predicate only; not sensor identity. */
+gboolean fpi_fte3600_ft9368_wake_ready (const guint8 *data,
+                                        gsize         length);
 /* The firmware's verification polynomial consumes big-endian 16-bit words.
  * This is not the ordinary byte-wise CRC-16/X25 recurrence. */
 gboolean fpi_fte3600_ft9368_checksum (const guint8 *data,

@@ -140,13 +140,11 @@ fte3600_match_input_take (FpiDeviceFte3600  *self,
 static void
 fte3600_finish_open_error (FpiDeviceFte3600 *self, GError *error)
 {
-  if (self->spi_fd >= 0)
-    {
-      if (close (self->spi_fd) < 0)
-        fp_warn ("Failed to close FTE3600 SPI device after open failure: %s",
-                 g_strerror (errno));
-      self->spi_fd = -1;
-    }
+  g_autoptr(GError) cleanup = NULL;
+
+  if (!fpi_fte3600_transport_close (self, &cleanup) &&
+      !g_error_matches (cleanup, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+    fp_warn ("Failed to release FTE3600 transport after open failure: %s", cleanup->message);
   fpi_fte3600_release_transport (self);
   fpi_device_open_complete (FP_DEVICE (self), error);
 }
@@ -162,8 +160,8 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       self->idle_verified = FALSE;
       fpi_fte3600_deassert_hardware_reset_best_effort (
         self, "recovering from initialization failure");
-      /* A failed RAM recovery has already performed its bounded cleanup.
-       * Its application is unverified; do not send runtime reset commands. */
+      /* A failed recovery or conflicting chip identity invalidates runtime
+       * commands. Do not send another protocol reset after such a failure. */
       if (self->session_failed)
         fte3600_finish_open_error (self, error);
       else
@@ -1033,8 +1031,9 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
     case FTE3600_RESET_FOR_OPEN_ERROR:
       if (reset_error)
         {
-          fp_warn ("Sensor reset after open failure also failed: %s",
-                   reset_error->message);
+          if (!g_error_matches (reset_error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+            fp_warn ("Sensor reset after open failure also failed: %s",
+                     reset_error->message);
           g_clear_error (&reset_error);
         }
       fte3600_finish_open_error (self, operation_error);
@@ -1042,14 +1041,11 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
 
     case FTE3600_RESET_FOR_CLOSE:
       g_clear_error (&operation_error);
-      if (self->spi_fd >= 0)
-        {
-          if (close (self->spi_fd) < 0 && !reset_error)
-            g_set_error (
-              &reset_error, G_IO_ERROR, g_io_error_from_errno (errno),
-              "Failed to close FTE3600 SPI device: %s", g_strerror (errno));
-          self->spi_fd = -1;
-        }
+      {
+        g_autoptr(GError) cleanup = NULL;
+        if (!fpi_fte3600_transport_close (self, &cleanup) && !reset_error)
+          reset_error = g_steal_pointer (&cleanup);
+      }
       fpi_fte3600_release_transport (self);
       fpi_device_close_complete (dev, reset_error);
       return;
@@ -1059,8 +1055,9 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
         self->session_failed = TRUE;
       if (reset_error)
         {
-          fp_warn ("Sensor reset after action failure also failed: %s",
-                   reset_error->message);
+          if (!g_error_matches (reset_error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+            fp_warn ("Sensor reset after action failure also failed: %s",
+                     reset_error->message);
           g_clear_error (&reset_error);
         }
       fte3600_complete_action_error (self, operation_error);
@@ -1074,10 +1071,14 @@ static void
 fte3600_reset_wrapper (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  Fte3600ResetData *data = fpi_ssm_get_data (ssm);
 
   /* A backend owns its child's state/data. Completion metadata belongs to
    * this parent so a backend's private reset context cannot be overwritten. */
-  fpi_ssm_start_subsm (ssm, self->backend->create_reset (self));
+  if (data->purpose == FTE3600_RESET_FOR_CLOSE && self->backend->create_shutdown)
+    fpi_ssm_start_subsm (ssm, self->backend->create_shutdown (self));
+  else
+    fpi_ssm_start_subsm (ssm, self->backend->create_reset (self));
 }
 
 static void
@@ -1137,7 +1138,7 @@ fte3600_select_backend (FpiDeviceFte3600 *self, GError **error)
   if (frame_size > G_MAXUINT16 || transfer_size > self->max_transfer)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                   "%s requires a %zu-byte SPI transfer; bridge permits %u",
+                   "%s requires a %zu-byte SPI transfer; spidev buffer permits %u",
                    sensor->name, transfer_size, self->max_transfer);
       return FALSE;
     }
@@ -1163,10 +1164,12 @@ fte3600_discovery_failed (FpDevice *dev, GError *error)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
+  g_autoptr(GError) cleanup = NULL;
+
+  if (!fpi_fte3600_transport_close (self, &cleanup) &&
+      !g_error_matches (cleanup, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+    fp_warn ("Failed to release FTE3600 transport after discovery failure: %s", cleanup->message);
   fpi_fte3600_release_transport (self);
-  if (self->spi_fd >= 0)
-    close (self->spi_fd);
-  self->spi_fd = -1;
   if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_PROBE)
     fpi_device_probe_complete (dev, NULL, NULL, error);
   else
@@ -1200,11 +1203,8 @@ fte3600_discover_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
                                   auth ? FP_DEVICE_FEATURE_VERIFY : 0);
       if (auth)
         fpi_device_set_nr_enroll_stages (dev, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+      fpi_fte3600_transport_close (self, &error);
       fpi_fte3600_release_transport (self);
-      if (close (self->spi_fd) < 0)
-        g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
-                     "Cannot close FTE3600 after identification: %s", g_strerror (errno));
-      self->spi_fd = -1;
       fpi_device_probe_complete (dev, NULL, name, error);
       return;
     }
@@ -1216,24 +1216,9 @@ static void
 fte3600_begin_discovery (FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
-  const gchar *path = fpi_device_get_udev_data (dev, FPI_DEVICE_UDEV_SUBTYPE_FTE3600);
   GError *error = NULL;
 
-  if (!path || !g_path_is_absolute (path))
-    {
-      fte3600_discovery_failed (dev, fpi_device_error_new_msg (
-                                  FP_DEVICE_ERROR_GENERAL, "No absolute ACPI resource bridge path was provided"));
-      return;
-    }
-  self->spi_fd = open (path, O_RDWR | O_CLOEXEC);
-  if (self->spi_fd < 0)
-    {
-      g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
-                   "Failed to open FTE3600 bridge %s: %s", path, g_strerror (errno));
-      fte3600_discovery_failed (dev, error);
-      return;
-    }
-  if (!fpi_fte3600_configure_spi (self, &error))
+  if (!fpi_fte3600_transport_open (self, &error))
     {
       fte3600_discovery_failed (dev, error);
       return;
@@ -1253,7 +1238,7 @@ static void
 fte3600_probe (FpDevice *dev)
 {
   /* Identify before publishing per-device features. Enumeration never loads
-   * firmware or initializes capture; close the exclusive bridge after probing. */
+  * firmware or initializes capture; release the transport after probing. */
   fte3600_begin_discovery (dev);
 }
 
@@ -1277,17 +1262,16 @@ fte3600_close (FpDevice *dev)
       return;
     }
 
-  /* Each backend verifies its own reusable idle state during terminal
-   * cleanup. Avoid repeating a completed reset on application release. */
-  if (self->idle_verified || self->session_failed)
+  /* A verified awake idle permits another action, not necessarily shutdown.
+   * Run a chip-specific final-close sequence while the IRQ/reset lease and
+   * selected CS are still held. Never send runtime commands to a failed
+   * session, which may have lost its identity or transport generation. */
+  if (self->session_failed ||
+      (self->idle_verified && !self->backend->create_shutdown))
     {
       GError *error = NULL;
 
-      if (close (self->spi_fd) < 0)
-        g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
-                     "Failed to close FTE3600 SPI device: %s",
-                     g_strerror (errno));
-      self->spi_fd = -1;
+      fpi_fte3600_transport_close (self, &error);
       self->idle_verified = FALSE;
       fpi_fte3600_release_transport (self);
       fpi_device_close_complete (dev, error);
@@ -1483,7 +1467,8 @@ static void
 fpi_device_fte3600_init (FpiDeviceFte3600 *self)
 {
   self->spi_fd = -1;
-
+  self->reset_fd = -1;
+  self->irq_fd = -1;
 }
 
 static void
@@ -1491,9 +1476,11 @@ fpi_device_fte3600_finalize (GObject *object)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (object);
 
-  if (self->spi_fd >= 0)
-    close (self->spi_fd);
-  self->spi_fd = -1;
+  g_autoptr(GError) error = NULL;
+
+  if (!fpi_fte3600_transport_close (self, &error) &&
+      !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+    fp_warn ("Failed to release FTE3600 transport at finalization: %s", error->message);
   fpi_fte3600_release_transport (self);
   g_clear_pointer (&self->enroll_template, fpi_fte3600_template_free);
   g_clear_pointer (&self->verify_template, fpi_fte3600_template_free);

@@ -11,21 +11,23 @@ typedef struct
 {
   guint8            rx[FTE3600_FT9368_INFO_SIZE + FTE3600_FT9368_HEADER];
   gboolean          rx_valid;
+  gboolean          identity_lost;
   Fte3600Ft9368Info info;
 } Ft9368;
 
 enum {
-  INIT_WAKE, INIT_WAIT, INIT_INFO, INIT_CHECK, INIT_UPDATE,
+  INIT_WAKE, INIT_UPDATE,
   INIT_START, INIT_START_WAIT, INIT_RESET, INIT_DONE, INIT_NSTATES,
 };
 enum {
-  RESET_WAKE, RESET_WAIT, RESET_INFO1, RESET_INFO2, RESET_CLEAR,
-  RESET_VERIFY, RESET_CHECK, RESET_NSTATES,
+  RESET_WAKE, RESET_WAIT, RESET_INFO1, RESET_CHECK_ID1,
+  RESET_INFO2, RESET_CHECK_ID2, RESET_CLEAR,
+  RESET_VERIFY, RESET_CHECK, RESET_DONE, RESET_NSTATES,
 };
 enum {
-  CAPTURE_DRAIN, CAPTURE_WAKE, CAPTURE_WAKE_WAIT, CAPTURE_CLEAR,
+  CAPTURE_DRAIN, CAPTURE_WAKE, CAPTURE_CLEAR,
   CAPTURE_INFO, CAPTURE_CHECK, CAPTURE_WAIT_IRQ, CAPTURE_IRQ_INFO,
-  CAPTURE_IRQ_CHECK, CAPTURE_IMAGE_WAKE, CAPTURE_IMAGE_WAIT,
+  CAPTURE_IRQ_CHECK, CAPTURE_IMAGE_WAKE,
   CAPTURE_IMAGE, CAPTURE_PROCESS, CAPTURE_CLEANUP, CAPTURE_DONE,
   CAPTURE_NSTATES,
 };
@@ -73,10 +75,38 @@ ft9368_read (FpiSsm *ssm, guint16 command, gsize length, gboolean cancellable)
 }
 
 static gboolean
+ft9368_check_identity (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  Ft9368 *state = self->backend_data;
+  const guint8 *info = state->rx + FTE3600_FT9368_HEADER;
+  guint16 id = ((guint16) info[19] << 8) | info[20];
+
+  /* Blank responses and a temporarily unhealthy application do not establish
+   * a different chip. A positive conflicting identity invalidates the session
+   * before even the cleanup protocol may send another family-specific write. */
+  if (state->rx_valid && id != 0 && id != 0xffff && id != 0x9368)
+    {
+      state->identity_lost = TRUE;
+      self->session_failed = TRUE;
+      self->armed = FALSE;
+      self->idle_verified = FALSE;
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                             FP_DEVICE_ERROR_PROTO,
+                             "FT9368 application identity changed to %04x", id));
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
 ft9368_check_info (FpiSsm *ssm)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
   Ft9368 *state = self->backend_data;
+
+  if (!ft9368_check_identity (ssm))
+    return FALSE;
 
   if (!state->rx_valid ||
       !fpi_fte3600_ft9368_parse_info (state->rx + FTE3600_FT9368_HEADER,
@@ -90,6 +120,69 @@ ft9368_check_info (FpiSsm *ssm)
   return TRUE;
 }
 
+enum { WAKE_COMMAND, WAKE_WAIT, WAKE_READ, WAKE_CHECK, WAKE_INFO, WAKE_VALIDATE, WAKE_NSTATES };
+
+static void
+ft9368_wake_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  Ft9368 *state = self->backend_data;
+  guint *attempts = fpi_ssm_get_data (ssm);
+
+  if (fpi_fte3600_fail_if_cancelled (ssm, dev))
+    return;
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case WAKE_COMMAND:
+      if (state->identity_lost || self->session_failed)
+        {
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_PROTO, "FT9368 identity was lost; reopen the device"));
+          break;
+        }
+      (*attempts)++;
+      ft9368_read (ssm, FTE3600_FT9368_WAKE, 0, TRUE);
+      break;
+
+    case WAKE_WAIT:
+      fpi_ssm_next_state_delayed (ssm, FTE3600_FT9368_WAKE_MS);
+      break;
+
+    case WAKE_READ:
+      ft9368_read (ssm, FTE3600_FT9368_INFO, FTE3600_FT9368_WAKE_CHECK_SIZE, TRUE);
+      break;
+
+    case WAKE_CHECK:
+      if (state->rx_valid && fpi_fte3600_ft9368_wake_ready (
+            state->rx + FTE3600_FT9368_HEADER, FTE3600_FT9368_WAKE_CHECK_SIZE))
+        fpi_ssm_next_state (ssm);
+      else if (*attempts < FTE3600_FT9368_WAKE_ATTEMPTS)
+        fpi_ssm_jump_to_state (ssm, WAKE_COMMAND);
+      else
+        fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                               FP_DEVICE_ERROR_PROTO, "FT9368 did not respond after three wake attempts"));
+      break;
+
+    case WAKE_INFO:
+      ft9368_read (ssm, FTE3600_FT9368_INFO, FTE3600_FT9368_INFO_SIZE, TRUE);
+      break;
+
+    case WAKE_VALIDATE:
+      if (ft9368_check_info (ssm))
+        fpi_ssm_mark_completed (ssm);
+      break;
+    }
+}
+
+static FpiSsm *
+ft9368_wake_new (FpiDeviceFte3600 *self)
+{
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), ft9368_wake_handler, WAKE_NSTATES);
+
+  fpi_ssm_set_data (ssm, g_new0 (guint, 1), g_free);
+  return ssm;
+}
+
 static void
 ft9368_init_handler (FpiSsm *ssm, FpDevice *dev)
 {
@@ -100,20 +193,7 @@ ft9368_init_handler (FpiSsm *ssm, FpDevice *dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case INIT_WAKE:
-      ft9368_read (ssm, FTE3600_FT9368_WAKE, 0, TRUE);
-      return;
-
-    case INIT_WAIT:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_FT9368_WAKE_MS);
-      return;
-
-    case INIT_INFO:
-      ft9368_read (ssm, FTE3600_FT9368_INFO, FTE3600_FT9368_INFO_SIZE, TRUE);
-      return;
-
-    case INIT_CHECK:
-      if (ft9368_check_info (ssm))
-        fpi_ssm_next_state (ssm);
+      fpi_ssm_start_subsm (ssm, ft9368_wake_new (self));
       return;
 
     case INIT_UPDATE:
@@ -148,6 +228,18 @@ static void
 ft9368_reset_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  Ft9368 *state = self->backend_data;
+
+  if ((state->identity_lost || self->session_failed) &&
+      fpi_ssm_get_cur_state (ssm) != RESET_DONE)
+    {
+      if (fpi_ssm_get_error (ssm))
+        fpi_ssm_jump_to_state (ssm, RESET_DONE);
+      else
+        fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                               FP_DEVICE_ERROR_PROTO, "FT9368 identity was lost; reopen the device"));
+      return;
+    }
 
   /* Cleanup is bounded and uncancellable. Its first failure is retained by
    * the SSM; later states may still clear a pending image and verify identity. */
@@ -167,6 +259,12 @@ ft9368_reset_handler (FpiSsm *ssm, FpDevice *dev)
     case RESET_INFO1:
     case RESET_INFO2:
       ft9368_read (ssm, FTE3600_FT9368_INFO, FTE3600_FT9368_INFO_SIZE, FALSE);
+      return;
+
+    case RESET_CHECK_ID1:
+    case RESET_CHECK_ID2:
+      if (ft9368_check_identity (ssm))
+        fpi_ssm_next_state (ssm);
       return;
 
     case RESET_CLEAR:
@@ -194,6 +292,10 @@ ft9368_reset_handler (FpiSsm *ssm, FpDevice *dev)
               fpi_ssm_mark_completed (ssm);
             }
         }
+      return;
+
+    case RESET_DONE:
+      fpi_ssm_mark_completed (ssm);
       return;
 
     default:
@@ -226,12 +328,7 @@ ft9368_capture_handler (FpiSsm *ssm, FpDevice *dev)
 
     case CAPTURE_WAKE:
     case CAPTURE_IMAGE_WAKE:
-      ft9368_read (ssm, FTE3600_FT9368_WAKE, 0, TRUE);
-      return;
-
-    case CAPTURE_WAKE_WAIT:
-    case CAPTURE_IMAGE_WAIT:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_FT9368_WAKE_MS);
+      fpi_ssm_start_subsm (ssm, ft9368_wake_new (self));
       return;
 
     case CAPTURE_CLEAR:
@@ -296,7 +393,10 @@ ft9368_capture_handler (FpiSsm *ssm, FpDevice *dev)
       self->armed = FALSE;
       fpi_fte3600_clear_irq_source (self);
       fpi_fte3600_secure_clear (self->capture_rx, self->capture_frame_size);
-      fpi_ssm_start_subsm (ssm, ft9368_reset_new (self));
+      if (state->identity_lost)
+        fpi_ssm_jump_to_state (ssm, CAPTURE_DONE);
+      else
+        fpi_ssm_start_subsm (ssm, ft9368_reset_new (self));
       return;
 
     case CAPTURE_DONE:

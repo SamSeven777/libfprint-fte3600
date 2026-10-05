@@ -49,6 +49,8 @@ typedef struct
   {
     gchar *spidev_path;
     gchar *hidraw_path;
+    gchar *gpio_path;
+    gchar *uio_path;
   } udev_data;
 
   gboolean        is_removed;

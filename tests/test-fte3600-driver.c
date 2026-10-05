@@ -154,6 +154,7 @@ test_udev_rule_pattern (void)
           g_autofree gchar *pattern = NULL;
 
           found_spi = TRUE;
+          g_assert_true ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_GPIO) != 0);
           g_assert_cmpstr (entry->spi_acpi_id, ==, "FTE3600");
 
           pattern = g_strdup_printf ("acpi:%s:*", entry->spi_acpi_id);
@@ -203,10 +204,13 @@ test_udev_rules_generator_output (void)
   g_assert_cmpint (exit_status, ==, 0);
   g_assert_nonnull (standard_output);
 
-  g_assert_nonnull (strstr (standard_output, "SUBSYSTEM==\"misc\", KERNEL==\"fte3600-*\""));
-  g_assert_nonnull (strstr (standard_output, "ATTR{fte3600_abi}==\"1\""));
-  g_assert_null (strstr (standard_output, "acpi:FTE3600:*"));
-  g_assert_null (strstr (standard_output, "driver_override"));
+  g_assert_nonnull (strstr (standard_output, "acpi:FTE3600:*"));
+  g_assert_nonnull (strstr (standard_output, "driver_override"));
+  g_assert_nonnull (strstr (standard_output, "/usr/libexec/fte3600-pair --udev"));
+  g_assert_nonnull (strstr (standard_output, "ENV{FTE3600_PAIR_ROLE}==\"spi\""));
+  g_assert_nonnull (strstr (standard_output, "ENV{FTE3600_PAIR_ROLE}==\"gpio\""));
+  g_assert_null (strstr (standard_output, "SUBSYSTEM==\"misc\""));
+  g_assert_null (strstr (standard_output, "ATTR{fte3600_abi}"));
 }
 
 int

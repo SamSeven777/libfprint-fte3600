@@ -69,53 +69,77 @@ typedef enum {
   FTE3600_FW9369_CMD_WAKE_END = 0xa5,
 } Fte3600Fw9369Command;
 
-#define FTE3600_FW9369_EVENT_IDLE       0x0001u
-#define FTE3600_FW9369_EVENT_DOWN       0x0002u
-#define FTE3600_FW9369_EVENT_UP         0x0004u
-#define FTE3600_FW9369_EVENT_MANUAL     0x0008u
-#define FTE3600_FW9369_EVENT_INVALID    0x0010u
-#define FTE3600_FW9369_EVENT_DATA       0x0020u
-#define FTE3600_FW9369_EVENT_AFE        0x0040u
-#define FTE3600_FW9369_EVENT_HALF       0x0080u
-#define FTE3600_FW9369_EVENT_FULL       0x0100u
-#define FTE3600_FW9369_EVENT_RESET      0x0200u
-#define FTE3600_FW9369_EVENT_ESD        0x0400u
-#define FTE3600_FW9369_STATE_IDLE       0x50u
-#define FTE3600_FW9369_STATE_IMAGE      0x54u
-#define FTE3600_FW9369_FDT_CHANNELS     4u
-#define FTE3600_FW9369_FDT_READ_SIZE    14u
-#define FTE3600_FW9369_FDT_WRITE_SIZE   22u
-#define FTE3600_FW9369_DAC_MIN          1u
-#define FTE3600_FW9369_DAC_MAX          125u
-#define FTE3600_FW9369_IMAGE_DAC        54u
-#define FTE3600_FW9369_FDT_DAC          27u
+#define FTE3600_FW9369_EVENT_IDLE 0x0001u
+#define FTE3600_FW9369_EVENT_DOWN 0x0002u
+#define FTE3600_FW9369_EVENT_UP 0x0004u
+#define FTE3600_FW9369_EVENT_MANUAL 0x0008u
+#define FTE3600_FW9369_EVENT_INVALID 0x0010u
+#define FTE3600_FW9369_EVENT_DATA 0x0020u
+#define FTE3600_FW9369_EVENT_AFE 0x0040u
+#define FTE3600_FW9369_EVENT_HALF 0x0080u
+#define FTE3600_FW9369_EVENT_FULL 0x0100u
+#define FTE3600_FW9369_EVENT_RESET 0x0200u
+#define FTE3600_FW9369_EVENT_ESD 0x0400u
+#define FTE3600_FW9369_EVENTS_KNOWN 0x07ffu
+#define FTE3600_FW9369_STATE_IDLE 0x50u
+#define FTE3600_FW9369_STATE_IMAGE 0x54u
+#define FTE3600_FW9369_FDT_CHANNELS 4u
+#define FTE3600_FW9369_FDT_READ_SIZE 14u
+#define FTE3600_FW9369_FDT_WRITE_SIZE 22u
+#define FTE3600_FW9369_DAC_MIN 1u
+#define FTE3600_FW9369_DAC_MAX 125u
+#define FTE3600_FW9369_IMAGE_DAC 54u
+#define FTE3600_FW9369_FDT_DAC 27u
 
 /* No I/O. Return complete TX length, or zero with G_IO_ERROR. Failure does
  * not alter the caller's output. Word addresses are 15-bit hardware addresses;
  * bit 15 is set by the builder as the wire address flag. */
-gsize fpi_fte3600_fw9369_build_sfr_read (guint8 *out, gsize capacity,
-                                       guint8 reg, GError **error);
-gsize fpi_fte3600_fw9369_build_sfr_write (guint8 *out, gsize capacity,
-                                        guint8 reg, guint8 value, GError **error);
-gsize fpi_fte3600_fw9369_build_word_read (guint8 *out, gsize capacity,
-                                        guint16 address, GError **error);
-gsize fpi_fte3600_fw9369_build_word_write (guint8 *out, gsize capacity,
-                                         guint16 address, guint16 value, GError **error);
-gsize fpi_fte3600_fw9369_build_command (guint8 *out, gsize capacity,
-                                      Fte3600Fw9369Command command, GError **error);
-gsize fpi_fte3600_fw9369_build_image_read (guint8 *out, gsize capacity, GError **error);
-gboolean fpi_fte3600_fw9369_decode_frame (const guint8 *frame, gsize frame_len,
-                                         guint16 *pixels, gsize pixel_capacity,
+gsize fpi_fte3600_fw9369_build_sfr_read (guint8  *out,
+                                         gsize    capacity,
+                                         guint8   reg,
                                          GError **error);
-gsize fpi_fte3600_fw9369_build_fdt_read (guint8 *out, gsize capacity,
-                                       gboolean smic, GError **error);
-gsize fpi_fte3600_fw9369_build_fdt_base (guint8 *out, gsize capacity,
-                                       gboolean smic, const guint16 *base,
-                                       gsize channels, GError **error);
+gsize fpi_fte3600_fw9369_build_sfr_write (guint8  *out,
+                                          gsize    capacity,
+                                          guint8   reg,
+                                          guint8   value,
+                                          GError **error);
+gsize fpi_fte3600_fw9369_build_word_read (guint8  *out,
+                                          gsize    capacity,
+                                          guint16  address,
+                                          GError **error);
+gsize fpi_fte3600_fw9369_build_word_write (guint8  *out,
+                                           gsize    capacity,
+                                           guint16  address,
+                                           guint16  value,
+                                           GError **error);
+gsize fpi_fte3600_fw9369_build_command (guint8              *out,
+                                        gsize                capacity,
+                                        Fte3600Fw9369Command command,
+                                        GError             **error);
+gsize fpi_fte3600_fw9369_build_image_read (guint8  *out,
+                                           gsize    capacity,
+                                           GError **error);
+gboolean fpi_fte3600_fw9369_decode_frame (const guint8 *frame,
+                                          gsize         frame_len,
+                                          guint16      *pixels,
+                                          gsize         pixel_capacity,
+                                          GError      **error);
+gsize fpi_fte3600_fw9369_build_fdt_read (guint8  *out,
+                                         gsize    capacity,
+                                         gboolean smic,
+                                         GError **error);
+gsize fpi_fte3600_fw9369_build_fdt_base (guint8        *out,
+                                         gsize          capacity,
+                                         gboolean       smic,
+                                         const guint16 *base,
+                                         gsize          channels,
+                                         GError       **error);
 /* Independent host image processing: saturated baseline subtraction followed
  * by a robust linear stretch. This is not the proprietary Windows algorithm. */
 gboolean fpi_fte3600_fw9369_make_image (const guint16 *base,
-                                      const guint16 *raw, gsize pixels,
-                                      guint8 *out, gsize capacity,
-                                      GError **error);
+                                        const guint16 *raw,
+                                        gsize          pixels,
+                                        guint8        *out,
+                                        gsize          capacity,
+                                        GError       **error);
 guint fpi_fte3600_fw9369_image_median (const guint16 *raw);

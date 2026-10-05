@@ -1,0 +1,13 @@
+; SPDX-License-Identifier: LGPL-2.1-or-later
+; Experimental split transport. No filecon wildcard: numbered spidev/gpiochip
+; nodes acquire these types only after the udev helper validates glue ownership.
+(type fte3600_spidev_t)
+(type fte3600_gpio_t)
+(type fte3600_irq_t)
+(typeattributeset device_node (fte3600_spidev_t fte3600_gpio_t fte3600_irq_t))
+(roletype object_r fte3600_spidev_t)
+(roletype object_r fte3600_gpio_t)
+(allow fprintd_t fte3600_spidev_t (chr_file (getattr open read write ioctl lock)))
+(allow fprintd_t fte3600_gpio_t (chr_file (getattr open read ioctl)))
+(roletype object_r fte3600_irq_t)
+(allow fprintd_t fte3600_irq_t (chr_file (getattr open read)))

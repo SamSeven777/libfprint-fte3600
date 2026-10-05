@@ -1,5 +1,11 @@
 # FTE3600 implementation boundaries
 
+This document describes the uncommitted `acpi-spidev` branch; see its
+[transport contract](acpi-spidev.md). Sensor and matcher separation is retained.
+It does not implement the full Windows lifecycle; the
+[coverage record](windows-lifecycle-coverage.md) distinguishes confirmed fixes
+from independent Linux strategies and remaining evidence gaps.
+
 The implementation selects an established protocol from observed sensor
 responses. It does not use a computer-model whitelist or try different firmware
 images until one responds. The independent host implementation follows the
@@ -10,9 +16,9 @@ or a vendor matching library.
 
 | Boundary | Files | Responsibility |
 | --- | --- | --- |
-| Kernel resource driver | `kernel/fte3600/` and `fte3600-bridge.h` | ACPI resources, GPIO polarity, bounded SPI, IRQ, exclusive sessions and suspend/removal |
+| Kernel resource driver | `kernel/fte3600/` | ACPI resources, one reset GPIO, IRQ-only UIO, exclusive leases and suspend/removal; no sensor SPI commands |
 | libfprint integration | `drivers/fte3600.c` | Probe/open/close, action completion, per-device features and host matching jobs |
-| Transport | `drivers/fte3600-transport.c` | Bridge ABI, cancellable transfers, IRQ sources, logical reset and buffer lifetime |
+| Transport | `drivers/fte3600-transport.c`, `fte3600-resources.{c,h}` | Verified SPI/GPIO/UIO pairing, metadata ABI 2, standard spidev transfers, IRQ notifications, logical reset and buffer lifetime |
 | Identification | `drivers/fte3600-discovery.c`, `fte3600-special-probe.{c,h}`, `fte3600-sensor.{c,h}` | Runtime/ROM identity evidence, bounded factory mode negotiation, immutable geometry, protocol and firmware metadata |
 | Protocol execution | `drivers/fte3600-backends.c`, `fte3600-legacy.c`, `fte3600-legacy-recovery.c`, `fte3600-fw9369.c`, `fte3600-ft93xx.c`, `fte3600-ft9368.c`, `fte3600-ft9368-update.c` | Backend routing, initialization, calibration, capture and bounded cleanup |
 | Wire definitions | `drivers/fte3600-protocol.{c,h}`, `fte3600-legacy-recovery-protocol.{c,h}`, `fte3600-fw9369-protocol.{c,h}`, `fte3600-ft93xx-protocol.{c,h}`, `fte3600-ft9368-protocol.{c,h}`, timing headers | Opcodes, registers, framing, sample decoding and pure image transforms; no device access or matcher dependency |
@@ -26,8 +32,8 @@ private device state/backend contract; it stores opaque template pointers and
 does not import the matching implementation into transport or protocol code.
 
 ```text
-ACPI resources -> kernel bridge -> transport -> discovery + sensor catalog
-                                         \-> selected protocol state machine
+ACPI resources -> reset GPIO + IRQ-only UIO -> transport -> discovery + sensor catalog
+physical SPI -> stock spidev --------------/         \-> selected protocol state machine
                                                        |
                                                 image (size/stride)
                                                        |
@@ -186,15 +192,21 @@ through one action completion, attempts necessary cleanup, and clears image
 buffers. Reopen establishes a fresh hardware state. Removal and suspend are
 also terminal for an open bridge session.
 
-The kernel owns CS session cleanup. Final file release restores the polarity
-saved at open, including after process termination. Suspend attempts restoration
-while its controller is awake; deferred or failed setup is retried on resume
-and before a new open. A setup failure retains the original target and blocks
-communication until recovery, without resetting an invalidated old session.
-Only `SPI_CS_HIGH` changes; the bridge ABI and other SPI settings are unchanged.
-The shared CS policy is exercised with injected setup failures in host tests;
-actual GPIO, IRQ, process-exit and power-management behavior still need hardware
-validation.
+Final close uses optional `create_shutdown()` while transport/reset/IRQ resources
+are still held. FW9369 implements C0/verified awake idle, known-event mask/ack
+and C1 plus 1 ms. This clears `idle_verified`: delivery of C1 is not an observed
+sleep-state or power measurement. Other backends retain their documented reset
+cleanup. Per-action reset never invokes final shutdown. Close always releases
+resources and preserves the earliest error; a failed session receives no more
+sensor commands. Reopen repeats discovery and calibration as required.
+
+The transport restores the ACPI SPI mode and saved word size/speed on normal
+close. Stock spidev cannot restore CS on process death; a subsequent open
+revalidates the ACPI baseline before identification. Kernel PM frees the IRQ,
+invalidates the lease and wakes UIO readers, but does not send SPI commands or
+atomically revoke stock spidev transactions. This branch therefore retains
+cooperative locking and requires new sessions after suspend. Actual GPIO, IRQ,
+process-exit and power-management behavior still need hardware validation.
 
 ## Validation
 
@@ -206,7 +218,7 @@ session failure/reopen, transfer/cancellation, matcher golden vectors,
 strided images, concurrent extraction and template compatibility. The full
 selected library and tests also run under ASan/UBSan. Kernel policy host tests
 and a Linux-header `W=1` build check the bridge without loading it.
-The [2026-10-04 validation record](validation-2026-10-04.md) gives exact counts,
+The [branch validation record](validation-acpi-spidev-2026-10-04.md) gives exact counts,
 build options, skipped fixtures and sanitizer scope for the tested working tree.
 
 No FTE sensor is attached in the build environment. Board wiring, cold boot,

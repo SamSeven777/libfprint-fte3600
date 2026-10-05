@@ -1,6 +1,15 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "fte3600-ft9368-protocol.h"
 
+gboolean
+fpi_fte3600_ft9368_wake_ready (const guint8 *data, gsize length)
+{
+  if (!data || length != FTE3600_FT9368_WAKE_CHECK_SIZE)
+    return FALSE;
+  return data[0] == 0 || data[0] != data[1] ||
+         data[0] != data[2] || data[0] != data[3];
+}
+
 #include <string.h>
 
 static void

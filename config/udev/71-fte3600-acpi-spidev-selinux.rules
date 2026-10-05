@@ -1,0 +1,4 @@
+# Install only after the matching SELinux module. Revalidate and pin the node.
+# udev skips SECLABEL on change when owner/mode already match; explicitly label
+# this verified inode even when metadata appeared after its original add event.
+ACTION=="add|change", TEST=="/sys/fs/selinux/enforce", ENV{FTE3600_PAIR_ROLE}=="spi|gpio|irq", RUN+="/usr/libexec/fte3600-pair --relabel %p"
