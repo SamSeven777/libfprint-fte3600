@@ -16,8 +16,16 @@ This page tracks implementation status, driver capabilities, and reported device
 | **FT9536** | 64 × 128 | Supported (Legacy A8) | `ft9536.bin` | BRISK | Implemented & Unit Tested |
 | **FT9365** | 64 × 80 | Supported (FT9365) | None (ROM mode) | BRISK | Implemented & Unit Tested |
 | **FT9368** | 64 × 80 | Supported (FT9368) | App + Pramboot | BRISK | Implemented & Unit Tested |
-| **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK | **Verified on Hardware** (GPD Pocket 3) |
+| **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK / optional 2D-IPA | **BRISK verified on hardware** (GPD Pocket 3); IPA/fusion awaits hardware validation |
 | **FT9769** (ID 9391/2) | 40 × 196 | Supported (FT9769) | None (ROM mode) | BRISK (Adaptive) | Implemented & Unit Tested |
+
+The ordinary authentication build remains BRISK-only. Grand Synergy v3 is an
+explicit `-Dfte3600_ipa_auth=true` opt-in for FT9361 and FW9369, with
+`-Dfte3600_personal_auth=true` also required. It selects each sensor's template
+policy and preserves sensor isolation. Existing BRISK enrollments remain usable
+in BRISK or dual mode; re-enrollment is needed to add IPA features. FW9369 IPA
+support has synthetic test coverage, not measured accuracy or hardware
+validation. See [optional matcher installation](install.md#optional-grand-synergy-v3-matching).
 
 ---
 
@@ -45,9 +53,25 @@ This page tracks implementation status, driver capabilities, and reported device
 
 ## 3. Test Suite & Quality Assurance
 
-Every release is verified using the automated test suite with `-Dwerror=true`:
+Run the FTE3600 regression checks with warnings treated as errors:
+
 ```bash
-ninja -C build-fte3600 test
+./scripts/check-fte3600.sh
 ```
-- **Unit & Protocol Tests**: 30 test fixtures covering protocol state machines, frame parsing, unaligned memory safety, popcount math, and lifecycle transitions.
-- **CI Status**: 30 Passed, 0 Failed.
+
+Local validation on 2026-10-05 used the working tree based on `3a36d68`, with
+the FW9369 optional matcher changes, GCC 13.3.0 and Meson 1.3.2 in WSL Ubuntu.
+All configurations used `-Ddrivers=fte3600` and `-Dwerror=true`.
+
+| Personal authentication | IPA authentication | Checks executed | Result |
+| :---: | :---: | :--- | :--- |
+| Disabled | Disabled | Required script: 28 test targets | 28 passed |
+| Enabled | Enabled | Required script: 28 test targets | 28 passed |
+| Enabled | Disabled | 6 matcher/template/lifecycle targets; lifecycle rerun after adding runtime opt-in rejection cases | All passed |
+| Enabled | Enabled | Template, family-template and authentication lifecycle under ASan + UBSan | 3 passed |
+
+Local logs are in `meson-logs/testlog.txt` under `build-fte3600-ci-false`,
+`build-fte3600-ci-true`, `build-fte3600-brisk-merge` (latest lifecycle run), and
+`build-fte3600-acpi-spidev-sanitize`. Counts refer to test targets, not individual
+test cases. The new matcher fixtures are synthetic; these results do not
+measure hardware reliability, biometric accuracy or FAR/FRR.

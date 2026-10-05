@@ -480,7 +480,7 @@ make_frames_with_density (const Fte3600MatchProfile *profile, gboolean dense)
   if (dense)
     {
       /* Dense synthetic texture fills the BRISK feature budget while also
-       * yielding IPA points. Its V3 template exceeds the old BRISK-only cap. */
+       * yielding IPA points. Its dual template exceeds the BRISK-only cap. */
       for (guint y = 0; y < profile->height; y++)
         for (guint x = 0; x < profile->width; x++)
           {
@@ -524,7 +524,7 @@ make_frames (const Fte3600MatchProfile *profile)
 
 static GBytes *
 make_wire_version (const Fte3600MatchProfile *profile, const guint8 *frames,
-                   gboolean legacy)
+                   gboolean legacy, gboolean include_ipa)
 {
   g_autoptr(Fte3600Template) templ = legacy ? fpi_fte3600_template_new () :
                                      fpi_fte3600_template_new_for_profile (profile);
@@ -544,7 +544,7 @@ make_wire_version (const Fte3600MatchProfile *profile, const guint8 *frames,
       g_assert_cmpint (fpi_fte3600_brisk_extract_for_profile (profile, &image, &features),
                        ==, FTE3600_BRISK_OK);
 #if FTE3600_ENABLE_IPA_AUTH
-      if (!legacy && profile->sensor == FTE3600_SENSOR_FT9361 &&
+      if (include_ipa && !legacy && fpi_fte3600_ipa_supports_profile (profile) &&
           fpi_fte3600_ipa_extract (image.data, image.length, &ipa_features) == FTE3600_IPA_OK)
         p_ipa = &ipa_features;
 #endif
@@ -558,7 +558,7 @@ make_wire_version (const Fte3600MatchProfile *profile, const guint8 *frames,
 static GBytes *
 make_wire (const Fte3600MatchProfile *profile, const guint8 *frames)
 {
-  return make_wire_version (profile, frames, FALSE);
+  return make_wire_version (profile, frames, FALSE, TRUE);
 }
 
 static FpPrint *
@@ -607,6 +607,19 @@ test_roundtrip (gconstpointer data)
   Fte3600Sensor sensor = GPOINTER_TO_UINT (data) & 0xff;
   gboolean release_retry = !!(GPOINTER_TO_UINT (data) & 0x200);
   gboolean large_template = !!(GPOINTER_TO_UINT (data) & 0x400);
+  gboolean ipa_only = !!(GPOINTER_TO_UINT (data) & 0x800);
+
+  /* Isolate the process-wide mode override and set it before starting any
+   * workers. An IPA-only success cannot be supplied by the BRISK fallback. */
+  if (ipa_only && !g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  if (ipa_only)
+    g_setenv ("FP_FTE3600_MATCHER", "ipa", TRUE);
+
   const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (sensor);
   FpDevice *device = new_device (sensor);
   g_autofree guint8 *frames = make_frames_with_density (profile, large_template);
@@ -614,11 +627,13 @@ test_roundtrip (gconstpointer data)
   g_autoptr(GBytes) expected = make_wire (profile, frames);
   g_autoptr(FpPrint) print = g_object_ref_sink (fp_print_new (device));
   g_autoptr(FpPrint) enrolled = NULL;
+  g_autoptr(FpPrint) restored = NULL;
+  g_autofree guchar *serialized = NULL;
   g_autoptr(GVariant) actual = NULL;
   g_autoptr(GError) error = NULL;
   Progress progress = { 0 };
   gboolean match = FALSE;
-  gsize actual_size, expected_size;
+  gsize actual_size, expected_size, serialized_size;
   gconstpointer actual_bytes, expected_bytes;
 
   if (large_template)
@@ -626,7 +641,8 @@ test_roundtrip (gconstpointer data)
       const guint8 *wire_data = g_bytes_get_data (expected, &expected_size);
 
       g_assert_cmpuint (wire_data[8] | ((guint) wire_data[9] << 8), ==,
-                        FTE3600_TEMPLATE_WIRE_VERSION_V3);
+                        sensor == FTE3600_SENSOR_FT9361 ? FTE3600_TEMPLATE_WIRE_VERSION_V3 :
+                        FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION);
       g_assert_cmpuint (expected_size, >, FTE3600_TEMPLATE_CURRENT_MAX_WIRE_SIZE);
       g_assert_cmpuint (expected_size, <=, FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE);
     }
@@ -653,21 +669,30 @@ test_roundtrip (gconstpointer data)
   expected_bytes = g_bytes_get_data (expected, &expected_size);
   g_assert_cmpmem (actual_bytes, actual_size, expected_bytes, expected_size);
 
+  /* Exercise the same persistence boundary used by applications. Verification
+   * must decode the restored wire template, including its sensor policy. */
+  g_assert_true (fp_print_serialize (enrolled, &serialized, &serialized_size, &error));
+  g_assert_no_error (error);
+  restored = fp_print_deserialize (serialized, serialized_size, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (restored);
+  g_assert_true (fp_print_equal (enrolled, restored));
+
   mock.next_frame = 0;
-  g_assert_true (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+  g_assert_true (fp_device_verify_sync (device, restored, NULL, NULL, NULL,
                                         &match, NULL, &error));
   g_assert_no_error (error);
   g_assert_true (match);
   g_assert_cmpuint (mock.captures, ==, 10);
 
   mock.retry_next = TRUE;
-  g_assert_false (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+  g_assert_false (fp_device_verify_sync (device, restored, NULL, NULL, NULL,
                                          &match, NULL, &error));
   g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
   g_assert_cmpuint (mock.captures, ==, 11);
   g_clear_error (&error);
   mock.next_frame = 0;
-  g_assert_true (fp_device_verify_sync (device, enrolled, NULL, NULL, NULL,
+  g_assert_true (fp_device_verify_sync (device, restored, NULL, NULL, NULL,
                                         &match, NULL, &error));
   g_assert_no_error (error);
   g_assert_true (match);
@@ -681,7 +706,7 @@ test_legacy_verify (void)
   const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (mock.sensor);
   g_autofree guint8 *frames = make_frames (profile);
 
-  g_autoptr(GBytes) wire = make_wire_version (profile, frames, TRUE);
+  g_autoptr(GBytes) wire = make_wire_version (profile, frames, TRUE, FALSE);
   g_autoptr(FpPrint) print = print_for_wire (device, wire);
   g_autoptr(GError) error = NULL;
   const guint8 *bytes = g_bytes_get_data (wire, NULL);
@@ -698,6 +723,108 @@ test_legacy_verify (void)
   g_assert_cmpuint (mock.captures, ==, 1);
   finish_device (device);
 }
+
+static void
+test_profile_brisk_verify (gconstpointer data)
+{
+  gboolean ipa_only = GPOINTER_TO_UINT (data);
+
+  if (ipa_only && !g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  if (ipa_only)
+    g_setenv ("FP_FTE3600_MATCHER", "ipa", TRUE);
+
+  FpDevice *device = new_device (FTE3600_SENSOR_FT9369);
+  const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (mock.sensor);
+  g_autofree guint8 *frames = make_frames (profile);
+  g_autoptr(GBytes) wire = make_wire_version (profile, frames, FALSE, FALSE);
+  g_autoptr(FpPrint) print = print_for_wire (device, wire);
+  g_autoptr(GError) error = NULL;
+  const guint8 *bytes = g_bytes_get_data (wire, NULL);
+  gboolean match = FALSE;
+
+  /* An existing FW9369 BRISK enrollment remains usable with the optional dual
+   * build. Selecting IPA alone cannot manufacture its missing IPA features. */
+  g_assert_cmpuint (bytes[8], ==, FTE3600_TEMPLATE_PROFILE_WIRE_VERSION);
+  g_assert_cmpuint (bytes[9], ==, 0);
+  mock.frames = frames;
+  mock.n_frames = 1;
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &match, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (match, ==, !ipa_only);
+  g_assert_cmpuint (mock.captures, ==, 1);
+  finish_device (device);
+}
+
+#if FTE3600_ENABLE_IPA_AUTH
+static void
+test_unsupported_ipa_profile (void)
+{
+  if (!g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  g_setenv ("FP_FTE3600_MATCHER", "ipa", TRUE);
+
+  FpDevice *device = new_device (FTE3600_SENSOR_FT9365);
+  const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (mock.sensor);
+  g_autofree guint8 *frames = make_frames (profile);
+  g_autoptr(GBytes) wire = make_wire (profile, frames);
+  g_autoptr(FpPrint) print = print_for_wire (device, wire);
+  g_autoptr(GError) error = NULL;
+  gboolean match = FALSE;
+
+  /* Matching geometry alone does not opt another sensor into IPA. Report an
+   * unsupported policy rather than asking for more finger samples forever. */
+  mock.frames = frames;
+  mock.n_frames = 1;
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                         &match, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_assert_false (match);
+  g_assert_cmpuint (mock.captures, ==, 1);
+  finish_device (device);
+}
+#else
+static void
+test_ipa_opt_in_required (gconstpointer data)
+{
+  if (!g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  g_setenv ("FP_FTE3600_MATCHER", data, TRUE);
+
+  FpDevice *device = new_device (FTE3600_SENSOR_FT9369);
+  const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (mock.sensor);
+  g_autofree guint8 *frames = make_frames (profile);
+  g_autoptr(GBytes) wire = make_wire (profile, frames);
+  g_autoptr(FpPrint) print = print_for_wire (device, wire);
+  g_autoptr(GError) error = NULL;
+  gboolean match = FALSE;
+
+  /* A runtime strategy override cannot enable experimental authentication
+   * in a build whose personal authentication policy is BRISK-only. */
+  mock.frames = frames;
+  mock.n_frames = 1;
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                         &match, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_assert_nonnull (strstr (error->message, "build opt-in"));
+  g_assert_false (match);
+  g_assert_cmpuint (mock.captures, ==, 1);
+  finish_device (device);
+}
+#endif
 
 static void
 test_duplicate_release (void)
@@ -850,8 +977,9 @@ test_boundary_error (gconstpointer data)
 static void
 test_foreign_template (gconstpointer data)
 {
-  const Fte3600MatchProfile *foreign = fpi_fte3600_match_profile_get (GPOINTER_TO_UINT (data));
-  FpDevice *device = new_device (FTE3600_SENSOR_FT9361);
+  Fte3600Sensor sensor = GPOINTER_TO_UINT (data) >> 8;
+  const Fte3600MatchProfile *foreign = fpi_fte3600_match_profile_get (GPOINTER_TO_UINT (data) & 0xff);
+  FpDevice *device = new_device (sensor ? sensor : FTE3600_SENSOR_FT9361);
   g_autofree guint8 *frames = make_frames (foreign);
 
   g_autoptr(GBytes) wire = make_wire (foreign, frames);
@@ -947,6 +1075,8 @@ main (int argc, char **argv)
     }
 #if FTE3600_ENABLE_PERSONAL_AUTH
   g_test_add_func ("/fte3600-auth-lifecycle/legacy-v1-verify", test_legacy_verify);
+  g_test_add_data_func ("/fte3600-auth-lifecycle/fw9369-brisk-v2-verify",
+                        GUINT_TO_POINTER (FALSE), test_profile_brisk_verify);
   g_test_add_func ("/fte3600-auth-lifecycle/previous-family-policy", test_previous_family_policy);
   g_test_add_func ("/fte3600-auth-lifecycle/release/duplicate", test_duplicate_release);
   for (guint fault = 1; fault <= 4; fault++)
@@ -960,6 +1090,18 @@ main (int argc, char **argv)
 #if FTE3600_ENABLE_IPA_AUTH
   g_test_add_data_func ("/fte3600-auth-lifecycle/large-v3-enroll-verify",
                         GUINT_TO_POINTER (FTE3600_SENSOR_FT9361 | 0x400), test_roundtrip);
+  g_test_add_data_func ("/fte3600-auth-lifecycle/fw9369-large-v4-enroll-verify",
+                        GUINT_TO_POINTER (FTE3600_SENSOR_FT9369 | 0x400), test_roundtrip);
+  g_test_add_data_func ("/fte3600-auth-lifecycle/fw9369-ipa-enroll-verify",
+                        GUINT_TO_POINTER (FTE3600_SENSOR_FT9369 | 0x800), test_roundtrip);
+  g_test_add_data_func ("/fte3600-auth-lifecycle/fw9369-brisk-v2-no-ipa",
+                        GUINT_TO_POINTER (TRUE), test_profile_brisk_verify);
+  g_test_add_func ("/fte3600-auth-lifecycle/unsupported-ipa-profile", test_unsupported_ipa_profile);
+#else
+  g_test_add_data_func ("/fte3600-auth-lifecycle/ipa-opt-in-required/ipa",
+                        "ipa", test_ipa_opt_in_required);
+  g_test_add_data_func ("/fte3600-auth-lifecycle/ipa-opt-in-required/dual",
+                        "dual", test_ipa_opt_in_required);
 #endif
   g_test_add_data_func ("/fte3600-auth-lifecycle/release/retry",
                         GUINT_TO_POINTER (FTE3600_SENSOR_FT9369 | 0x200), test_roundtrip);
@@ -975,6 +1117,9 @@ main (int argc, char **argv)
 
       g_test_add_data_func (path, GUINT_TO_POINTER (sensor), test_foreign_template);
     }
+  g_test_add_data_func ("/fte3600-auth-lifecycle/foreign/ft9361-on-fw9369",
+                        GUINT_TO_POINTER ((FTE3600_SENSOR_FT9369 << 8) | FTE3600_SENSOR_FT9361),
+                        test_foreign_template);
 #endif
   return g_test_run ();
 }

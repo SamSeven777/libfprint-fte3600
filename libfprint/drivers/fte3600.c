@@ -297,8 +297,9 @@ fte3600_enroll_worker (GTask        *task,
   job->extract_status =
     fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
 #if FTE3600_ENABLE_IPA_AUTH
-  if (job->input.profile->sensor == FTE3600_SENSOR_FT9361 &&
-      fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features) == FTE3600_IPA_OK)
+  if (fpi_fte3600_ipa_supports_profile (job->input.profile) &&
+      fpi_fte3600_ipa_extract_for_profile (job->input.profile, job->input.view.data,
+                                          job->input.view.length, &ipa_features) == FTE3600_IPA_OK)
     p_ipa = &ipa_features;
 #endif
 
@@ -703,6 +704,18 @@ fte3600_verify_worker (GTask        *task,
       goto out;
     }
 
+  if (!fpi_fte3600_ipa_supports_profile (job->input.profile))
+    {
+      if (job->engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
+        {
+          g_task_return_error (task, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                 "IPA matching is not supported for this sensor profile"));
+          goto out;
+        }
+      job->engine_mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
+    }
+
   job->extract_status = FTE3600_BRISK_INSUFFICIENT_FEATURES;
   job->ipa_extract_status = FTE3600_IPA_ERR_TOO_FEW_POINTS;
 
@@ -710,11 +723,11 @@ fte3600_verify_worker (GTask        *task,
     job->extract_status =
       fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
 
-  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
-      job->input.profile->sensor == FTE3600_SENSOR_FT9361)
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY)
     {
       job->ipa_extract_status =
-        fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features);
+        fpi_fte3600_ipa_extract_for_profile (job->input.profile, job->input.view.data,
+                                            job->input.view.length, &ipa_features);
       if (job->ipa_extract_status == FTE3600_IPA_OK)
         p_ipa = &ipa_features;
     }

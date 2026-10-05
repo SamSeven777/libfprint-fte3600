@@ -8,6 +8,31 @@
 #include "fte3600-ipa.h"
 #include <string.h>
 
+gboolean
+fpi_fte3600_ipa_supports_profile (const Fte3600MatchProfile *profile)
+{
+  profile = fpi_fte3600_match_profile_resolve (profile);
+  return profile &&
+         (profile->sensor == FTE3600_SENSOR_FT9361 ||
+          profile->sensor == FTE3600_SENSOR_FT9369) &&
+         profile->width == FPI_IPA_WIDTH && profile->height == FPI_IPA_HEIGHT;
+}
+
+Fte3600IpaStatus
+fpi_fte3600_ipa_extract_for_profile (const Fte3600MatchProfile *profile,
+                                     const guint8             *image,
+                                     gsize                     length,
+                                     Fte3600IpaFeatureSet     *features)
+{
+  if (!fpi_fte3600_ipa_supports_profile (profile))
+    {
+      if (features)
+        memset (features, 0, sizeof (*features));
+      return FTE3600_IPA_ERR_PARAM;
+    }
+  return fpi_ipa_extract (image, length, features);
+}
+
 Fte3600IpaStatus
 fpi_fte3600_ipa_extract (const guint8         *image,
                          gsize                 length,

@@ -53,7 +53,7 @@ settle before checking `0x14/0x15`.
 
 ---
 
-## 3. Host Biometric Matcher (BRISK)
+## 3. Host Biometric Matchers
 
 FocalTech hardware sensors stream raw capacitive pixel arrays and do not execute on-chip matching firmware. Authentication is handled on the host:
 
@@ -61,6 +61,32 @@ FocalTech hardware sensors stream raw capacitive pixel arrays and do not execute
 - **Descriptor Extraction**: 512-bit (64-byte) bitwise descriptor vectors.
 - **Matching Acceleration**: Accelerated 64-bit Hamming distance computation (`__builtin_popcountll`) with geometric RANSAC consistency checks.
 - **Adaptive Canvas**: Dynamically stitches multiple enrollment impressions to accommodate small/narrow form-factor sensors (such as FT9769 $40 \times 196$).
+
+Personal authentication uses BRISK alone unless the build explicitly enables
+`-Dfte3600_ipa_auth=true` as well as `-Dfte3600_personal_auth=true`. That optional
+build enables Grand Synergy v3: BRISK and 2D-IPA feature extraction with dual
+fusion as the default verification mode. `FP_FTE3600_MATCHER=brisk`, `ipa`, or
+`dual` selects the verification strategy in the process loading libfprint.
+
+The IPA adapter accepts the registered FT9361 and FW9369 (raw ID `0x9362`)
+profiles, both with native 64 × 80 grayscale images. It does not infer support
+from image dimensions alone. Other profiles continue to use their own BRISK
+policy in dual mode; explicitly selecting IPA alone reports an unsupported
+policy for those profiles. No sensor commands, initialization, or image
+calibration steps change when opting into a different host matcher.
+
+Templates retain the sensor identity, geometry, and processing revision.
+FT9361 dual templates preserve wire v3 and its existing policy; FW9369 dual
+templates use wire v4 with the FW9369 BRISK policy. A template from one sensor
+profile cannot authenticate another, including these two equal-size profiles.
+BRISK-only enrollment keeps wire v2. Existing BRISK templates remain usable
+with BRISK or dual verification in an IPA-enabled build, but adding IPA
+features requires new enrollment. Selecting IPA alone cannot use features
+missing from an old BRISK template.
+
+FW9369 IPA and fusion are experimental. Synthetic lifecycle and template tests
+exercise extraction, persistence, policy selection, and sensor isolation;
+accuracy and thresholds still require real GPD Pocket 3 data and testing.
 
 ---
 

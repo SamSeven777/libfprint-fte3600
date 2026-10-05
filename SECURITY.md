@@ -26,13 +26,17 @@ from eight samples in canonical order. This decision rule has no population
 FAR/FRR calibration. Compatible wire-v1 FT9361 templates retain their isolated
 legacy policy 5/6 path; unsupported revisions require re-enrollment. Changing
 stored version fields is not a migration. See
-[template compatibility](docs/fte3600/family-authentication.md).
+[template compatibility](docs/fte3600/architecture.md#3-host-biometric-matchers).
 
 The separate `fte3600_ipa_auth=true` option enables experimental IPA/dual
-authentication for FT9361 only and requires personal authentication to be
-enabled. Other 64 × 80 sensors do not inherit IPA support from their dimensions.
-Its optional status and synthetic tests do not establish biometric accuracy
-or liveness. See [matcher architectures](docs/fte3600/matcher-architectures.md).
+authentication for FT9361 and FW9369 (raw ID `0x9362`) and requires personal
+authentication to be enabled. Other 64 × 80 sensors do not inherit IPA support
+from their dimensions. FT9361 dual templates retain wire v3 and its historical
+BRISK policy; FW9369 uses wire v4 with its profile policy and processing
+revision. Templates cannot cross sensor profiles. Its optional status and
+synthetic tests do not establish biometric accuracy or liveness; FW9369 IPA
+and fusion still require hardware validation. See
+[matcher architectures](docs/fte3600/architecture.md#3-host-biometric-matchers).
 
 ## Hardware and external firmware
 

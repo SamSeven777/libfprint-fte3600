@@ -73,6 +73,10 @@ sudo cp /path/to/extracted/firmware/*.bin /usr/lib/firmware/fte3600/
 
 Configure the build with Meson. Set `-Dfte3600_personal_auth=true` to enable host-side matching (BRISK):
 
+The ordinary authentication build and Arch package use BRISK only.
+`fte3600_ipa_auth` remains disabled by default; plain Meson defaults also leave
+personal authentication disabled until explicitly requested.
+
 ```bash
 # Configure build directory
 meson setup build-fte3600 \
@@ -90,6 +94,37 @@ ninja -C build-fte3600 test
 # Install to system
 sudo ninja -C build-fte3600 install
 ```
+
+### Optional Grand Synergy v3 Matching
+
+FT9361 and FW9369 (raw ID `0x9362`, as found in GPD Pocket 3) can opt into
+BRISK + 2D-IPA matching. FW9369 IPA and fusion are experimental and await
+hardware validation; enabling them is not a claim of improved accuracy.
+
+For an existing build directory, enable both authentication options and
+rebuild:
+
+```bash
+meson configure build-fte3600 \
+  -Dfte3600_personal_auth=true \
+  -Dfte3600_ipa_auth=true
+ninja -C build-fte3600
+ninja -C build-fte3600 test
+sudo ninja -C build-fte3600 install
+sudo systemctl restart fprintd
+```
+
+The optional build defaults to dual fusion. To choose a verification strategy,
+set `FP_FTE3600_MATCHER=brisk`, `ipa`, or `dual` in the process that loads
+libfprint. For normal `fprintd` use, set it in the service environment; setting
+it only on the `fprintd-verify` client does not configure the daemon. Profiles
+without IPA support use BRISK in dual mode and reject explicit IPA-only mode.
+
+Re-enroll fingerprints after enabling IPA to store features for both engines.
+Existing BRISK templates still work in BRISK or dual mode, but do not gain IPA
+features automatically and cannot be used for IPA-only verification. New
+dual templates require an IPA-enabled build; re-enroll with BRISK after
+returning to a BRISK-only build.
 
 ---
 
