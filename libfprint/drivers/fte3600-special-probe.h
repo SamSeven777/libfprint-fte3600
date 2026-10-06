@@ -21,3 +21,7 @@
  * firmware. No inferred default identity is returned. */
 FpiSsm *fpi_fte3600_special_probe_new (FpiDeviceFte3600 *self,
                                        Fte3600Identity *result);
+
+/* Factory physical H10/L20/H pulse followed by 10 ms settling. Disarm IRQs
+ * before starting; always attempt the whole pulse, including on failure. */
+FpiSsm *fpi_fte3600_special_reset_new (FpiDeviceFte3600 *self);

@@ -98,6 +98,15 @@ special_reset_handler (FpiSsm *ssm, FpDevice *dev)
     }
 }
 
+FpiSsm *
+fpi_fte3600_special_reset_new (FpiDeviceFte3600 *self)
+{
+  self->armed = FALSE;
+  fpi_fte3600_clear_irq_source (self);
+  return fpi_ssm_new_full (FP_DEVICE (self), special_reset_handler,
+                           RESET_NSTATES, RESET_RELEASE, "special-factory-reset");
+}
+
 static void
 special_reset (FpiSsm *ssm)
 {
@@ -105,13 +114,10 @@ special_reset (FpiSsm *ssm)
   SpecialProbe *data = fpi_ssm_get_data (ssm);
   FpiSsm *child;
 
-  self->armed = FALSE;
-  fpi_fte3600_clear_irq_source (self);
   /* The child always attempts the entire pulse, including on failure. Its
    * error must not cause the parent's cleanup to issue a second pulse. */
   data->touched = FALSE;
-  child = fpi_ssm_new_full (FP_DEVICE (self), special_reset_handler,
-                            RESET_NSTATES, RESET_RELEASE, "special-factory-reset");
+  child = fpi_fte3600_special_reset_new (self);
   fpi_ssm_start_subsm (ssm, child);
 }
 

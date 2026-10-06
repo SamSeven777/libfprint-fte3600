@@ -11,6 +11,7 @@
 
 #include "fte3600-fw9369.h"
 #include "fte3600-fw9369-protocol.h"
+#include "fte3600-special-probe.h"
 
 /* Hardware waits are milliseconds. Calibration limits are host policy. */
 #define COMMAND_DELAY_MS 1
@@ -43,6 +44,7 @@ typedef struct
   guint    spurious;
   gboolean smic;
   gboolean calibrated;
+  gboolean init_started;
   gboolean release_armed;
   gboolean communication_stopped_fdt;
   gboolean identity_lost;
@@ -683,7 +685,7 @@ start_dac_search (Fw9369Data *data)
 }
 
 enum {
-  INIT_SPI, INIT_CHECK_SPI, INIT_READ_PROCESS, INIT_CHECK_PROCESS,
+  INIT_FAST_RESET, INIT_SPI, INIT_CHECK_SPI, INIT_READ_PROCESS, INIT_CHECK_PROCESS,
   INIT_ANALOG, INIT_FDT_SAMPLE, INIT_FDT_ADJUST, INIT_FDT_STABLE_SAMPLE,
   INIT_FDT_STABLE_CHECK, INIT_IMAGE_SAMPLE, INIT_IMAGE_ADJUST,
   INIT_BASE_SAMPLE, INIT_BASE_CHECK, INIT_IDLE, INIT_DONE, INIT_STATES,
@@ -704,7 +706,21 @@ init_run (FpiSsm *ssm, FpDevice *dev)
     return;
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    case INIT_FAST_RESET:
+      self->idle_verified = FALSE;
+      data->calibrated = FALSE;
+      data->init_started = FALSE;
+      /* Cached identity does not imply an awake sensor: shutdown enters C1.
+       * Reuse the factory reset before accessing SPI configuration or ID;
+       * the full discovery path already establishes communication. */
+      if (self->fast_open)
+        fpi_ssm_start_subsm (ssm, fpi_fte3600_special_reset_new (self));
+      else
+        fpi_ssm_next_state (ssm);
+      break;
+
     case INIT_SPI:
+      data->init_started = TRUE;
       self->idle_verified = FALSE;
       data->calibrated = FALSE;
       data->image_dac = FTE3600_FW9369_IMAGE_DAC;
@@ -868,7 +884,14 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case INIT_IDLE:
-      if (data->identity_lost)
+      /* A failed or cancelled wake has not established register access.
+       * The reset child has already attempted its final deassertion. */
+      if (!data->init_started)
+        {
+          self->session_failed = TRUE;
+          fpi_ssm_jump_to_state (ssm, INIT_DONE);
+        }
+      else if (data->identity_lost)
         fpi_ssm_jump_to_state (ssm, INIT_DONE);
       else
         fpi_ssm_start_subsm (ssm, create_reset (self));

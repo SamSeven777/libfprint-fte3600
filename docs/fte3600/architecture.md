@@ -51,6 +51,12 @@ still performs its own wake, identity validation, configuration, and image
 calibration. Legacy backends also retain the vendor 350 ms post-wake geometry
 settle before checking `0x14/0x15`.
 
+FW9369 fast open first performs the existing factory physical H10/L20/H reset
+and 10 ms settling, before reading SPI configuration or `0x1a8b`. Its previous
+close enters C1 deep sleep, which a cached identity does not wake. A reset
+failure or cancellation finishes the pulse, invalidates the session, and skips
+runtime cleanup commands until a later full discovery establishes communication.
+
 ---
 
 ## 3. Host Biometric Matchers

@@ -75,6 +75,10 @@ static struct
   gboolean      discovery_wake_finished[2];
   guint         cs_changes;
   guint         reset_edges;
+  gboolean      reset_asserted;
+  gboolean      fail_fast_reset;
+  gboolean      cancel_fast_reset;
+  gint64        reset_times[3];
   guint         failure_transaction;
   gboolean      completed;
   gboolean      finger;
@@ -681,6 +685,24 @@ fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean as
       g_assert_null (self->sensor);
     }
   mock.reset_edges++;
+  mock.reset_asserted = asserted;
+  if (self->fast_open)
+    {
+      static const gboolean expected[] = { FALSE, TRUE, FALSE };
+      guint edge = mock.reset_edges - 1;
+
+      g_assert_cmpuint (edge, <, G_N_ELEMENTS (expected));
+      g_assert_cmpint (asserted, ==, expected[edge]);
+      mock.reset_times[edge] = g_get_monotonic_time ();
+      if (asserted && mock.cancel_fast_reset)
+        g_cancellable_cancel (mock.cancellable);
+      if (asserted && mock.fail_fast_reset)
+        {
+          fpi_ssm_mark_failed (ssm, g_error_new_literal (
+                                 G_IO_ERROR, G_IO_ERROR_FAILED, "Injected reset failure"));
+          return;
+        }
+    }
   if (asserted)
     mock.sleeping = FALSE;
   self->idle_verified = FALSE;
@@ -1062,6 +1084,66 @@ test_fdt_recovery (gconstpointer scenario_ptr)
 }
 
 static void
+test_shutdown_fast_reopen (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (scenario == 1);
+  guint transactions, images;
+  g_autoptr(GError) error = NULL;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (mock.reset_edges, ==, 0);
+  run_ssm (self->backend->create_shutdown (self));
+  g_assert_no_error (mock.error);
+  g_assert_true (mock.sleeping);
+  transactions = mock.transactions;
+  images = mock.images;
+
+  /* Close destroys backend data but keeps the validated identity. Unlike the
+   * discovery-reopen test, reuse it with the silicon still asleep from C1. */
+  self->backend->destroy (self);
+  g_assert_true (self->backend->prepare_capture (self, &error));
+  g_assert_no_error (error);
+  self->fast_open = TRUE;
+  mock.fail_fast_reset = scenario == 2;
+  mock.cancel_fast_reset = scenario == 3;
+  if (scenario == 4)
+    mock.words[0x1a8b] = 0x9391;
+  run_ssm (self->backend->create_init (self));
+
+  g_assert_cmpuint (mock.reset_edges, ==, 3);
+  g_assert_false (mock.reset_asserted);
+  g_assert_cmpint (mock.reset_times[1] - mock.reset_times[0], >=, 10000);
+  g_assert_cmpint (mock.reset_times[2] - mock.reset_times[1], >=, 20000);
+  g_assert_cmpint (g_get_monotonic_time () - mock.reset_times[2], >=, 10000);
+  g_assert_cmpuint (mock.discovery_ids, ==, 0);
+  if (scenario == 2 || scenario == 3)
+    {
+      g_assert_error (mock.error, G_IO_ERROR,
+                      (scenario == 2 ? G_IO_ERROR_FAILED : G_IO_ERROR_CANCELLED));
+      g_assert_cmpuint (mock.transactions, ==, transactions);
+      g_assert_true (self->session_failed);
+    }
+  else if (scenario == 4)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_cmpuint (mock.images, ==, images);
+    }
+  else
+    {
+      g_assert_no_error (mock.error);
+      g_assert_false (mock.sleeping);
+      g_assert_true (self->idle_verified);
+      g_assert_cmpuint (mock.images, >, images);
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_nonnull (self->captured_image);
+    }
+  teardown (self);
+}
+
+static void
 test_shutdown_discovery_reopen (gconstpointer scenario_ptr)
 {
   guint scenario = GPOINTER_TO_UINT (scenario_ptr);
@@ -1322,6 +1404,13 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fw9369-backend/db-capture", GUINT_TO_POINTER (0), test_capture);
   g_test_add_data_func ("/fw9369-backend/smic-capture", GUINT_TO_POINTER (1), test_capture);
   g_test_add_func ("/fw9369-backend/cleanup-error", test_cleanup_error);
+  for (guint i = 0; i < 5; i++)
+    {
+      static const gchar *cases[] = { "db", "smic", "reset-error", "cancel", "changed-id" };
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/fast-reopen/%s", cases[i]);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_shutdown_fast_reopen);
+    }
   for (guint i = 0; i < 6; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/shutdown-reopen/%u", i);
