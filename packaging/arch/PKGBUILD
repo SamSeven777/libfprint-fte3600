@@ -14,6 +14,9 @@ makedepends=(cairo git glib2-devel gobject-introspection meson ninja python)
 provides=("libfprint=$pkgver" 'libfprint-2.so=2-64')
 conflicts=(libfprint)
 install=fte3600.install
+# Meson enables LTO for production and disables it for linker-wrapped tests.
+# Do not inject a second -flto through makepkg's global compiler flags.
+options=(!lto)
 
 # This developer PKGBUILD packages the committed checkout containing it. A
 # release tag can replace this local VCS source with a fixed GitHub archive.

@@ -316,6 +316,32 @@ libfprint_private_dep = declare_dependency(
     ]
 )
 
+# --wrap intercepts unresolved references. LTO can resolve calls inside these
+# archives before the linker sees them, bypassing the hardware test doubles.
+# Keep production LTO enabled and compile separate archives only for tests.
+libfprint_test_private = libfprint_private
+libfprint_test_drivers = libfprint_drivers
+libfprint_test_private_dep = libfprint_private_dep
+if get_option('b_lto')
+    libfprint_test_private = static_library('fprint-test-private',
+        sources: [fpi_enums, libfprint_private_sources],
+        dependencies: deps,
+        link_with: libnbis,
+        override_options: ['b_lto=false'],
+        install: false)
+    libfprint_test_drivers = static_library('fprint-test-drivers',
+        sources: drivers_sources,
+        c_args: drivers_cflags,
+        dependencies: deps + driver_extra_deps,
+        link_with: libfprint_test_private,
+        override_options: ['b_lto=false'],
+        install: false)
+    libfprint_test_private_dep = declare_dependency(
+        include_directories: include_directories('.'),
+        link_with: libfprint_test_private,
+        dependencies: [deps, libfprint_dep])
+endif
+
 udev_hwdb_list = 'fprint-list-udev-hwdb.c'
 udev_hwdb_list_file = files(udev_hwdb_list)
 udev_hwdb = executable('fprint-list-udev-hwdb',

@@ -16,7 +16,7 @@ This page tracks implementation status, driver capabilities, and reported device
 | **FT9536** | 64 × 128 | Supported (Legacy A8) | `ft9536.bin` | BRISK | Implemented & Unit Tested |
 | **FT9365** | 64 × 80 | Supported (FT9365) | None (ROM mode) | BRISK | Implemented & Unit Tested |
 | **FT9368** | 64 × 80 | Supported (FT9368) | App + Pramboot | BRISK | Implemented & Unit Tested |
-| **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK / optional 2D-IPA | **BRISK verified on hardware** (GPD Pocket 3); IPA/fusion awaits hardware validation |
+| **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK / optional 2D-IPA | BRISK and optional IPA tested on GPD Pocket 3; see revision-specific results below |
 | **FT9769** (ID 9391/2) | 40 × 196 | Supported (FT9769) | None (ROM mode) | BRISK (Adaptive) | Implemented & Unit Tested |
 
 The ordinary authentication build remains BRISK-only. Grand Synergy v3 is an
@@ -24,8 +24,8 @@ explicit `-Dfte3600_ipa_auth=true` opt-in for FT9361 and FW9369, with
 `-Dfte3600_personal_auth=true` also required. It selects each sensor's template
 policy and preserves sensor isolation. Existing BRISK enrollments remain usable
 in BRISK or dual mode; re-enrollment is needed to add IPA features. FW9369 IPA
-support has synthetic test coverage, not measured accuracy or hardware
-validation. See [optional matcher installation](install.md#optional-grand-synergy-v3-matching).
+support has synthetic coverage and a small hardware test report; population
+accuracy remains unmeasured. See [optional matcher installation](install.md#optional-grand-synergy-v3-matching).
 
 ---
 
@@ -43,6 +43,19 @@ validation. See [optional matcher installation](install.md#optional-grand-synerg
   - Unchanged kernel generations use fast open; suspend/resume forces a complete
     factory rediscovery before the backend is cached again.
 
+The [2026-10-06 report on `549767a`](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6006608845)
+found that an unpatched second open in one fprintd process failed after C1 sleep.
+With the reporter's factory-reset fix, warm opens took 1.38–1.39 s and verification
+after suspend/resume succeeded. This tree integrates that wake sequence with
+regressions for retained sleep, reset failure, cancellation, and changed identity;
+the integrated revision still needs hardware retesting. Full factory discovery,
+including the C6 retries, is unchanged.
+
+In the same report, BRISK and IPA agreed on all seven captures with individual
+engine results logged (five matching and two nonmatching fingers). The reported
+dual-mode totals were 6/8 genuine attempts accepted and 0/3 other-finger attempts
+accepted. These counts do not establish FAR/FRR or an improvement over BRISK.
+
 ### One-Netbook A1 (FT9361)
 - **Environment**: Linux Kernel 6.x / 7.x.
 - **Hardware Profile**: A8 protocol with external firmware `ft9361.bin`.
@@ -58,6 +71,31 @@ Run the FTE3600 regression checks with warnings treated as errors:
 ```bash
 ./scripts/check-fte3600.sh
 ```
+
+### 2026-10-06: issue #2 fixes
+
+Local validation used the working tree based on `549767a`, with the FW9369 C1
+wake, udev import ordering, and LTO test isolation fixes. GCC 13.3.0 and Meson
+1.3.2 ran in WSL Ubuntu with `-Ddrivers=fte3600` and `-Dwerror=true`:
+
+| Personal authentication | IPA authentication | Production LTO | Checks executed | Result |
+| :---: | :---: | :---: | :--- | :--- |
+| Disabled | Disabled | Disabled | Required script | 28/28 targets passed |
+| Enabled | Enabled | Disabled | Required script | 28/28 targets passed |
+| Enabled | Disabled | Enabled | Arch PKGBUILD's check list, release build | 25/25 targets passed |
+
+The LTO run tests the package's selected suites on Ubuntu; it is not a native
+Arch `makepkg` run. Production objects retain LTO; linker-wrapped test objects
+and their private/driver archives use separate non-LTO builds. Both installed
+udev rule forms are checked for consistency and import ordering; `udevadm
+verify` 255 also accepted the standalone rule. The five new FW9369 cases cover
+DB/SMIC fast reopen after C1, reset failure, cancellation, and a changed ID.
+
+Logs are in `meson-logs/testlog.txt` under `build-fte3600-ci-false`,
+`build-fte3600-ci-true`, and `build-issue2-lto`. These are synthetic regressions;
+no local GPD hardware test was performed.
+
+### 2026-10-05: optional FW9369 matcher
 
 Local validation on 2026-10-05 used the working tree based on `3a36d68`, with
 the FW9369 optional matcher changes, GCC 13.3.0 and Meson 1.3.2 in WSL Ubuntu.
