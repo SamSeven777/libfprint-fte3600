@@ -2,6 +2,7 @@
  * Synthetic SPI/GPIO fixture: no device, firmware or biometric input.
  */
 #include "examples/fte3600-medion-identify.h"
+#include "medion-reset-sync-fixture.h"
 
 #include <string.h>
 
@@ -293,13 +294,21 @@ mock_report (gpointer user_data, const gchar *message)
   g_string_append_printf (f->reports, "%s\n", message);
 }
 
+static gboolean
+mock_reset_and_sync (gpointer user_data, GError **error)
+{
+  Fixture *f = user_data;
+
+  return medion_fixture_reset_and_sync (&f->io, error);
+}
+
 static void
 fixture_init (Fixture *f)
 {
   memset (f, 0, sizeof *f);
   f->io = (Fte3600MedionIdentifyIo){
     .user_data = f, .max_transfer = 11, .exchange = mock_exchange,
-    .set_reset = mock_reset, .wait = mock_wait,
+    .set_reset = mock_reset, .reset_and_sync = mock_reset_and_sync, .wait = mock_wait,
     .check_cancelled = mock_cancelled, .report = mock_report,
   };
   f->otp[0] = f->otp[1] = 0x11;
@@ -717,7 +726,7 @@ test_cancel (void)
           g_assert_nonnull (strstr (f.events->str, "R1;W20;R0;"));
           g_assert_true (g_str_has_suffix (f.events->str, "R0;W10;R1;W20;R0;W180;"));
           if (variant == 1)
-            g_assert_cmpuint (f.syncs, ==, 0);
+            g_assert_cmpuint (f.syncs, ==, 1);
           else
             g_assert_cmpuint (f.disables, ==, 1);
         }

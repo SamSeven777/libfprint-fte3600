@@ -36,5 +36,5 @@ for fte_auth in false true; do
     fte3600-special-probe fte3600-family-template fte3600-auth-lifecycle \
     fte3600-install-firmware fte3600-setup fte3600-pair fte3600-resources \
     medion-spidev-help medion-spidev-launcher medion-transport \
-    medion-identify medion-identify-io medion-boot
+    medion-identify medion-identify-io medion-boot medion-ft9338
 done

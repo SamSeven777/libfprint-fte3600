@@ -1,15 +1,16 @@
 # Medion E3224 spidev diagnostics
 
-The `medion-spidev` branch provides an experimental, standalone diagnostic path
-for the Medion E3224 wiring under investigation. Its recommended first hardware
-stage, `--identify-legacy`, checks the FT9338 and FT9348 identification paths
-without uploading firmware, initializing a capture backend or acquiring an
-image. The explicit `--boot ft9338` and `--boot ft9348` stages can then test
-the selected candidate's catalogued RAM firmware. Separate stages reuse this
-repository's general sensor discovery,
-initialization and capture state machines. The tool does not
-establish that the Medion sensor works, or that every laptop sold as an E3224
-has the same sensor and wiring.
+The `medion-spidev` branch provides a standalone diagnostic for the Medion E3224
+wiring under investigation. Start with `--test-ft9338`: an independent FT9338
+engine follows the Windows ROM/OTP identification, firmware startup and MCU
+configuration sequence. An unsupported identity, including B38 OTP `00`, stops
+the test before firmware upload. This test does not capture a fingerprint.
+
+Separate stages reuse this repository's general discovery, initialization and
+capture state machines. Explicit `--boot ft9338` and `--boot ft9348` remain
+optional manual firmware experiments, separate from Windows-style automatic
+identification. The new FT9338 test has not yet been validated on Medion
+hardware; it does not establish that every E3224 has the same sensor and wiring.
 
 This is a board-specific tool, not the normal FTE3600 installation procedure.
 The normal driver continues to require the ACPI resource bridge. The standalone
@@ -29,8 +30,9 @@ says his laptop has the same reader, but supplies no chip-register response.
 In the audited Windows package 2.0.3.102, `ACPI\FTE3600` selects the SPI install
 section and `USB\VID_2808&PID_9338` selects the USB install section. These are
 separate device matches in one package. FT9338 is the leading candidate for
-this experiment, with FT9348 as the other identification target. This candidate
-choice does not force a backend or replace a response from the sensor.
+this experiment, with FT9348 as the other candidate. The explicit boot test
+selects a firmware and startup procedure; that choice alone is not a confirmed
+sensor identity.
 
 Linux Hardware's [published index](https://github.com/linuxhw/TestDays/blob/main/Location/Belgium/README.md)
 contains E3224 probe [`9def2aed31`](https://linux-hardware.org/?probe=9def2aed31).
@@ -71,6 +73,39 @@ meson setup build-medion -Ddrivers=fte3600 \
   -Dgtk-examples=false -Dinstalled-tests=false -Dwerror=true --prefix=/usr
 ninja -C build-medion examples/fte3600-medion
 ```
+
+## First test: FT9338 identification and startup
+
+Download and extract the FT9338 payload from the pinned Microsoft Update Catalog
+package, then run the complete FT9338 startup test:
+
+```sh
+sh scripts/install-firmware.sh --chip ft9338 --download \
+  --destdir "$PWD/medion-firmware"
+sudo python3 scripts/medion-spidev.py --test-ft9338 \
+  --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
+```
+
+The firmware remains in the local `medion-firmware` directory. Its exact size
+and SHA-256 are checked before sensor operations. No Windows code is executed.
+The test then identifies the sensor before uploading anything: `1534` alone
+is not an FT9338 identity, and B38 OTP `00` still fails classification. There
+is no manual chip override or fallback to another firmware in this action.
+
+After an accepted FT9338 result, the same native test configures the boot
+registers, uploads RAM firmware, compares the complete readback, restarts the
+application with the 80 ms startup wait and polls for MCU idle. It then performs
+the vendor MCU writes `01=01`, `41=0f`, `30=bb`, with 1 ms waits, reads register
+`30`, and checks the runtime geometry and versions. It does not add an
+FT9361/A8 `70` reset pair.
+Runtime, version and final register checks are diagnostic acceptance criteria;
+the test does not claim identical Windows error handling.
+
+Share the text output, including the ROM/OTP selection and
+`FT9338 TEST PASS` or `FT9338 TEST FAIL`, plus the final restoration result.
+The test requests SPI and reset GPIO, without
+requesting the IRQ line or acquiring an image. It uses its own protocol engine,
+not the general driver's discovery or initialization state machines.
 
 Do not run `ninja install` or `setup-fte3600.sh` for this diagnostic path. The
 `--prefix=/usr` option does not install anything when building this target.
@@ -135,9 +170,10 @@ protocol frames are not split to make them fit. A temporary
 binding and driver override are restored on normal completion and handled
 failures; a module loaded for the experiment remains loaded.
 
-An explicit FT9338 boot needs at least 14192 bytes; FT9348 needs 10319 bytes.
+`--test-ft9338` and the manual FT9338 boot need at least 14192 bytes;
+the manual FT9348 boot needs 10319 bytes.
 If `spidev` is already loaded with a smaller buffer, the launcher refuses that
-boot before pausing `fprintd` or changing the device binding. A newly loaded
+action before pausing `fprintd` or changing the device binding. A newly loaded
 module's actual buffer is checked again. These are minimum complete-frame
 sizes, not proof that the SPI controller accepts the transaction. An existing
 4 KiB or 8 KiB buffer can still run the short identification queries.
@@ -147,13 +183,16 @@ sizes, not proof that the SPI controller accepts the transaction. An existing
 | Stage | What it establishes | Sensor operations |
 | --- | --- | --- |
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
+| `--test-ft9338` | Whether Windows-style ROM/OTP identification selects FT9338 and its firmware startup and MCU configuration pass | Independent identification, reset, RAM upload with complete readback, application restart and MCU configuration; no IRQ request or capture |
 | `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries, bounded software wake and reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
-| `--boot ft9338` or `--boot ft9348` | Whether the explicitly selected firmware starts with its expected runtime parameters | Validate the selected payload, reset, upload to RAM, verify transfer and application status; no capture or IRQ request |
+| `--boot ft9338` or `--boot ft9348` | Whether the manually selected firmware starts with its expected runtime parameters; not automatic identification | Validate the selected payload, reset, upload to RAM, verify transfer and application status; no capture or IRQ request |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
 | `--init` | Whether that identified chip completes its existing initialization and cleanup | Probe plus chip initialization; eligible recovery may load matching firmware |
 | `--capture OUTPUT` | Whether initialization and a finger-triggered acquisition produce an image | Initialization, capture and cleanup; writes the requested local PGM |
 
-Start with host inspection, then run the focused identification stage:
+Host inspection and the older focused identification action remain available
+as separate diagnostics. They are not prerequisites for `--test-ft9338`, which
+performs its own identification:
 
 ```sh
 python3 scripts/medion-spidev.py --inspect
@@ -184,17 +223,19 @@ upload firmware, run automatic chip initialization or fall through to capture.
 This action rejects `--firmware`; no environment variable enables a RAM boot.
 It is mutually exclusive with all other stages.
 
-## Boot the selected candidate's RAM firmware
+## Optional manual firmware experiment
 
-FT9338 is the first candidate for this experiment. `--boot ft9338` explicitly
-selects its RAM startup sequence; an initial `0x0000` response is allowed and
-successful prior identification is not required. The tool rejects an observed,
-nonempty identity that contradicts the selected profile. A failed FT9338 boot
-does not automatically retry FT9348. `--identify-legacy` remains available when
-only identification is wanted.
+`--boot ft9338` explicitly selects the FT9338 RAM startup sequence. It is a
+manual candidate experiment, not the Windows automatic identification flow:
+it permits an initial `0x0000` application response without prior OTP
+identification. Windows's B38 identification does not treat OTP `00` as
+permission to load FT9338 firmware. Do not interpret this command as a fix for
+an unsuccessful identity check.
 
-Download and extract the selected payload from the installer's fixed Microsoft
-Update Catalog package, without installing it system-wide:
+The tool rejects an observed nonempty application identity that contradicts the
+selected profile. A failed FT9338 boot does not automatically retry FT9348.
+If deliberately testing the FT9338 candidate, download and extract its payload
+from the pinned Microsoft Update Catalog package and run the separate test:
 
 ```sh
 sh scripts/install-firmware.sh --chip ft9338 --download \
@@ -202,6 +243,9 @@ sh scripts/install-firmware.sh --chip ft9338 --download \
 sudo python3 scripts/medion-spidev.py --boot ft9338 \
   --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
 ```
+
+The firmware stays in the local `medion-firmware` directory. These commands
+do not install firmware system-wide.
 
 The download needs Python 3 and either `cabextract` or `7z`. Use the explicit
 `--chip` argument; the installer's old no-argument entry point selects FT9361.
@@ -235,8 +279,9 @@ sudo python3 scripts/medion-spidev.py --boot ft9348 \
 
 For a local FT9348 input, replace `--download` with `--input /path/to/file`.
 
-`--firmware PATH` is optional and valid only with `--boot`. Without it, the C
-tool uses `/usr/lib/firmware/fte3600/ft9338.bin` or
+`--firmware PATH` is optional and valid with `--test-ft9338` or `--boot`.
+Without it, `--test-ft9338` uses `/usr/lib/firmware/fte3600/ft9338.bin`.
+The manual boot action uses `/usr/lib/firmware/fte3600/ft9338.bin` or
 `/usr/lib/firmware/fte3600/ft9348.bin`, according to the selected chip. A custom
 file must also match that chip's catalog entry; its name does not select a
 profile. The launcher passes an absolute path, and the C loader verifies a
@@ -250,11 +295,13 @@ bounded regular-file snapshot before opening or configuring SPI:
 Each boot uses its own upload and start protocol. FT9338 additionally reads
 back the complete uploaded payload before starting it. The tool then checks
 application status, geometry, firmware version and AGC version against the
-selected profile. It uses synchronous SPI and reset GPIO without requesting or
-waiting for IRQ; the launcher still validates the fixed GPIO controller
-mappings. This uses the distribution's `spidev` module and needs no custom
-kernel module. It exits after the boot checks without acquiring an image or
-entering an authentication flow.
+selected profile. The FT9338 startup path does not add a `70` software-reset
+pair; the separate FT9348 sequence retains its A8 software-reset step.
+
+It uses synchronous SPI and reset GPIO without requesting or waiting for IRQ;
+the launcher still validates the fixed GPIO controller mappings. This uses the
+distribution's `spidev` module and needs no custom kernel module. It exits after
+the boot checks without acquiring an image or entering an authentication flow.
 
 A successful boot means the selected firmware started and its runtime
 parameters matched. It does not independently identify the underlying silicon
@@ -267,13 +314,23 @@ Medion hardware success from these synthetic tests.
 ## General driver stages
 
 The general stages remain available for follow-up after reviewing the
-identification result. Their normal discovery and recovery rules are unchanged:
+identification or startup result.
+Each command reopens the transport and runs the general driver's discovery
+again; `--capture` then initializes the selected backend and waits for a finger.
+These commands do not continue the `--test-ft9338` or manual boot session;
+their result and firmware path are not passed into the general driver. Its
+normal discovery and recovery rules are unchanged:
 
 ```sh
 sudo python3 scripts/medion-spidev.py --probe
 sudo python3 scripts/medion-spidev.py --init
 sudo python3 scripts/medion-spidev.py --capture "$PWD/medion-capture.pgm"
 ```
+
+`--test-ft9338`, `--boot` and `--capture` are separate, mutually exclusive
+stages. There is no combined startup-and-capture command. A successful startup
+test or `BOOT PASS` does not guarantee that the later general discovery or
+capture succeeds; keep those results separate.
 
 The launcher uses `build-medion/examples/fte3600-medion` by default. Use
 `--tool /absolute/path/to/examples/fte3600-medion` only when using a different
@@ -317,8 +374,11 @@ fixed existing mode without writing CS polarity, and verifies the configured
 mode, word size and speed before and after SPI transfers and during IRQ waits.
 Stock spidev can hide the internal CS_HIGH flag on GPIO-controlled CS; the mode
 readback is therefore not a measurement of the physical chip-select level.
-The synchronous identification and boot callbacks use the same checks. A
-configuration mismatch or failed configuration read invalidates the session
+The synchronous identification, FT9338 test and boot callbacks use the same checks. For
+boot entry, the corrected standalone path completes H10/L20/H and sends
+`55 aa` in one synchronous operation, keeping diagnostic logging and SPI
+configuration checks outside that sequence. A configuration mismatch or failed
+configuration read invalidates the session
 until close; later matching settings cannot revive it. Close releases IRQ
 before reset, restores and reads back the original word size and
 speed, and reports restoration failures even after otherwise successful sensor
@@ -375,7 +435,59 @@ source commit, kernel, stage and sanitized result when reporting this Medion
 experiment; no Medion hardware success is claimed by the existence of this
 branch or its mock tests.
 
-## Local validation, 2026-10-05
+## Windows FT9338 sequence, 2026-10-06
+
+The independent FT9338 test follows observations from `ftWbioUmdfDriverV2.dll`
+2.0.3.102: RVA `0x2ead0` supplies reset and `55 aa` entry, `0x27650` the B38 OTP
+procedure, `0x365c0` configuration/upload/readback, `0x36bd0` application restart,
+and `0x36a30` MCU configuration. An unknown boot-B family can lead to the OTP
+procedure; OTP `00` still fails classification. `--test-ft9338` keeps that gate
+and does not use the manual candidate-boot override.
+
+The Windows selection rules include defaults. Boot-A register `fe=02` selects
+FT9536 and is rejected by this FT9338-only test; other values select FT9338 by
+the vendor default. On B38, OTP upper nibble `1` selects FT9338, nibble `2`
+selects FT9536 and is rejected, and `ff` takes the vendor FT9338 fallback.
+The logs distinguish a default selection from positive chip evidence. A
+selected profile is not necessarily an independently confirmed silicon ID.
+
+The test's explicit runtime geometry, firmware/AGC version and final MCU-register
+checks make the result reviewable. They are diagnostic assertions, not a claim
+that every failure branch matches Windows. In particular, the test requires
+the final register `30` readback to equal `bb`; the audited Windows routine
+logs a mismatch and returns success. A passing test establishes these
+startup and configuration observations, not image capture or authentication.
+The older `--boot` action remains a separate manual experiment; its `BOOT PASS`
+does not include the new test's MCU configuration stage.
+
+The standalone reset-and-sync operation avoids intervening diagnostic checks
+and log output. The shared asynchronous driver's state machine remains a
+separate implementation; its state transitions and transport checks do not
+guarantee the same reset-to-sync interval. Neither source review nor mock tests
+measure GPIO/SPI timing on the Medion. Physical startup and capture still need
+an actual device run.
+
+## Local validation, 2026-10-06
+
+The working-tree update based on `c71dfa4` was built with warnings as errors
+under WSL Ubuntu. Both policy configurations (`fte3600_personal_auth` and
+`fte3600_ipa_auth` together disabled or enabled) passed all 35 selected
+regression suites from `scripts/check-fte3600.sh`. These include 30 new FT9338
+engine cases, 25 native I/O cases and 71 launcher cases.
+
+The independent FT9338 engine, wire builders and synthetic test fixture also
+passed all 30 cases with AddressSanitizer and UndefinedBehaviorSanitizer,
+including leak detection. No sensor or proprietary payload was used. The
+fixtures cover `1534` with OTP `00` stopping before upload, the vendor default
+selections, the complete transaction sequence, last-byte RAM readback mismatch,
+MCU configuration, cancellation and failure cleanup. Native tests separately
+verify that no configuration check, log output or event dispatch separates
+reset release from the sync transaction.
+
+These are software regression results. They do not establish physical GPIO/SPI
+timing or successful Medion identification, startup, capture or authentication.
+
+## Historical validation, 2026-10-05
 
 This update merges common-driver commit `6e25b20` and migrates the standalone
 adapter to the shared open/close/session-check contract. It preserves direct

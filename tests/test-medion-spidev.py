@@ -423,6 +423,36 @@ class MedionTests(unittest.TestCase):
                     self.assertEqual(m.log, [])
                     self.assert_restored(binding="spidev")
 
+    def test_ft9338_startup_buffer_is_checked_before_service_or_binding_changes(self):
+        m = self.machine
+        m.bind()
+        for capacity in (8192, 14191):
+            with self.subTest(capacity=capacity):
+                m.loaded(capacity)
+                self.assertNotEqual(self.run_action("--test-ft9338"), 0)
+                self.assertIn("FT9338 startup test needs an unsplit 14192-byte transaction",
+                              self.errors.getvalue())
+                self.assertEqual(m.log, [])
+                self.assert_restored(binding="spidev")
+
+    def test_ft9338_startup_accepts_minimum_buffer(self):
+        m = self.machine
+        m.loaded(14192)
+        self.assertEqual(self.run_action("--test-ft9338"), 0, self.errors.getvalue())
+        self.assertTrue(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+        self.assertFalse(any(item[:2] == ("command", "modprobe") for item in m.log))
+        self.assert_restored()
+
+    def test_ft9338_startup_rechecks_new_module_buffer_before_binding(self):
+        m = self.machine
+        m.modprobe_buffer = 8192
+        self.assertNotEqual(self.run_action("--test-ft9338"), 0)
+        self.assertIn(("command", "modprobe", "spidev", "bufsiz=32768"), m.log)
+        self.assertIn("loaded spidev bufsiz is 8192", self.errors.getvalue())
+        self.assert_no_binding_writes()
+        self.assertFalse(any(item[:2] == ("command", str(m.tool)) for item in m.log))
+        self.assert_restored()
+
     def test_boot_buffer_minimum_is_specific_to_selected_chip(self):
         m = self.machine
         for chip, minimum in (("ft9338", 14192), ("ft9348", 10319)):
@@ -562,7 +592,7 @@ class MedionTests(unittest.TestCase):
 
     def test_identify_legacy_rejects_mixed_actions_before_discovery(self):
         for action in (["--inspect"], ["--probe"], ["--init"], ["--capture", "unused.pgm"],
-                       ["--boot", "ft9338"]):
+                       ["--boot", "ft9338"], ["--test-ft9338"]):
             with self.subTest(action=action), patch.object(MEDION, "discover") as discover:
                 with self.assertRaises(SystemExit) as caught:
                     self.run_action("--identify-legacy", *action)
@@ -618,6 +648,75 @@ class MedionTests(unittest.TestCase):
                                          "--reset-chip", str(m.dev / "gpiochip7"),
                                          "--irq-chip", str(m.dev / "gpiochip12"),
                                          "--action", "boot", "--chip", chip)])
+
+    def test_ft9338_startup_uses_fixed_action_without_manual_chip_override(self):
+        m = self.machine
+        (m.spi / "driver_override").write_text("previous-driver\n")
+        self.assertEqual(self.run_action("--test-ft9338"), 0, self.errors.getvalue())
+        self.assert_restored(override="previous-driver")
+        calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+        self.assertEqual(calls, [("command", str(m.tool), "--device", str(m.dev / "spidev9.0"),
+                                 "--reset-chip", str(m.dev / "gpiochip7"),
+                                 "--irq-chip", str(m.dev / "gpiochip12"),
+                                 "--action", "test-ft9338")])
+
+    def test_ft9338_startup_passes_absolute_firmware_path_without_capture(self):
+        m = self.machine
+        firmware = m.root / "synthetic firmware.bin"
+        payload = b"synthetic fixture; firmware validation belongs to the native diagnostic"
+        firmware.write_bytes(payload)
+        symlink = m.root / "firmware-link.bin"
+        symlink.symlink_to(firmware)
+        for source in (firmware, symlink):
+            with self.subTest(source=source):
+                m.log.clear()
+                self.assertEqual(self.run_action("--test-ft9338", "--firmware", os.path.relpath(source)),
+                                 0, self.errors.getvalue())
+                calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][-4:], ("--action", "test-ft9338", "--firmware", str(source)))
+                self.assertNotIn("--chip", calls[0])
+                self.assertNotIn("--output", calls[0])
+                self.assert_restored()
+        self.assertEqual(firmware.read_bytes(), payload)
+
+    def test_ft9338_startup_rejects_mixed_actions_before_discovery(self):
+        for action in (["--inspect"], ["--identify-legacy"], ["--probe"], ["--init"],
+                       ["--capture", "unused.pgm"], ["--boot", "ft9338"], ["--boot", "ft9348"]):
+            with self.subTest(action=action), patch.object(MEDION, "discover") as discover:
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_action("--test-ft9338", *action)
+                self.assertEqual(caught.exception.code, 2)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+
+    def test_ft9338_startup_rejects_invalid_firmware_paths_before_discovery(self):
+        for source in (self.machine.root / "missing.bin", self.machine.root):
+            with self.subTest(source=source), patch.object(MEDION, "discover") as discover:
+                self.assertNotEqual(self.run_action("--test-ft9338", "--firmware", str(source)), 0)
+                discover.assert_not_called()
+                self.assertEqual(self.machine.log, [])
+
+    def test_ft9338_startup_failure_restores_without_retrying_manual_boot(self):
+        m = self.machine
+        m.tool_error = MEDION.DiagnosticError("synthetic OTP 00: unsupported identity")
+        self.assertNotEqual(self.run_action("--test-ft9338"), 0)
+        self.assert_restored()
+        calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-2:], ("--action", "test-ft9338"))
+        self.assertIn("OTP 00", self.errors.getvalue())
+        self.assertNotIn("[done]", self.output.getvalue())
+
+    def test_ft9338_startup_interruption_preserves_original_binding(self):
+        m = self.machine
+        m.loaded()
+        m.bind()
+        m.tool_error = MEDION.Interrupted(signal.SIGTERM)
+        self.assertEqual(self.run_action("--test-ft9338"), 128 + signal.SIGTERM)
+        self.assert_restored(binding="spidev")
+        self.assert_no_binding_writes()
+        self.assertNotIn("[done]", self.output.getvalue())
 
     def test_boot_passes_absolute_custom_firmware_for_the_selected_chip(self):
         m = self.machine
@@ -702,16 +801,18 @@ class MedionTests(unittest.TestCase):
                                      "FTE3600_BOOT_CHIP": "ft9348"}):
             self.assertEqual(self.run_action("--identify-legacy"), 0, self.errors.getvalue())
             self.assertEqual(self.run_action("--boot", "ft9338"), 0, self.errors.getvalue())
+            self.assertEqual(self.run_action("--test-ft9338"), 0, self.errors.getvalue())
         self.assert_restored()
         calls = [item for item in m.log if item[:2] == ("command", str(m.tool))]
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][-2:], ("--action", "identify-legacy"))
         self.assertEqual(calls[1][-4:], ("--action", "boot", "--chip", "ft9338"))
+        self.assertEqual(calls[2][-2:], ("--action", "test-ft9338"))
         self.assertTrue(all("--firmware" not in args for args in calls))
 
     def test_execution_requires_root_before_service_changes(self):
         with patch.object(MEDION.os, "geteuid", return_value=1000):
-            for action in (["--probe"], ["--identify-legacy"], ["--boot", "ft9338"]):
+            for action in (["--probe"], ["--identify-legacy"], ["--boot", "ft9338"], ["--test-ft9338"]):
                 with self.subTest(action=action):
                     self.assertNotEqual(self.run_action(*action), 0)
         self.assertEqual(self.machine.log, [])

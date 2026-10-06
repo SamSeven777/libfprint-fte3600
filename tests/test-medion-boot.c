@@ -2,43 +2,44 @@
  * Synthetic RAM-boot fixture. No vendor firmware, device or biometric input.
  */
 #include "examples/fte3600-medion-boot.h"
+#include "medion-reset-sync-fixture.h"
 
 #include <string.h>
 
 typedef struct
 {
   Fte3600MedionIdentifyIo io;
-  Fte3600Sensor sensor;
-  GBytes *firmware;
-  guint16 before[2];
-  guint16 after[2];
-  guint8 fw_version;
-  guint8 agc_version;
-  guint exchanges;
-  guint reset_calls;
-  guint asserts;
-  guint waits;
-  guint uploads;
-  guint readbacks;
-  guint prep_writes;
-  guint soft_resets;
-  guint geometry_before;
-  guint geometry_after;
-  guint version_reads;
-  guint status_reads;
-  guint busy_replies;
-  guint fail_exchange;
-  guint fail_reset;
-  guint fail_wait;
-  guint cancel_reset;
-  gboolean cancel_upload;
-  gboolean cancel_readback;
-  gboolean cancelled;
-  gboolean asserted;
-  gboolean corrupt_last_byte;
-  gboolean final_status_busy;
-  GString *trace;
-  GString *reports;
+  Fte3600Sensor           sensor;
+  GBytes                 *firmware;
+  guint16                 before[2];
+  guint16                 after[2];
+  guint8                  fw_version;
+  guint8                  agc_version;
+  guint                   exchanges;
+  guint                   reset_calls;
+  guint                   asserts;
+  guint                   waits;
+  guint                   uploads;
+  guint                   readbacks;
+  guint                   prep_writes;
+  guint                   soft_resets;
+  guint                   geometry_before;
+  guint                   geometry_after;
+  guint                   version_reads;
+  guint                   status_reads;
+  guint                   busy_replies;
+  guint                   fail_exchange;
+  guint                   fail_reset;
+  guint                   fail_wait;
+  guint                   cancel_reset;
+  gboolean                cancel_upload;
+  gboolean                cancel_readback;
+  gboolean                cancelled;
+  gboolean                asserted;
+  gboolean                corrupt_last_byte;
+  gboolean                final_status_busy;
+  GString                *trace;
+  GString                *reports;
 } Fixture;
 
 static gboolean
@@ -86,7 +87,9 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
           g_assert_cmpuint (f->uploads, ==, 1);
           f->status_reads++;
           if (f->busy_replies)
-            f->busy_replies--;
+            {
+              f->busy_replies--;
+            }
           else if (!f->final_status_busy || f->version_reads < 2)
             {
               rx[4] = 0xa5;
@@ -166,7 +169,9 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       g_string_append (f->trace, "SOFT;");
     }
   else
-    g_assert_not_reached ();
+    {
+      g_assert_not_reached ();
+    }
 
   if (f->exchanges == f->fail_exchange)
     return inject_failure (error, "SPI");
@@ -214,6 +219,14 @@ mock_report (gpointer user_data, const gchar *message)
   g_string_append_printf (f->reports, "%s\n", message);
 }
 
+static gboolean
+mock_reset_and_sync (gpointer user_data, GError **error)
+{
+  Fixture *f = user_data;
+
+  return medion_fixture_reset_and_sync (&f->io, error);
+}
+
 static void
 fixture_init (Fixture *f, Fte3600Sensor sensor)
 {
@@ -230,9 +243,10 @@ fixture_init (Fixture *f, Fte3600Sensor sensor)
   f->firmware = g_bytes_new_take (firmware, size);
   f->trace = g_string_new (NULL);
   f->reports = g_string_new (NULL);
-  f->io = (Fte3600MedionIdentifyIo) {
+  f->io = (Fte3600MedionIdentifyIo){
     .user_data = f, .max_transfer = sensor == FTE3600_SENSOR_FT9338 ? 14192 : 10319,
-    .exchange = mock_exchange, .set_reset = mock_reset, .wait = mock_wait,
+    .exchange = mock_exchange, .set_reset = mock_reset,
+    .reset_and_sync = mock_reset_and_sync, .wait = mock_wait,
     .check_cancelled = mock_cancelled, .report = mock_report,
   };
 }
@@ -250,6 +264,7 @@ static Fte3600Identity
 run_success (Fixture *f)
 {
   Fte3600Identity result = { 0 };
+
   g_autoptr(GError) error = NULL;
 
   g_assert_true (fte3600_medion_boot (&f->io, f->sensor, f->firmware, &result, &error));
@@ -347,16 +362,22 @@ test_preflight (void)
 
       fixture_init (&f, variant == 4 ? FTE3600_SENSOR_FT9348 : FTE3600_SENSOR_FT9338);
       if (variant == 0)
-        f.sensor = FTE3600_SENSOR_FT9361;
+        {
+          f.sensor = FTE3600_SENSOR_FT9361;
+        }
       else if (variant == 1)
         {
           g_clear_pointer (&f.firmware, g_bytes_unref);
           f.firmware = g_bytes_new_static ("wrong", 5);
         }
       else if (variant == 2 || variant == 4)
-        f.io.max_transfer--;
+        {
+          f.io.max_transfer--;
+        }
       else
-        f.io.exchange = NULL;
+        {
+          f.io.exchange = NULL;
+        }
       error = run_failure (&f);
       g_assert_cmpuint (f.exchanges, ==, 0);
       g_assert_cmpuint (f.reset_calls, ==, 0);
@@ -368,6 +389,7 @@ static void
 test_readback_last_byte (void)
 {
   Fixture f;
+
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f, FTE3600_SENSOR_FT9338);
@@ -498,6 +520,7 @@ static void
 test_cleanup_failure (void)
 {
   Fixture f;
+
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f, FTE3600_SENSOR_FT9338);

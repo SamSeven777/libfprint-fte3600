@@ -318,10 +318,12 @@ run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
   gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
 
   report (boot, "explicit %s RAM experiment; checking initial application geometry", boot->sensor->name);
-  if (!check_geometry (boot, TRUE, error) || !reset_pulse (boot, error))
+  if (!check_geometry (boot, TRUE, error) || !proceed (boot, error))
     return FALSE;
-  report (boot, "boot synchronization 55 aa");
-  if (!command (boot, FTE3600_COMMAND_BOOT_SYNC, error) ||
+  boot->touched = TRUE;
+  report (boot, "boot entry: reset physical H10/L20/H followed by 55 aa");
+  if (!callback_result (boot->io->reset_and_sync (boot->io->user_data, error),
+                        "reset and boot sync", error) || !proceed (boot, error) ||
       (is_38 && !prepare_38 (boot, error)) ||
       !upload (boot, firmware, length, error) ||
       (is_38 && !verify_38_readback (boot, firmware, length, error)) ||
@@ -350,7 +352,7 @@ fte3600_medion_boot (const Fte3600MedionIdentifyIo *io, Fte3600Sensor sensor,
 
   if (result)
     memset (result, 0, sizeof *result);
-  if (!io || !firmware || !result || !io->exchange || !io->set_reset ||
+  if (!io || !firmware || !result || !io->exchange || !io->set_reset || !io->reset_and_sync ||
       !io->wait || !io->check_cancelled ||
       (sensor != FTE3600_SENSOR_FT9338 && sensor != FTE3600_SENSOR_FT9348))
     {

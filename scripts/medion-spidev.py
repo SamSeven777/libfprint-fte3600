@@ -102,8 +102,12 @@ def report_environment():
 
 def check_buffer(action, chip=None):
     value = attribute(SYS / "module/spidev/parameters/bufsiz")
-    minimum = BOOT_TRANSFER_SIZE[chip] if action == "boot" else MIN_PROBE_BUFFER
-    stage = f"{chip.upper()} RAM boot" if action == "boot" else "identification"
+    if action == "test-ft9338":
+        minimum, stage = BOOT_TRANSFER_SIZE["ft9338"], "FT9338 startup test"
+    elif action == "boot":
+        minimum, stage = BOOT_TRANSFER_SIZE[chip], f"{chip.upper()} RAM boot"
+    else:
+        minimum, stage = MIN_PROBE_BUFFER, "identification"
     if not value.isdecimal():
         raise DiagnosticError(f"Loaded spidev bufsiz is invalid: {value!r}")
     size = int(value)
@@ -525,6 +529,9 @@ def execute(resources, tool, action, output=None, chip=None, firmware=None):
         if action == "boot":
             print(f"[candidate] Explicit {chip.upper()} RAM boot requested; "
                   "the diagnostic must validate its firmware and application response.", flush=True)
+        elif action == "test-ft9338":
+            print("[test] FT9338 ROM/OTP identification, firmware startup and MCU configuration; "
+                  "an unsupported identity stops before upload. No capture.", flush=True)
         print(f"[diagnostic] Starting {action}; protocol stages follow", flush=True)
         command(arguments, inherit=True)
     except BaseException as caught:
@@ -548,6 +555,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--inspect", action="store_true", help="Read-only resource inventory (default)")
+    actions.add_argument("--test-ft9338", action="store_true",
+                         help="Identify FT9338 through ROM/OTP, then test firmware startup and MCU configuration; no capture")
     actions.add_argument("--identify-legacy", action="store_true",
                          help="Check FT9338/FT9348 application and ROM identity without firmware upload or capture")
     actions.add_argument("--boot", choices=("ft9338", "ft9348"),
@@ -559,16 +568,17 @@ def main(argv=None):
                         default=Path(__file__).resolve().parents[1] / "build-medion/examples/fte3600-medion",
                         help="Path to the separately built fte3600-medion diagnostic")
     parser.add_argument("--firmware", metavar="PATH", type=Path,
-                        help="Custom firmware file for --boot; otherwise use the selected chip's catalog path")
+                        help="Firmware file for --test-ft9338 or --boot; otherwise use the chip's catalog path")
     args = parser.parse_args(argv)
     try:
-        action = ("boot" if args.boot is not None else "identify-legacy" if args.identify_legacy
+        action = ("test-ft9338" if args.test_ft9338 else "boot" if args.boot is not None
+                  else "identify-legacy" if args.identify_legacy
                   else "capture" if args.capture is not None
                   else "init" if args.init else "probe" if args.probe else None)
         firmware = None
         if args.firmware is not None:
-            if action != "boot":
-                raise DiagnosticError("--firmware requires --boot ft9338 or --boot ft9348")
+            if action not in ("test-ft9338", "boot"):
+                raise DiagnosticError("--firmware requires --test-ft9338, --boot ft9338 or --boot ft9348")
             # The C loader checks the opened regular file and verifies a bounded
             # snapshot's size and catalog hash before sensor I/O. This pathname
             # check is only early input validation; symlinks to files are valid.

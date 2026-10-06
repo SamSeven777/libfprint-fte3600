@@ -28,8 +28,10 @@ runtime identity still lacks a supported first cold-identification route.
 The implementation does not force an unknown chip into an FT9338 backend.
 FT9536 has the positive boot-A route and the contextual boot-B38 route.
 
-The identification SSM first applies controller-level H10/L20/H, then immediately
-sends `55 aa`. Boot-A reads `cb`, writes it OR `20`, writes `fd=11`, writes
+The identification SSM applies controller-level H10/L20/H, then sends `55 aa`
+through the next asynchronous transfer state. This preserves the operation
+order but does not guarantee the vendor's reset-to-sync interval: scheduling
+and transport checks can intervene. Boot-A reads `cb`, writes it OR `20`, writes `fd=11`, writes
 `fe=11`, then reads `fe`. Boot-B38 reads `c8`, writes it OR `01`, writes
 `f1=1d`, reads `f4`, writes it OR `01`, reads `f3`, then writes `f4=00`.
 Cleanup applies H10/L20/H and waits the known application startup interval
@@ -65,7 +67,8 @@ catalog size and SHA-256 before returning payload bytes.
 The existing `FTE3600_FIRMWARE_PATH` override selects a file, without weakening
 its identity, size or hash checks. No payload is included in this repository.
 
-1. Apply H10/L20/H and immediately send `55 aa`.
+1. Apply H10/L20/H, then send `55 aa`. The shared asynchronous state machine
+   does not guarantee the physical reset-to-sync interval.
 2. Write `c8=ff`, `ca=ff`, `cb=ff`, `b9=bf`, `b9=ff` using the no-dummy boot
    layout, then wait 20 ms.
 3. Upload `05 fa 00 00 payload_length_BE16 payload 00` as one transaction.
@@ -83,6 +86,15 @@ The memory helpers are `0x2fd80` → `0x2fab0` (write) and `0x2f330` →
 `0x2f020` (read). `0x35ea4` compares the complete payload. Restart is
 `0x36bd0`; constructors `0x3574c` and `0x35c44` supply the different startup
 delays. This procedure writes volatile RAM, with no flash-erase command.
+
+The standalone [Medion FT9338 test](medion-spidev.md#first-test-ft9338-identification-and-startup)
+groups reset and sync into one synchronous operation after its 2026-10-06
+correction, with diagnostic logging and SPI configuration checks outside
+H10/L20/H plus `55 aa`. OTP classification remains required on the B38 path;
+an OTP value of `00` does not select FT9338. The optional manual firmware
+experiment is separate from that identification policy. This correction does
+not make the shared asynchronous implementation synchronous. Neither path's
+physical timing has been measured on Medion hardware.
 
 Startup is part of the successful download path, never error cleanup. The
 reference returns on a failed readback (`0x36854–0x368aa`) or comparison

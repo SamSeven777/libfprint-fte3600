@@ -330,12 +330,14 @@ cleanup (Diagnostic *diag, GError **error)
 static gboolean
 reset_sync (Diagnostic *diag, GError **error)
 {
-  guint8 rx[FTE3600_COMMAND_MAX_SIZE];
-
-  if (!proceed (diag, error) || !reset_pulse (diag, error))
+  if (!proceed (diag, error))
     return FALSE;
-  report (diag, "boot sync 55 aa");
-  return command (diag, FTE3600_COMMAND_BOOT_SYNC, rx, error);
+  diag->touched = TRUE;
+  report (diag, "boot entry: reset physical H10/L20/H followed by 55 aa");
+  if (!callback_result (diag->io->reset_and_sync (diag->io->user_data, error),
+                        "reset and boot sync", error))
+    return FALSE;
+  return proceed (diag, error);
 }
 
 static gboolean
@@ -450,7 +452,7 @@ fte3600_medion_identify_legacy (const Fte3600MedionIdentifyIo *io,
 
   if (result)
     memset (result, 0, sizeof *result);
-  if (!io || !result || !io->exchange || !io->set_reset ||
+  if (!io || !result || !io->exchange || !io->set_reset || !io->reset_and_sync ||
       !io->wait || !io->check_cancelled)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,

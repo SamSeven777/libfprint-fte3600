@@ -6,7 +6,10 @@
 #include "fte3600-medion-transport.h"
 #include "fte3600-medion-identify.h"
 #include "fte3600-medion-boot.h"
+#include "fte3600-medion-ft9338.h"
 #include "drivers/fte3600-firmware.h"
+#include "drivers/fte3600-protocol.h"
+#include "drivers/fte3600-timing.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -46,11 +49,17 @@ evidence_name (Fte3600IdentityEvidence evidence)
   switch (evidence)
     {
     case FTE3600_IDENTITY_NONE: return "none";
+
     case FTE3600_IDENTITY_RUNTIME_GEOMETRY: return "runtime-geometry";
+
     case FTE3600_IDENTITY_ROM_A8_SPI_OTP: return "ROM-family-and-OTP";
+
     case FTE3600_IDENTITY_ROM_BOOT_A: return "boot-A-register";
+
     case FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP: return "boot-B38-OTP";
+
     case FTE3600_IDENTITY_SPECIAL_CHIP_ID: return "chip-ID";
+
     case FTE3600_IDENTITY_KNOWN_UNMAPPED_ID: return "known-unmapped-ID";
     }
   return "invalid";
@@ -61,9 +70,15 @@ report_identity (const Fte3600Identity *identity, guint32 max_transfer)
 {
   const Fte3600SensorDescriptor *sensor = fpi_fte3600_sensor_get (identity->sensor);
 
-  g_print ("IDENTITY: backend=%s evidence=%s response=0x%04x otp=0x%02x\n",
+  g_print ("IDENTITY: backend=%s evidence=%s response=0x%04x",
            sensor ? sensor->name : "unknown", evidence_name (identity->evidence),
-           identity->response, identity->otp);
+           identity->response);
+  /* Runtime geometry and boot-A evidence have no OTP byte. Printing their
+  * zero-initialized field would misrepresent it as an observed OTP 00. */
+  if (identity->evidence == FTE3600_IDENTITY_ROM_A8_SPI_OTP ||
+      identity->evidence == FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP)
+    g_print (" otp=0x%02x", identity->otp);
+  g_print ("\n");
   if (sensor)
     g_print ("IMAGE FORMAT: %u x %u; SPI buffer limit=%u bytes\n",
              sensor->width, sensor->height, max_transfer);
@@ -72,8 +87,8 @@ report_identity (const Fte3600Identity *identity, guint32 max_transfer)
 typedef struct
 {
   FpiDeviceFte3600 *device;
-  GCancellable    *cancellable;
-  const gchar     *label;
+  GCancellable     *cancellable;
+  const gchar      *label;
 } IdentifyIo;
 
 static void
@@ -95,13 +110,36 @@ identify_cancelled (gpointer user_data, GError **error)
 }
 
 static gboolean
+identify_spi_message (FpiDeviceFte3600 *device, struct spi_ioc_transfer *transfer,
+                      GError **error)
+{
+  gint result = ioctl (device->spi_fd, SPI_IOC_MESSAGE (1), transfer);
+
+  /* Never replay EINTR: even an interrupted message may have reached the chip. */
+  if (result < 0)
+    {
+      gint saved_errno = errno;
+
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
+                   "Medion diagnostic SPI transfer failed: %s", g_strerror (saved_errno));
+      return FALSE;
+    }
+  if ((guint32) result != transfer->len)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT,
+                   "Medion diagnostic SPI transfer returned %d of %u bytes", result, transfer->len);
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
 identify_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
                    gsize length, GError **error)
 {
   IdentifyIo *io = user_data;
   struct spi_ioc_transfer transfer = { 0 };
   g_autofree guint8 *discard = NULL;
-  gint result;
 
   if (!tx || !length || length > io->device->max_transfer || length > G_MAXUINT32)
     {
@@ -121,22 +159,8 @@ identify_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
   /* Use the adapter's checked speed/bits settings. One full-duplex transaction
    * keeps CS asserted throughout the command and reply. Never replay EINTR:
    * the controller may already have sent a state-changing command. */
-  result = ioctl (io->device->spi_fd, SPI_IOC_MESSAGE (1), &transfer);
-  if (result < 0)
-    {
-      gint saved_errno = errno;
-
-      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
-                   "Medion diagnostic SPI transfer failed: %s", g_strerror (saved_errno));
-      return FALSE;
-    }
-  if ((gsize) result != length)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT,
-                   "Medion diagnostic SPI transfer returned %d of %zu bytes", result, length);
-      return FALSE;
-    }
-  return fpi_fte3600_transport_check (FP_DEVICE (io->device), error);
+  return identify_spi_message (io->device, &transfer, error) &&
+         fpi_fte3600_transport_check (FP_DEVICE (io->device), error);
 }
 
 static gboolean
@@ -168,6 +192,47 @@ identify_wait (gpointer user_data, guint milliseconds, GError **error)
   return TRUE;
 }
 
+static gboolean
+identify_reset_and_sync (gpointer user_data, GError **error)
+{
+  IdentifyIo *io = user_data;
+  guint8 tx[FTE3600_BOOT_SYNC_SIZE], rx[sizeof tx] = { 0 };
+  struct spi_ioc_transfer transfer = {
+    .tx_buf = (uintptr_t) tx,
+    .rx_buf = (uintptr_t) rx,
+    .len = sizeof tx,
+  };
+
+  g_autoptr(GError) failure = NULL;
+  g_autoptr(GError) release_error = NULL;
+
+  if (!fpi_fte3600_build_command (tx, sizeof tx, FTE3600_COMMAND_BOOT_SYNC, error) ||
+      !fpi_fte3600_transport_check (FP_DEVICE (io->device), error))
+    return FALSE;
+
+  /* Prepare everything before the pulse. These direct GPIO operations are
+   * guarded as a unit: no configuration reads, logging, allocation or event
+   * dispatch may separate the final release from the sync ioctl. Userspace
+   * scheduling can still delay either syscall; this is not a realtime bound. */
+  if (io->device->transport_ops->set_reset (io->device, FALSE, &failure))
+    {
+      g_usleep (FTE3600_RESET_HIGH_MS * 1000);
+      io->device->transport_ops->set_reset (io->device, TRUE, &failure);
+      /* A failed assertion may still have driven the pin low. */
+      g_usleep (FTE3600_RESET_LOW_MS * 1000);
+    }
+  if (!io->device->transport_ops->set_reset (io->device, FALSE, &release_error) || failure)
+    {
+      if (failure && release_error)
+        g_prefix_error (&failure, "Reset release also failed (%s): ", release_error->message);
+      g_propagate_error (error, failure ? g_steal_pointer (&failure) : g_steal_pointer (&release_error));
+      return FALSE;
+    }
+
+  return identify_spi_message (io->device, &transfer, error) &&
+         fpi_fte3600_transport_check (FP_DEVICE (io->device), error);
+}
+
 static void
 identify_report (gpointer user_data, const gchar *message)
 {
@@ -179,22 +244,25 @@ identify_report (gpointer user_data, const gchar *message)
 static gboolean
 run_legacy_diagnostic (FpiDeviceFte3600 *self,
                        GCancellable *cancellable, Fte3600Sensor boot_sensor,
-                       GBytes *firmware, Fte3600Identity *identity, GError **error)
+                       GBytes *firmware, gboolean test_ft9338,
+                       Fte3600Identity *identity, GError **error)
 {
   IdentifyIo native = {
     .device = self,
     .cancellable = cancellable,
-    .label = firmware ? "BOOT" : "LEGACY IDENTIFY",
+    .label = test_ft9338 ? "FT9338" : firmware ? "BOOT" : "LEGACY IDENTIFY",
   };
   Fte3600MedionIdentifyIo io = {
     .user_data = &native,
     .exchange = identify_exchange,
     .set_reset = identify_reset,
+    .reset_and_sync = identify_reset_and_sync,
     .wait = identify_wait,
     .check_cancelled = identify_cancelled,
     .report = identify_report,
   };
   gboolean result = FALSE;
+
   g_autoptr(GError) cleanup = NULL;
 
   if (identify_cancelled (&native, error))
@@ -202,8 +270,11 @@ run_legacy_diagnostic (FpiDeviceFte3600 *self,
   if (fpi_fte3600_transport_open (self, error))
     {
       io.max_transfer = self->max_transfer;
-      result = firmware ? fte3600_medion_boot (&io, boot_sensor, firmware, identity, error) :
-                          fte3600_medion_identify_legacy (&io, identity, error);
+      if (test_ft9338)
+        result = fte3600_medion_test_ft9338 (&io, firmware, identity, error);
+      else
+        result = firmware ? fte3600_medion_boot (&io, boot_sensor, firmware, identity, error) :
+                 fte3600_medion_identify_legacy (&io, identity, error);
     }
   if (!fpi_fte3600_transport_close (self, &cleanup))
     {
@@ -214,7 +285,7 @@ run_legacy_diagnostic (FpiDeviceFte3600 *self,
       result = FALSE;
     }
   /* detach below reports any latched GPIO/SPI parameter restoration failure.
-   * Diagnostic results never populate the general driver's identity state. */
+  * Diagnostic results never populate the general driver's identity state. */
   return result;
 }
 
@@ -276,13 +347,14 @@ main (int argc, char **argv)
   g_autofree gchar *output_path = NULL;
   g_autofree gchar *chip = NULL;
   g_autofree gchar *firmware_path = NULL;
+
   g_autoptr(GBytes) firmware = NULL;
   gint timeout = 60;
   GOptionEntry entries[] = {
     { "device", 0, 0, G_OPTION_ARG_FILENAME, &device_path, "Validated Medion spidev node", "PATH" },
     { "reset-chip", 0, 0, G_OPTION_ARG_FILENAME, &reset_chip, "GPO1 GPIO chip (reset line 39)", "PATH" },
     { "irq-chip", 0, 0, G_OPTION_ARG_FILENAME, &irq_chip, "GPO2 GPIO chip (IRQ line 0)", "PATH" },
-    { "action", 0, 0, G_OPTION_ARG_STRING, &action, "Stage: identify-legacy, boot, probe, init or capture", "STAGE" },
+    { "action", 0, 0, G_OPTION_ARG_STRING, &action, "Stage: test-ft9338, identify-legacy, boot, probe, init or capture", "STAGE" },
     { "chip", 0, 0, G_OPTION_ARG_STRING, &chip, "Explicit boot candidate: ft9338 or ft9348", "CHIP" },
     { "firmware", 0, 0, G_OPTION_ARG_FILENAME, &firmware_path, "Boot firmware (default: selected chip's system firmware)", "PATH" },
     { "output", 0, 0, G_OPTION_ARG_FILENAME, &output_path, "New private PGM file for capture", "PATH" },
@@ -298,7 +370,7 @@ main (int argc, char **argv)
   g_autoptr(GFile) output_file = NULL;
   g_autoptr(GFileOutputStream) output = NULL;
   guint sigint_source = 0, sigterm_source = 0, timeout_source = 0;
-  gboolean attached = FALSE, saved = FALSE, capture = FALSE, boot = FALSE;
+  gboolean attached = FALSE, saved = FALSE, capture = FALSE, boot = FALSE, test_ft9338 = FALSE;
   Fte3600Sensor boot_sensor = FTE3600_SENSOR_UNKNOWN;
   const gchar *stage = "SETUP";
   int status = EXIT_FAILURE;
@@ -316,10 +388,11 @@ main (int argc, char **argv)
     goto out;
   capture = g_strcmp0 (action, "capture") == 0;
   boot = g_strcmp0 (action, "boot") == 0;
+  test_ft9338 = g_strcmp0 (action, "test-ft9338") == 0;
   if (argc != 1 || !device_path || !reset_chip || !irq_chip || !action ||
       !g_path_is_absolute (device_path) || !g_path_is_absolute (reset_chip) ||
       !g_path_is_absolute (irq_chip) || timeout < 1 || timeout > 300 ||
-      (!capture && !boot && strcmp (action, "probe") && strcmp (action, "init") &&
+      (!capture && !boot && !test_ft9338 && strcmp (action, "probe") && strcmp (action, "init") &&
        strcmp (action, "identify-legacy")) ||
       (capture != (output_path != NULL)))
     {
@@ -327,13 +400,14 @@ main (int argc, char **argv)
                            "Provide all three absolute device paths and a valid action; only capture requires --output");
       goto out;
     }
-  boot_sensor = boot_sensor_from_name (chip);
+  boot_sensor = test_ft9338 ? FTE3600_SENSOR_FT9338 : boot_sensor_from_name (chip);
   if ((boot && boot_sensor == FTE3600_SENSOR_UNKNOWN) ||
-      (!boot && (chip || firmware_path)) ||
+      (test_ft9338 && chip) ||
+      (!boot && !test_ft9338 && (chip || firmware_path)) ||
       (firmware_path && !g_path_is_absolute (firmware_path)))
     {
       g_set_error_literal (&error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
-                           "Only boot accepts --chip ft9338|ft9348 and an optional absolute --firmware path");
+                           "Boot requires --chip ft9338|ft9348; test-ft9338 selects its own chip; only these actions accept --firmware");
       goto out;
     }
   if (geteuid () != 0)
@@ -342,7 +416,7 @@ main (int argc, char **argv)
                            "Run the Medion launcher as root");
       goto out;
     }
-  if (boot)
+  if (boot || test_ft9338)
     {
       stage = "FIRMWARE";
       firmware = load_boot_firmware (boot_sensor, firmware_path, &error);
@@ -361,24 +435,27 @@ main (int argc, char **argv)
     }
 
   self = g_object_new (fpi_device_fte3600_get_type (),
-                        "fpi-udev-data-spidev", device_path, NULL);
+                       "fpi-udev-data-spidev", device_path, NULL);
   Fte3600MedionTransportConfig config = {
     .spi_path = device_path,
     .reset_gpiochip = reset_chip,
     .irq_gpiochip = irq_chip,
-    .skip_irq = boot || strcmp (action, "identify-legacy") == 0,
+    .skip_irq = boot || test_ft9338 || strcmp (action, "identify-legacy") == 0,
   };
   if (!fte3600_medion_transport_attach (self, &config, &error))
     goto out;
   attached = TRUE;
   sigint_source = g_unix_signal_add (SIGINT, cancel_operation, cancellable);
   sigterm_source = g_unix_signal_add (SIGTERM, cancel_operation, cancellable);
-  if (boot || strcmp (action, "identify-legacy") == 0)
+  if (boot || test_ft9338 || strcmp (action, "identify-legacy") == 0)
     {
       Fte3600Identity identity = { 0 };
 
-      stage = boot ? "BOOT" : "IDENTIFY";
-      if (boot)
+      stage = test_ft9338 ? "FT9338 TEST" : boot ? "BOOT" : "IDENTIFY";
+      if (test_ft9338)
+        g_print ("FT9338 TEST START: Windows-derived ROM/OTP selection, RAM download and MCU initialization.\n"
+                 "OTP 00 stops the test before firmware upload. Keep the sensor uncovered.\n");
+      else if (boot)
         g_print ("BOOT START: explicitly selected %s RAM firmware and startup protocol.\n"
                  "An empty application response is permitted; no automatic candidate fallback.\n",
                  fpi_fte3600_sensor_get (boot_sensor)->name);
@@ -387,7 +464,7 @@ main (int argc, char **argv)
                  "Application and ROM/OTP queries; no firmware upload or capture.\n");
       timeout_source = g_timeout_add_seconds (timeout, cancel_operation, cancellable);
       if (!run_legacy_diagnostic (self, cancellable, boot_sensor,
-                                  firmware, &identity, &error))
+                                  firmware, test_ft9338, &identity, &error))
         goto out;
       g_clear_handle_id (&timeout_source, g_source_remove);
       if (identity.evidence == FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP)
@@ -485,5 +562,8 @@ out:
     g_print ("BOOT PASS: %s firmware started; runtime geometry and versions verified; "
              "host transport restored. Capture has not been tested.\n",
              fpi_fte3600_sensor_get (boot_sensor)->name);
+  if (status == EXIT_SUCCESS && test_ft9338)
+    g_print ("FT9338 TEST PASS: ROM selection, complete RAM readback, application startup and MCU configuration verified; "
+             "host transport restored. Capture has not been tested.\n");
   return status;
 }
