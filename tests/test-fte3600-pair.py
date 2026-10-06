@@ -471,6 +471,30 @@ class PairTests(unittest.TestCase):
         self.assertTrue(standalone.endswith('LABEL="fte3600_pair_end"\n'))
         self.assertIn('ACTION=="add|change|bind", SUBSYSTEM=="spi", DRIVER=="spidev"', standalone)
 
+    def test_udev_import_is_not_cleared_by_same_rule_assignments(self):
+        # udev evaluates IMPORT with the match keys, before assignments on
+        # that line. Exercise both valid and failed imports with stale data.
+        rules = (ROOT / "config/udev/70-fte3600-acpi-spidev.rules").read_text().splitlines()
+        for subsystem, role in (("spidev", "spi"), ("gpio", "gpio"), ("uio", "irq")):
+            for valid in (False, True):
+                with self.subTest(subsystem=subsystem, valid=valid):
+                    properties = dict(FTE3600_PAIR_ROLE="stale", FTE3600_PAIR_ID="stale")
+                    imported = False
+                    for rule in rules:
+                        if f'SUBSYSTEM=="{subsystem}"' not in rule:
+                            continue
+                        if "IMPORT{program}" in rule:
+                            imported = True
+                            if not valid:
+                                continue  # Unmatched import skips assignments.
+                            properties.update(FTE3600_PAIR_ROLE=role, FTE3600_PAIR_ID="FTE3600:00")
+                        for name, value in re.findall(r'ENV\{(FTE3600_PAIR_\w+)\}="([^"]*)"', rule):
+                            properties[name] = value
+                    self.assertTrue(imported)
+                    self.assertEqual(properties, dict(
+                        FTE3600_PAIR_ROLE=role if valid else "",
+                        FTE3600_PAIR_ID="FTE3600:00" if valid else ""))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
