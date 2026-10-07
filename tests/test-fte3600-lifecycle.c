@@ -142,6 +142,14 @@ typedef struct
 
 static const ProbeFixture *probe_fixture;
 static gboolean boot38_fixture;
+static guint b38_header_fixture;
+static struct
+{
+  gboolean enabled, done;
+  guint    scenario, checks, releases, messages;
+  GThread *worker;
+  GError  *error;
+} sync_test;
 static gboolean wake_fixture;
 static gboolean stale_wake_fixture;
 
@@ -592,6 +600,12 @@ __wrap_fpi_fte3600_resources_resolve (const gchar *root, dev_t spi, dev_t gpio, 
 gboolean
 __wrap_fpi_fte3600_resources_check (const Fte3600Resources *resources, GError **error)
 {
+  if (sync_test.enabled)
+    {
+      /* No resource query may be inserted between GPIO release and SPI. */
+      g_assert_false (sync_test.releases > 0 && sync_test.messages == 0);
+      sync_test.checks++;
+    }
   g_assert_cmpstr (resources->glue_path, ==, "/mock/glue");
   if (resources->generation != sensor.epoch || sensor.suspended)
     {
@@ -965,6 +979,19 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       struct gpio_v2_line_values *value = argument;
       g_assert_cmpint (fd, ==, sensor.reset_fd);
       g_assert_cmpuint (value->mask, ==, 1);
+      if (sync_test.enabled)
+        {
+          g_assert_cmpuint (value->bits, ==, 0);
+          g_assert_cmpuint (sync_test.checks, ==, 1);
+          sync_test.worker = g_thread_self ();
+          sync_test.releases++;
+          if (sync_test.scenario == 7)
+            {
+              errno = EIO;
+              return -1;
+            }
+          return 0;
+        }
       if (sensor.closing_transport)
         {
           g_assert_cmpuint (value->bits, ==, 0);
@@ -1065,6 +1092,22 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   transfer = argument;
   tx = (const guint8 *) (guintptr) transfer->tx_buf;
   rx = (guint8 *) (guintptr) transfer->rx_buf;
+  if (sync_test.enabled)
+    {
+      const guint8 expected[] = { 0x55, 0xaa };
+      g_assert_cmpuint (sync_test.releases, ==, 1);
+      g_assert_true (sync_test.worker == g_thread_self ());
+      g_assert_cmpmem (tx, transfer->len, expected, sizeof expected);
+      sync_test.messages++;
+      if (sync_test.scenario == 4)
+        sensor.epoch++;
+      if (sync_test.scenario == 5)
+        {
+          errno = EIO;
+          return -1;
+        }
+      return sync_test.scenario == 1 ? 0 : sync_test.scenario == 2 ? 1 : 2;
+    }
   result = transfer->len;
   g_mutex_lock (&sensor.lock);
   sensor.spi_transactions++;
@@ -1367,6 +1410,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         }
       if (transfer->len == 8 && tx[2] == 0x85 && tx[3] == 0xc0)
         {
+          if (b38_header_fixture == 2)
+            rx[2] = 0xef;
           rx[6] = sensor.rom_family >> 8;
           rx[7] = sensor.rom_family & 0xff;
           break;
@@ -1491,6 +1536,12 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
       sensor.persistent_cold = TRUE;
       sensor.boot_reply = 0xef;
       sensor.boot38_id = 2;
+      if (b38_header_fixture)
+        {
+          sensor.boot_reply = 0;
+          sensor.rom_family = 0x1534;
+          sensor.otp = 0x10;
+        }
       sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = 0;
       sensor.registers[FT9361_REG_SENSOR_ID_LOW] = 0;
     }
@@ -2951,6 +3002,77 @@ test_transport_uio_counter (gconstpointer data)
 
 #include "fte3600-test-load.h"
 
+
+static void
+sync_test_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  fpi_fte3600_release_reset_and_sync (ssm);
+}
+
+static void
+sync_test_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  sync_test.done = TRUE;
+  sync_test.error = error;
+}
+
+static void
+test_reset_sync (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+  open_device (device);
+  memset (&sync_test, 0, sizeof sync_test);
+  sync_test.enabled = TRUE;
+  sync_test.scenario = scenario;
+  if (scenario == 3)
+    sensor.epoch++;
+  if (scenario == 6)
+    self->spi_configuration_invalid = TRUE;
+  fpi_ssm_start (fpi_ssm_new (device, sync_test_handler, 1), sync_test_done);
+  while (!sync_test.done)
+    g_main_context_iteration (NULL, TRUE);
+  sync_test.enabled = FALSE;
+  g_assert_true (sync_test.worker != g_thread_self ());
+  if (scenario == 0)
+    g_assert_no_error (sync_test.error);
+  else if (scenario == 1 || scenario == 2)
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  else if (scenario == 5 || scenario == 7)
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  else
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+  g_assert_cmpuint (sync_test.releases, ==, scenario == 3 || scenario == 6 ? 0 : 1);
+  g_assert_cmpuint (sync_test.messages, ==, scenario == 3 || scenario == 6 || scenario == 7 ? 0 : 1);
+  if (scenario == 0 || scenario == 4)
+    g_assert_cmpuint (sync_test.checks, ==, 2);
+  g_clear_error (&sync_test.error);
+  if (scenario == 3 || scenario == 4 || scenario == 6)
+    {
+      g_autoptr(GError) error = NULL;
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+    }
+  finish_device (device);
+}
+
+static void
+test_b38_header (gconstpointer data)
+{
+  GError *error = NULL;
+  FpDevice *device;
+
+  b38_header_fixture = GPOINTER_TO_UINT (data);
+  boot38_fixture = TRUE;
+  device = new_device_for_model_checked (2, 32768, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (fp_device_get_name (device), "FT9338"));
+  finish_device (device);
+  b38_header_fixture = 0;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3146,5 +3268,12 @@ main (int argc, char **argv)
                         test_open_error);
   g_test_add_data_func ("/fte3600-lifecycle/open/id-error", GUINT_TO_POINTER (2),
                         test_open_error);
+  for (guint i = 0; i < 8; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fte3600/reset-sync/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_reset_sync);
+    }
+  g_test_add_data_func ("/fte3600/b38-header/zero", GUINT_TO_POINTER (1), test_b38_header);
+  g_test_add_data_func ("/fte3600/b38-header/ef", GUINT_TO_POINTER (2), test_b38_header);
   return g_test_run ();
 }

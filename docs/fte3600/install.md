@@ -37,35 +37,41 @@ sudo apt install build-essential git meson ninja-build pkg-config \
 
 The sensor requires `spidev` for SPI transfers and an out-of-tree ACPI glue module (`kernel/fte3600`) to manage the reset GPIO and IRQ line without exposing raw system GPIO chips.
 
+Run commands from the repository root:
+
 ```bash
-cd kernel/fte3600
-make
-sudo make install
-sudo depmod -a
-sudo modprobe fte3600
-cd ../..
+sudo ./scripts/setup-fte3600.sh install-kernel
 ```
 
-*(Optional DKMS)*:
-```bash
-sudo make -C kernel/fte3600 dkms-install
-```
+The installer uses DKMS when available; otherwise it builds and installs the
+module for the running kernel. It also installs the validated device-pairing
+helper, udev rules, and `spidev.bufsiz=32768` configuration. Matching kernel
+headers are required. If spidev is already loaded with a smaller buffer, reboot
+to apply the configuration and rerun the installer. It does not unload a shared
+spidev module.
+
+Secure Boot still requires a module signature trusted by the running kernel.
+The installer does not enroll signing keys. Replacing an already loaded older
+glue module also requires a reboot before validating the new device pair.
 
 ---
 
 ## 3. Firmware Installation
 
-Sensors FT9338, FT9348, FT9361, FT9536, and FT9368 require external firmware placed in `/usr/lib/firmware/fte3600/`:
+FT9338, FT9348, FT9361, and FT9536 RAM recovery uses separate external firmware
+images. FT9368 uses its two images only for the explicit persistent update
+path, not every ordinary open. The installer verifies each payload's size and
+SHA-256 against the sensor catalog:
 
 ```bash
-sudo mkdir -p /usr/lib/firmware/fte3600
-
-# Copy extracted firmware files to the firmware directory
-# Supported files: ft9338.bin, ft9348.bin, ft9361.bin, ft9536.bin, ft9368-app.bin, ft9368-pramboot.bin
-sudo cp /path/to/extracted/firmware/*.bin /usr/lib/firmware/fte3600/
+./scripts/install-firmware.sh --list
+# Example: extract and install the FT9338 payload from a supported local DLL.
+sudo ./scripts/install-firmware.sh --chip ft9338 --input /path/to/ftWbioUmdfDriverV2.dll
 ```
 
-> **Note**: Chips FT9365, FW9369, and FT9769 operate from ROM/Host mode and do not require firmware binaries.
+Use the corresponding `--chip` value for other profiles. Files are installed
+under `/usr/lib/firmware/fte3600/`. FT9365, FW9369, and FT9769 do not load an
+external firmware file through these backends.
 
 ---
 
@@ -130,11 +136,18 @@ returning to a BRISK-only build.
 
 ## 5. System Integration & Verification
 
-### Install Udev & Systemd Rules
+### Install Systemd and SELinux Integration
 ```bash
-sudo ./install/setup-fte3600-systemd-device.sh --install
-sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo ./scripts/setup-fte3600.sh install-systemd
+sudo ./scripts/setup-fte3600.sh install-selinux
+./scripts/setup-fte3600.sh check
 ```
+
+The systemd helper grants fprintd access to the validated SPI/GPIO/UIO pair.
+When SELinux is active, the SELinux step installs the scoped policy and labels
+that pair. A successful setup check does not replace a capture test in the
+fprintd service domain. `install-all` combines kernel, systemd, and SELinux
+installation and then restarts fprintd.
 
 ### Restart fprintd Service
 ```bash
@@ -155,13 +168,23 @@ fprintd-verify "$USER"
 ## 6. Uninstallation / Rollback
 
 ```bash
-# Remove systemd & udev overrides
-sudo ./install/setup-fte3600-systemd-device.sh --uninstall
-
-# Uninstall kernel module
-sudo make -C kernel/fte3600 uninstall
-sudo depmod -a
+# Remove the experimental glue and its managed system integration.
+sudo ./scripts/setup-fte3600.sh uninstall
 
 # Reinstall upstream libfprint
 # (e.g., sudo pacman -S libfprint / sudo apt install --reinstall libfprint-2-2)
 ```
+
+The removal command retains files if the glue is busy or label restoration
+fails. It does not unload global spidev or remove independently installed
+firmware. Restore saved system configuration and reboot as needed.
+
+### Migrate an Earlier Bridge Installation
+
+The old `/dev/fte3600-*` SPI bridge and its service/policy configuration are
+incompatible with the current GPIO/UIO glue. The installer detects them and
+stops. Save the old configuration, use the old checkout's documented removal
+procedure, and reboot before installing this version. Review old
+`fte3600-bridge` or `fte3600-gpio` SELinux modules as well as the old fprintd
+drop-ins; installing the new policy does not revoke permissions from an old
+one. Do not forcibly unbind an active fingerprint device to bypass this check.

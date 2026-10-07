@@ -26,7 +26,7 @@ typedef struct
 } Recovery;
 
 enum {
-  ID_VALIDATE, ID_RELEASE, ID_HIGH, ID_ASSERT, ID_LOW, ID_DEASSERT, ID_SYNC,
+  ID_VALIDATE, ID_RELEASE, ID_HIGH, ID_ASSERT, ID_LOW, ID_SYNC,
   ID_READ_CONFIG, ID_WRITE_CONFIG, ID_WRITE_ADDRESS, ID_READ_CONTROL,
   ID_WRITE_CONTROL, ID_READ_ID, ID_SAVE_ID, ID_DISABLE_OTP, ID_CLASSIFY,
   ID_CLEANUP_RELEASE, ID_CLEANUP_HIGH, ID_CLEANUP_ASSERT, ID_CLEANUP_LOW,
@@ -34,7 +34,7 @@ enum {
 };
 
 enum {
-  REC_VALIDATE, REC_RELEASE, REC_HIGH, REC_ASSERT, REC_LOW, REC_DEASSERT,
+  REC_VALIDATE, REC_RELEASE, REC_HIGH, REC_ASSERT, REC_LOW,
   REC_SYNC, REC_C8, REC_CA, REC_CB, REC_B9_PREPARE, REC_B9_COMMIT,
   REC_CONFIG_WAIT, REC_UPLOAD, REC_UPLOAD_WAIT, REC_READBACK, REC_VERIFY,
   REC_START_RELEASE1, REC_START_HIGH1, REC_START_ASSERT1,
@@ -82,20 +82,6 @@ boot38_exchange (FpiSsm *ssm, const guint8 *tx, guint8 *rx,
 }
 
 static void
-boot38_sync (FpiSsm *ssm)
-{
-  guint8 frame[FTE3600_BOOT_SYNC_SIZE];
-
-  g_autoptr(GError) error = NULL;
-  gsize size = fpi_fte3600_build_command (frame, sizeof frame,
-                                          FTE3600_COMMAND_BOOT_SYNC, &error);
-  if (error)
-    fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-  else
-    boot38_exchange (ssm, frame, NULL, size, TRUE);
-}
-
-static void
 boot38_read (FpiSsm *ssm, Identify *data, guint8 reg)
 {
   guint8 frame[FTE3600_BOOT38_REGISTER_SIZE];
@@ -131,7 +117,7 @@ identify_handler (FpiSsm *ssm, FpDevice *dev)
   guint step = fpi_ssm_get_cur_state (ssm);
   guint8 value = data->rx[FTE3600_BOOT38_RESULT_OFFSET];
 
-  if (step < ID_CLEANUP_RELEASE && !(step >= ID_HIGH && step <= ID_DEASSERT) &&
+  if (step < ID_CLEANUP_RELEASE && !(step >= ID_HIGH && step <= ID_SYNC) &&
       fpi_fte3600_fail_if_cancelled (ssm, dev))
     return;
   switch (step)
@@ -166,13 +152,12 @@ identify_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
       return;
 
-    case ID_DEASSERT:
     case ID_CLEANUP_DEASSERT:
       fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
       return;
 
     case ID_SYNC:
-      boot38_sync (ssm);
+      fpi_fte3600_release_reset_and_sync (ssm);
       return;
 
     case ID_READ_CONFIG:
@@ -318,7 +303,7 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
   /* A reset pulse already in progress must finish before cancellation is
    * observed. Starting the application is ordinary work, never error cleanup. */
   if (step < REC_CLEANUP_RELEASE &&
-      !(step >= REC_HIGH && step <= REC_DEASSERT) &&
+      !(step >= REC_HIGH && step <= REC_SYNC) &&
       !(step >= REC_START_HIGH1 && step <= REC_START_DEASSERT1) &&
       !(step >= REC_START_HIGH2 && step <= REC_START_DEASSERT2) &&
       fpi_fte3600_fail_if_cancelled (ssm, dev))
@@ -360,14 +345,13 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
       return;
 
-    case REC_DEASSERT:
     case REC_START_DEASSERT1:
     case REC_START_DEASSERT2:
       fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
       return;
 
     case REC_SYNC:
-      boot38_sync (ssm);
+      fpi_fte3600_release_reset_and_sync (ssm);
       return;
 
     case REC_C8:

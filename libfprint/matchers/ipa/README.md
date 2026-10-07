@@ -1,6 +1,6 @@
 # Reusing the 2D-IPA (2D Invariant Point Attention) core
 
-[Matcher architecture](../../../docs/fte3600/matcher-architectures.md) ·
+[Matcher architecture](../../../docs/fte3600/architecture.md) ·
 [Documentation index](../../../docs/fte3600/README.md)
 
 `ipa.c` and `ipa.h` implement an independent, host-based biometric feature

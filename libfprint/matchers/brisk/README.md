@@ -1,6 +1,6 @@
 # Reusing the BRISK-style core
 
-[Matcher architecture](../../../docs/fte3600/matcher-architectures.md) ·
+[Matcher architecture](../../../docs/fte3600/architecture.md) ·
 [Documentation index](../../../docs/fte3600/README.md)
 
 `brisk.c` and `brisk.h` implement image normalization, feature extraction and

@@ -65,7 +65,6 @@ enum fte3600_init_state {
   FTE3600_INIT_FW_RESET_HIGH,
   FTE3600_INIT_FW_RESET_ASSERT,
   FTE3600_INIT_FW_RESET_HOLD,
-  FTE3600_INIT_FW_RESET_DEASSERT,
   FTE3600_INIT_FW_SYNC,
   FTE3600_INIT_FW_UPLOAD,
   FTE3600_INIT_FW_UPLOAD_SETTLE,
@@ -327,7 +326,9 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
             fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
         }
       else
-        fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
+        {
+          fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
+        }
       return;
 
     case FTE3600_INIT_RESET_SETTLE:
@@ -453,14 +454,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
       return;
 
-    case FTE3600_INIT_FW_RESET_DEASSERT:
-      fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
-      return;
-
     case FTE3600_INIT_FW_SYNC:
       /* Entry uses one H10/L20/H pulse followed immediately by 55 AA.
        * The 160 ms application startup delay belongs after upload. */
-      fte3600_submit_command (ssm, FTE3600_COMMAND_BOOT_SYNC, FALSE);
+      fpi_fte3600_release_reset_and_sync (ssm);
       return;
 
     case FTE3600_INIT_FW_UPLOAD:

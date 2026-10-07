@@ -23,6 +23,8 @@ enum fte3600_discover_state {
   DISCOVER_CHECK_BOOT,
   DISCOVER_IDENTIFY_38,
   DISCOVER_IDENTIFY_38_DONE,
+  DISCOVER_IDENTIFY_B38,
+  DISCOVER_IDENTIFY_B38_DONE,
   DISCOVER_ENTER,
   DISCOVER_QUERY,
   DISCOVER_QUERY_DELAY,
@@ -182,7 +184,14 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case DISCOVER_IDENTIFY_38_DONE:
+    case DISCOVER_IDENTIFY_B38_DONE:
       fpi_ssm_mark_completed (ssm);
+      return;
+
+    case DISCOVER_IDENTIFY_B38:
+      /* FAMILY_READ has replaced the boot-probe receive buffer. Its header
+      * bytes carry no boot-edition evidence. 1534 selects the B38 path. */
+      fpi_ssm_start_subsm (ssm, fpi_fte3600_legacy38_identify_new (self, FALSE));
       return;
 
     case DISCOVER_ENTER:
@@ -215,7 +224,7 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
         {
           fp_dbg ("FTE3600 Boot-B38 ROM family %04x detected; branching to B38 identification",
                   self->family);
-          fpi_ssm_jump_to_state (ssm, DISCOVER_IDENTIFY_38);
+          fpi_ssm_jump_to_state (ssm, DISCOVER_IDENTIFY_B38);
           return;
         }
       if (self->family != 0x2b50 && self->family != 0x95a8 && self->family != 0x23dd)

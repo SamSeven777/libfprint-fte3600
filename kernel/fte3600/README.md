@@ -12,7 +12,7 @@ controller, execute SPI messages, or change SPI mode.
 The old private `/dev/fte3600-*` ioctl interface is not provided. Documents
 describing that bridge concern the earlier implementation. Existing
 installations need matching userspace and setup files; follow the
-[migration guide](../../docs/fte3600/acpi-spidev.md#migrate-an-earlier-bridge-installation).
+[migration guide](../../docs/fte3600/install.md#migrate-an-earlier-bridge-installation).
 
 ## Resources and device pairing
 

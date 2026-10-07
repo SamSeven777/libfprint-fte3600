@@ -328,6 +328,10 @@ test_firmware_evidence_cannot_be_substituted (void)
   g_assert_true (fpi_fte3600_identity_allows_firmware (&identity));
   identity.response = 0x4080;
   g_assert_false (fpi_fte3600_identity_allows_firmware (&identity));
+  identity.response = 0x1534;
+  g_assert_true (fpi_fte3600_identity_allows_firmware (&identity));
+  identity.otp = 0;
+  g_assert_false (fpi_fte3600_identity_allows_firmware (&identity));
 }
 
 int

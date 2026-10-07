@@ -156,10 +156,7 @@ void fpi_fte3600_submit_reg_read (FpiSsm  *ssm,
                                   gboolean cancellable);
 guint8 fpi_fte3600_read_result_byte (FpiDeviceFte3600 *self);
 gboolean fpi_fte3600_mcu_is_idle (FpiDeviceFte3600 *self);
-gboolean fpi_fte3600_hardware_reset_pulse (FpiDeviceFte3600 *self,
-                                           GError          **error);
-void fpi_fte3600_pulse_hardware_reset (FpiSsm           *ssm,
-                                       FpiDeviceFte3600 *self);
+void fpi_fte3600_release_reset_and_sync (FpiSsm *ssm);
 void fpi_fte3600_set_hardware_reset (FpiSsm           *ssm,
                                      FpiDeviceFte3600 *self,
                                      gboolean          asserted);

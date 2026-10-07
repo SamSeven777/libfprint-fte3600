@@ -25,7 +25,7 @@ check_legacy() {
   local path policies
   for path in /usr/src/fte3600-0.1 /etc/systemd/system/fprintd.service.d/10-fte3600-bridge.conf /etc/systemd/system/fprintd.service.d/10-fte3600-gpio.conf; do
     if [ -e "$path" ] || [ -L "$path" ]; then
-      fail "Old installation: $path. Save rollback copies and follow docs/fte3600/acpi-spidev.md first."; return 1
+      fail "Old installation: $path. Save rollback copies and follow docs/fte3600/install.md#migrate-an-earlier-bridge-installation first."; return 1
     fi
   done
   for path in /sys/class/misc/fte3600-*; do

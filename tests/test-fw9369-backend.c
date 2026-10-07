@@ -11,6 +11,8 @@ G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE)
 
 static struct
 {
+  guint         mode_reads, mode_failures;
+  gboolean      mode_io_error;
   GCancellable *cancellable;
   guint8        sfr[256];
   guint16       words[0x8000];
@@ -309,6 +311,12 @@ emulate_transfer (FpiSpiTransfer *transfer)
       if (tx[2] == 0x80)
         mock.status_reads++;
       rx[4] = mock.sfr[tx[2]];
+      if (tx[2] == 0xc6)
+        {
+          mock.mode_reads++;
+          if (mock.mode_reads <= mock.mode_failures)
+            rx[4] = 0;
+        }
       return;
 
     case 0x09:
@@ -559,6 +567,9 @@ complete_transfer (gpointer user_data)
     record_discovery_transfer (transfer);
   if (pending->cancellable)
     g_cancellable_set_error_if_cancelled (pending->cancellable, &error);
+  if (!error && mock.mode_io_error && transfer->buffer_wr[0] == 0x08 &&
+      transfer->buffer_wr[2] == 0xc6)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "C6 transport failure");
   if (!error && mock.discovering && mock.fail_discovery_wake && transfer->buffer_wr[0] == 0x5a)
     {
       mock.failure_transaction = mock.transactions;
@@ -1089,6 +1100,7 @@ test_shutdown_fast_reopen (gconstpointer scenario_ptr)
   guint scenario = GPOINTER_TO_UINT (scenario_ptr);
   FpiDeviceFte3600 *self = setup (scenario == 1);
   guint transactions, images;
+
   g_autoptr(GError) error = NULL;
 
   run_ssm (self->backend->create_init (self));
@@ -1101,7 +1113,7 @@ test_shutdown_fast_reopen (gconstpointer scenario_ptr)
   images = mock.images;
 
   /* Close destroys backend data but keeps the validated identity. Unlike the
-   * discovery-reopen test, reuse it with the silicon still asleep from C1. */
+  * discovery-reopen test, reuse it with the silicon still asleep from C1. */
   self->backend->destroy (self);
   g_assert_true (self->backend->prepare_capture (self, &error));
   g_assert_no_error (error);
@@ -1397,6 +1409,33 @@ test_enroll_prearm (gconstpointer scenario_ptr)
   teardown (self);
 }
 
+
+static void
+test_mode_negotiation (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  FpiDeviceFte3600 *self = setup (scenario / 4);
+  guint variant = scenario % 4;
+
+  mock.mode_failures = variant == 0 ? 0 : variant == 1 ? 1 : G_MAXUINT;
+  mock.mode_io_error = variant == 3;
+  run_ssm (self->backend->create_init (self));
+  if (variant == 3)
+    {
+      g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+    }
+  else
+    {
+      g_assert_no_error (mock.error);
+      g_assert_true (self->idle_verified);
+      g_assert_cmpuint (mock.mode_reads, ==, variant == 0 ? 2 : variant == 1 ? 3 : 62);
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_nonnull (self->captured_image);
+    }
+  teardown (self);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1456,6 +1495,11 @@ main (int argc, char **argv)
     {
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/init-error/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_init_error);
+    }
+  for (guint i = 0; i < 8; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/mode-negotiation/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_mode_negotiation);
     }
   return g_test_run ();
 }

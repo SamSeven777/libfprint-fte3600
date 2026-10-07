@@ -37,6 +37,8 @@ typedef struct
   gsize    offset;
   gsize    chunk;
   guint    attempts;
+  guint    mode_attempts;
+  guint    mode_pass;
   gint64   deadline;
   guint16  value;
   guint    position;
@@ -643,10 +645,14 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case INIT_MODE_CHECK:
-      if (machine->rx[4] == 1)
+      /* Windows 195D0 allows four attempts and its callers continue to ID
+       * validation even when readback never acknowledges the mode. */
+      if (machine->rx[4] != 1 && ++machine->mode_attempts < FT93XX_SFR_PROTOCOL_ATTEMPTS)
+        fpi_ssm_jump_to_state (ssm, INIT_MODE);
+      else if (machine->mode_pass == 0)
         fpi_ssm_next_state (ssm);
       else
-        fail_protocol (ssm, "SPI register protocol was not acknowledged");
+        fpi_ssm_jump_to_state (ssm, INIT_VARIANT);
       break;
 
     case INIT_ID:
@@ -658,9 +664,16 @@ init_run (FpiSsm *ssm, FpDevice *dev)
         break;
       if (!fpi_fte3600_ft93xx_matches (chip->profile->sensor, chip->chip_id, 0) ||
           chip->chip_id != self->identity.response)
-        fail_protocol (ssm, "silicon identity changed during initialization");
+        {
+          fail_protocol (ssm, "silicon identity changed during initialization");
+        }
       else
-        fpi_ssm_next_state (ssm);
+        {
+          /* The initialization caller repeats 195D0 after its probe (19717). */
+          machine->mode_pass = 1;
+          machine->mode_attempts = 0;
+          fpi_ssm_jump_to_state (ssm, INIT_MODE);
+        }
       break;
 
     case INIT_VARIANT:

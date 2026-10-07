@@ -63,12 +63,10 @@ fpi_fte3600_transport_check (FpDevice *device, GError **error)
 }
 
 static gboolean
-set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
+write_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
 {
   struct gpio_v2_line_values value = { .mask = 1, .bits = !!asserted };
 
-  if (!fpi_fte3600_resources_check (&self->resources, error))
-    return FALSE;
   if (ioctl (self->reset_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &value) < 0)
     {
       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
@@ -76,9 +74,44 @@ set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
                    g_strerror (errno));
       return FALSE;
     }
-  if (asserted && !fpi_fte3600_resources_check (&self->resources, error))
-    return FALSE;
   return TRUE;
+}
+
+static gboolean
+set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
+{
+  return fpi_fte3600_resources_check (&self->resources, error) &&
+         write_reset_value (self, asserted, error) &&
+         fpi_fte3600_resources_check (&self->resources, error);
+}
+
+static gboolean
+release_reset_for_sync (FpDevice *device, GError **error)
+{
+  /* The SPI worker has validated the message and session. Its next operation
+   * is the prepared SPI ioctl, followed by the normal completion checks. */
+  return write_reset_value (FPI_DEVICE_FTE3600 (device), FALSE, error);
+}
+
+void
+fpi_fte3600_release_reset_and_sync (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+
+  self->idle_verified = FALSE;
+  transfer = fpi_spi_transfer_new_with_buffer_size (FP_DEVICE (self), self->spi_fd,
+                                                    self->max_transfer);
+  fpi_spi_transfer_write (transfer, FTE3600_BOOT_SYNC_SIZE);
+  fpi_fte3600_build_command (transfer->buffer_wr, FTE3600_BOOT_SYNC_SIZE,
+                             FTE3600_COMMAND_BOOT_SYNC, NULL);
+  fpi_spi_transfer_read (transfer, FTE3600_BOOT_SYNC_SIZE);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  fpi_spi_transfer_set_sensitive (transfer, TRUE);
+  fpi_spi_transfer_set_prepare (transfer, release_reset_for_sync);
+  /* Finish the pulse/handshake once reset is asserted. The next SSM state
+   * observes cancellation; no main-context work runs between release/sync. */
+  fpi_fte3600_submit_transfer (ssm, transfer, FALSE);
 }
 
 void
@@ -233,38 +266,8 @@ fpi_fte3600_submit_transfer (FpiSsm *ssm, FpiSpiTransfer *transfer,
                              gboolean cancellable)
 {
   FpDevice *dev = fpi_ssm_get_device (ssm);
-  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
   transfer->ssm = ssm;
-
-  if (transfer->length_wr == FTE3600_BOOT_SYNC_SIZE &&
-      transfer->buffer_wr &&
-      transfer->buffer_wr[0] == FTE3600_OPCODE_BOOT_SYNC)
-    {
-      struct spi_ioc_transfer xfer = {
-        .tx_buf = (guintptr) transfer->buffer_wr,
-        .rx_buf = (guintptr) transfer->buffer_rd,
-        .len = transfer->length_wr,
-      };
-      GError *error = NULL;
-
-      if (cancellable &&
-          fpi_device_get_cancellable (dev) &&
-          g_cancellable_set_error_if_cancelled (fpi_device_get_cancellable (dev), &error))
-        {
-          fpi_ssm_spi_transfer_cb (transfer, dev, NULL, error);
-          fpi_spi_transfer_unref (transfer);
-          return;
-        }
-
-      if (ioctl (self->spi_fd, SPI_IOC_MESSAGE (1), &xfer) < 0)
-        error = g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),
-                             "Failed to transmit FTE3600 boot sync: %s", g_strerror (errno));
-
-      fpi_ssm_spi_transfer_cb (transfer, dev, NULL, error);
-      fpi_spi_transfer_unref (transfer);
-      return;
-    }
 
   fpi_spi_transfer_submit (
     transfer, cancellable ? fpi_device_get_cancellable (dev) : NULL,
@@ -362,45 +365,6 @@ fpi_fte3600_mcu_is_idle (FpiDeviceFte3600 *self)
   return self->small_rx_valid &&
          self->small_rx[FTE3600_REG_RESULT_OFFSET] == FTE3600_MCU_IDLE_HIGH &&
          self->small_rx[FTE3600_REG_RESULT_OFFSET + 1] == FTE3600_MCU_IDLE_LOW;
-}
-
-gboolean
-fpi_fte3600_hardware_reset_pulse (FpiDeviceFte3600 *self, GError **error)
-{
-  g_assert (self->spi_fd >= 0);
-  self->idle_verified = FALSE;
-
-  /* 1. Ensure reset line is deasserted high before pulsing */
-  if (!set_reset_value (self, FALSE, error))
-    return FALSE;
-  g_usleep (5000);
-
-  /* 2. Assert low for 20 ms */
-  if (!set_reset_value (self, TRUE, error))
-    return FALSE;
-  g_usleep (20000);
-
-  /* 3. Deassert high and wait 10 ms for chip to stabilize */
-  if (!set_reset_value (self, FALSE, error))
-    return FALSE;
-  g_usleep (10000);
-
-  return TRUE;
-}
-
-void
-fpi_fte3600_pulse_hardware_reset (FpiSsm           *ssm,
-                                  FpiDeviceFte3600 *self)
-{
-  GError *error = NULL;
-
-  if (!fpi_fte3600_hardware_reset_pulse (self, &error))
-    {
-      fpi_ssm_mark_failed (ssm, error);
-      return;
-    }
-
-  fpi_ssm_next_state (ssm);
 }
 
 void

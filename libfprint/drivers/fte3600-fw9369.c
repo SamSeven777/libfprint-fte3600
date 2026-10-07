@@ -12,10 +12,10 @@
 #include "fte3600-fw9369.h"
 #include "fte3600-fw9369-protocol.h"
 #include "fte3600-special-probe.h"
+#include "fte3600-special-probe-timing.h"
 
 /* Hardware waits are milliseconds. Calibration limits are host policy. */
 #define COMMAND_DELAY_MS 1
-#define SPI_MODE_DELAY_MS 4
 #define MAX_POLL_ATTEMPTS 10
 #define MAX_CALIBRATION_ATTEMPTS 12
 #define MAX_STABILITY_ATTEMPTS 10
@@ -42,6 +42,8 @@ typedef struct
   guint    attempts;
   guint    stable;
   guint    spurious;
+  guint    mode_attempts;
+  guint    mode_passes;
   gboolean smic;
   gboolean calibrated;
   gboolean init_started;
@@ -603,7 +605,7 @@ communication_run (FpiSsm *ssm, FpDevice *dev)
     case COMM_READ:
       script = new_script (self, "FW9369 check communication", FALSE);
       add_step (script, OP_SFR_WRITE, FTE3600_FW9369_SFR_SPI_MODE,
-                1, 0, SPI_MODE_DELAY_MS, 0, NULL);
+                1, 0, FTE3600_SPECIAL_MODE_DELAY_MS, 0, NULL);
       add_step (script, OP_WORD_READ, FTE3600_FW9369_WORD_CHIP_ID,
                 0, 0, 0, 0, &data->id);
       fpi_ssm_start_subsm (ssm, script);
@@ -685,7 +687,8 @@ start_dac_search (Fw9369Data *data)
 }
 
 enum {
-  INIT_FAST_RESET, INIT_SPI, INIT_CHECK_SPI, INIT_READ_PROCESS, INIT_CHECK_PROCESS,
+  INIT_FAST_RESET, INIT_SPI, INIT_CHECK_MODE, INIT_READ_ID, INIT_CHECK_SPI,
+  INIT_READ_PROCESS, INIT_CHECK_PROCESS,
   INIT_ANALOG, INIT_FDT_SAMPLE, INIT_FDT_ADJUST, INIT_FDT_STABLE_SAMPLE,
   INIT_FDT_STABLE_CHECK, INIT_IMAGE_SAMPLE, INIT_IMAGE_ADJUST,
   INIT_BASE_SAMPLE, INIT_BASE_CHECK, INIT_IDLE, INIT_DONE, INIT_STATES,
@@ -710,6 +713,8 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       self->idle_verified = FALSE;
       data->calibrated = FALSE;
       data->init_started = FALSE;
+      data->mode_attempts = 0;
+      data->mode_passes = 0;
       /* Cached identity does not imply an awake sensor: shutdown enters C1.
        * Reuse the factory reset before accessing SPI configuration or ID;
        * the full discovery path already establishes communication. */
@@ -727,22 +732,46 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       data->fdt_dac = FTE3600_FW9369_FDT_DAC;
       script = new_script (self, "FW9369 transport setup", FALSE);
       add_step (script, OP_SFR_WRITE, FTE3600_FW9369_SFR_SPI_MODE,
-                1, 0, SPI_MODE_DELAY_MS, 0, NULL);
+                1, 0, FTE3600_SPECIAL_MODE_DELAY_MS, 0, NULL);
       add_step (script, OP_SFR_READ, FTE3600_FW9369_SFR_SPI_MODE,
                 0, 0, 0, 0, &data->spi_mode);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case INIT_CHECK_MODE:
+      /* Windows FD94 is called twice before the ID read (100D7/10D79).
+       * Each call retries 31 times; an exhausted readback is not an ID veto. */
+      if (data->spi_mode != 1 &&
+          ++data->mode_attempts < FTE3600_SPECIAL_MODE_ATTEMPTS)
+        {
+          fpi_ssm_jump_to_state (ssm, INIT_SPI);
+        }
+      else if (++data->mode_passes < FTE3600_SPECIAL_MODE_CONFIG_PASSES)
+        {
+          data->mode_attempts = 0;
+          fpi_ssm_jump_to_state (ssm, INIT_SPI);
+        }
+      else
+        {
+          fpi_ssm_next_state (ssm);
+        }
+      break;
+
+    case INIT_READ_ID:
+      script = new_script (self, "FW9369 silicon identity", FALSE);
       add_step (script, OP_WORD_READ, FTE3600_FW9369_WORD_CHIP_ID,
                 0, 0, 0, 0, &data->id);
       fpi_ssm_start_subsm (ssm, script);
       break;
 
     case INIT_CHECK_SPI:
-      if (data->spi_mode != 1 || data->id != FTE3600_FW9369_CHIP_ID)
+      if (data->id != FTE3600_FW9369_CHIP_ID)
         {
           if (data->id != 0 && data->id != 0xffff &&
               data->id != FTE3600_FW9369_CHIP_ID)
             lose_identity (self);
           fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                                 FP_DEVICE_ERROR_PROTO, "FW9369 SPI configuration or identity changed"));
+                                 FP_DEVICE_ERROR_PROTO, "FW9369 silicon identity changed"));
           break;
         }
       fpi_ssm_next_state (ssm);
@@ -892,9 +921,13 @@ init_run (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_jump_to_state (ssm, INIT_DONE);
         }
       else if (data->identity_lost)
-        fpi_ssm_jump_to_state (ssm, INIT_DONE);
+        {
+          fpi_ssm_jump_to_state (ssm, INIT_DONE);
+        }
       else
-        fpi_ssm_start_subsm (ssm, create_reset (self));
+        {
+          fpi_ssm_start_subsm (ssm, create_reset (self));
+        }
       break;
 
     case INIT_DONE:
