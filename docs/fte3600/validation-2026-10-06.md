@@ -92,3 +92,47 @@ including the separate 10-byte Ubuntu and 12-byte Windows FW9369 word reads.
 Physical Medion/GPD validation remains the next check for hardware response and
 capture quality. In particular, automated call-order tests do not measure GPIO
 release-to-first-clock time on the target SPI controller.
+
+## FW9369 Runtime Recovery Follow-up
+
+Issue [#2](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6028164613)
+reports `IDLE | INVALID` (`0011`) aborting enrollment on GPD Pocket 3 after
+zero to three accepted samples. The tester also reproduced it with the older
+working package. Re-arming FDT alone sometimes worked but could leave the
+detector reporting INVALID repeatedly without accepting touches.
+
+The follow-up to `f67f0da` changes the backend's fatal event branch to perform
+in-session reinitialization. This follows the Windows recovery dispatch
+documented in [Wire Protocols](protocols.md): acknowledge, wait 5 ms, initialize
+the chip, then resume detection. Recovery reuses the existing Linux ID checks,
+FDT/image DAC calibration and baseline qualification. It does not add a GPIO
+reset for a device opened through the identity cache.
+
+The current enrollment stage remains intact. Capture requires a fresh DOWN,
+and a release wait still requires an unambiguous UP; calibration itself does
+not satisfy either condition. Recovery failures propagate through normal
+cleanup, and failed calibration cannot be reused. Three reinitializations per
+capture/release wait bound persistent faults; this limit is Linux policy.
+
+The backend fixture now has 103 cases, including 33 new recovery cases covering
+both process variants, INVALID/RESET/ESD and mixed events, repeated enrollment
+capture/release cycles, persistent faults, cancellation during the 5 ms wait
+and initialization, transport/short-transfer errors, propagated stale-resource
+errors, changed silicon identity and unstable calibration. Production transfers
+continue to use the existing generation guard; the lifecycle suite separately
+checks that guard, rather than modeling it as a hardware event.
+
+Validation:
+
+- Authentication-disabled build: six selected backend, protocol, SPI and
+  lifecycle groups passed.
+- Personal authentication and IPA enabled: backend and authentication lifecycle
+  groups passed.
+- ASan/UBSan build: backend and transport lifecycle groups passed, with leak
+  detection disabled.
+
+These are synthetic state-machine tests, not a new GPD hardware result. They
+exercise calibration with the sensor uncovered; temporal baseline stability
+does not prove absence of a stationary finger. The cause of the reported
+periodic INVALID events remains unconfirmed, and this change does not claim
+that the independent Linux calibration algorithm is identical to Windows.

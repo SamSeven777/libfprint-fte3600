@@ -13,15 +13,21 @@ static struct
 {
   guint         mode_reads, mode_failures;
   gboolean      mode_io_error;
+  guint         recovery_fault;
+  guint         recovery_setups;
+  gint64        recovery_ack_time;
+  gint64        recovery_start_time;
   GCancellable *cancellable;
   guint8        sfr[256];
   guint16       words[0x8000];
   guint         transactions;
   guint         images;
   guint         irqs;
-  guint16       irq_events[2];
+  guint16       irq_events[8];
   guint         irq_count;
   guint         irq_index;
+  gboolean      uncovered_first_irq;
+  gboolean      cancel_after_fault_ack;
   guint         sleep_irq;
   guint16       event_after_ack;
   gboolean      fdt_running;
@@ -199,7 +205,8 @@ fpi_fte3600_wait_for_irq (FpiSsm *ssm)
               g_assert_cmpuint (mock.irq_index, <, mock.irq_count);
               mock.words[0x1a82] = mock.irq_events[mock.irq_index++];
             }
-          mock.finger = !!(mock.words[0x1a82] & 2);
+          mock.finger = !(mock.uncovered_first_irq && mock.irq_index == 1) &&
+                        !!(mock.words[0x1a82] & 2);
           fpi_ssm_next_state (ssm);
           return;
         }
@@ -474,6 +481,13 @@ typedef struct
   gpointer               user_data;
 } Pending;
 
+static gboolean
+cancel_recovery_wait (gpointer user_data)
+{
+  g_cancellable_cancel (mock.cancellable);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 record_discovery_transfer (FpiSpiTransfer *transfer)
 {
@@ -563,9 +577,49 @@ complete_transfer (gpointer user_data)
   GError *error = NULL;
 
   mock.transactions++;
+  if (mock.irqs && transfer->buffer_wr[0] == 0x08 && transfer->buffer_wr[2] == 0xc6)
+    {
+      mock.recovery_setups++;
+      if (!mock.recovery_start_time)
+        mock.recovery_start_time = g_get_monotonic_time ();
+      switch (mock.recovery_fault)
+        {
+        case 1:
+          error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Recovery transport failure");
+          break;
+
+        case 2:
+          g_cancellable_cancel (mock.cancellable);
+          break;
+
+        case 3:
+          mock.words[0x1a8b] = 0x9365;
+          break;
+
+        case 4:
+          mock.unstable = TRUE;
+          break;
+
+        case 5:
+          error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT, "Short recovery transfer");
+          break;
+
+        case 6:
+          error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CLOSED, "Resource generation changed");
+          break;
+        }
+    }
+  if (mock.irqs && transfer->buffer_wr[0] == 0x05 &&
+      be16 (transfer->buffer_wr + 2) == 0x9a84 &&
+      (be16 (transfer->buffer_wr + 6) & 0x610) && !mock.recovery_ack_time)
+    {
+      mock.recovery_ack_time = g_get_monotonic_time ();
+      if (mock.cancel_after_fault_ack)
+        g_timeout_add (1, cancel_recovery_wait, NULL);
+    }
   if (mock.discovering)
     record_discovery_transfer (transfer);
-  if (pending->cancellable)
+  if (!error && pending->cancellable)
     g_cancellable_set_error_if_cancelled (pending->cancellable, &error);
   if (!error && mock.mode_io_error && transfer->buffer_wr[0] == 0x08 &&
       transfer->buffer_wr[2] == 0xc6)
@@ -1308,7 +1362,12 @@ test_wait_release (gconstpointer scenario_ptr)
       mock.cancel_release_after = 2;
       break;
 
-    case 3: mock.release_events[0] = 0x400;
+    case 3:
+      /* ESD now recovers and waits for a fresh UP. The sensor is uncovered
+       * while recalibrating; an ESD event itself is not release evidence. */
+      mock.irq_events[0] = 0x401;
+      mock.irq_events[1] = 4;
+      mock.irq_count = 2;
       break;
 
     case 4: mock.fail_transaction = mock.transactions + 1;
@@ -1320,14 +1379,18 @@ test_wait_release (gconstpointer scenario_ptr)
     default: g_assert_not_reached ();
     }
   run_ssm (self->backend->create_wait_release (self));
-  g_assert_cmpuint (mock.images, ==, images);
+  if (scenario == 3)
+    g_assert_cmpuint (mock.images, >, images);
+  else
+    g_assert_cmpuint (mock.images, ==, images);
   g_assert_null (self->captured_image);
   g_assert_false (self->armed);
   g_assert_cmpuint (mock.sfr[0x9a], ==, 0);
-  if (scenario == 0)
+  if (scenario == 0 || scenario == 3)
     {
       g_assert_no_error (mock.error);
-      g_assert_cmpuint (mock.release_index, ==, 3);
+      g_assert_cmpuint (mock.release_index, ==, scenario == 3 ? 0 : 3);
+      mock.irq_count = 0;
       run_ssm (self->backend->create_capture (self));
       g_assert_no_error (mock.error);
       g_assert_nonnull (self->captured_image);
@@ -1436,6 +1499,157 @@ test_mode_negotiation (gconstpointer data)
   teardown (self);
 }
 
+static void
+test_event_recovery (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  gboolean release = scenario & 1;
+  static const guint16 events[] = { 0x11, 0x201, 0x401, 0x617 };
+  FpiDeviceFte3600 *self = setup ((scenario >> 1) & 1);
+  guint images, samples, modes;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  images = mock.images;
+  samples = mock.fdt_samples;
+  modes = mock.mode_reads;
+  /* The open was cached, but live recovery must not pulse GPIO again. */
+  self->fast_open = TRUE;
+  self->enroll_stages_passed = 2;
+  mock.irq_events[0] = events[scenario >> 2];
+  mock.irq_events[1] = release ? 4 : 2;
+  mock.irq_count = 2;
+  /* Event bits are deliberately separate from physical occupancy here:
+   * stale simultaneous DOWN/UP must not supply a sample or finish release. */
+  mock.uncovered_first_irq = TRUE;
+  run_ssm (release ? self->backend->create_wait_release (self) :
+           self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (self->enroll_stages_passed, ==, 2);
+  g_assert_cmpuint (mock.irq_index, ==, 2);
+  g_assert_cmpuint (mock.reset_edges, ==, 0);
+  g_assert_cmpuint (mock.mode_reads, ==, modes + 2);
+  g_assert_cmpuint (mock.fdt_samples, ==, samples * 2);
+  g_assert_cmpuint (mock.images, ==, images * 2 + !release);
+  g_assert_cmpint (mock.recovery_start_time - mock.recovery_ack_time, >=, 5000);
+  g_assert_true (self->idle_verified);
+  if (release)
+    {
+      g_assert_null (self->captured_image);
+    }
+  else
+    {
+      g_assert_nonnull (self->captured_image);
+      g_assert_cmpuint (self->captured_image->data[66], ==, 255);
+    }
+  /* The next acquisition still works in the same open device. */
+  mock.irq_count = 0;
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_nonnull (self->captured_image);
+  teardown (self);
+}
+
+static void
+test_event_recovery_error (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  gboolean release = scenario & 1;
+  guint fault = scenario >> 1;
+  FpiDeviceFte3600 *self = setup (FALSE);
+  guint images;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  images = mock.images;
+  mock.recovery_fault = fault;
+  mock.cancel_after_fault_ack = fault == 7;
+  mock.irq_count = 4;
+  for (guint i = 0; i < mock.irq_count; i++)
+    mock.irq_events[i] = 0x11;
+  run_ssm (release ? self->backend->create_wait_release (self) :
+           self->backend->create_capture (self));
+  g_assert_nonnull (mock.error);
+  g_assert_null (self->captured_image);
+  g_assert_false (self->armed);
+  g_assert_cmpuint (mock.sfr[0x9a], ==, 0);
+  if (fault == 0)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      g_assert_nonnull (strstr (mock.error->message, "persist after 3 reinitializations"));
+      g_assert_cmpuint (mock.irq_index, ==, 4);
+      g_assert_cmpuint (mock.recovery_setups, ==, 6);
+      g_assert_cmpuint (mock.images, ==, images * 4);
+    }
+  else if (fault == 3 || fault == 4)
+    {
+      g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+      if (fault == 3)
+        {
+          g_assert_true (self->session_failed);
+          g_assert_cmpuint (mock.transactions, ==, mock.wrong_id_transaction);
+        }
+    }
+  else
+    {
+      GIOErrorEnum code = fault == 1 ? G_IO_ERROR_FAILED : (fault == 2 || fault == 7) ? G_IO_ERROR_CANCELLED :
+                          fault == 5 ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_CLOSED;
+
+      g_assert_error (mock.error, G_IO_ERROR, code);
+      if (fault == 7)
+        g_assert_cmpuint (mock.recovery_setups, ==, 0);
+    }
+  /* A failed recovery cannot leave the old calibration usable. */
+  g_cancellable_reset (mock.cancellable);
+  mock.recovery_fault = 0;
+  mock.irq_count = 0;
+  run_ssm (self->backend->create_capture (self));
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_assert_nonnull (strstr (mock.error->message, "no validated baseline"));
+  teardown (self);
+}
+
+static void
+test_enroll_event_recovery (void)
+{
+  FpiDeviceFte3600 *self = setup (FALSE);
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  mock.enrolling = TRUE;
+  fpi_device_set_nr_enroll_stages (FP_DEVICE (self), 8);
+  for (guint stage = 2; stage < 4; stage++)
+    {
+      self->enroll_stages_passed = stage;
+      mock.irq_index = 0;
+      mock.irq_count = 4;
+      mock.irq_events[0] = mock.irq_events[1] = mock.irq_events[2] = 0x11;
+      mock.irq_events[3] = 2;
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (self->enroll_stages_passed, ==, stage);
+      g_assert_cmpuint (mock.irq_index, ==, 4);
+      g_assert_nonnull (self->captured_image);
+      g_assert_true (self->armed);
+      g_clear_object (&self->captured_image);
+
+      /* INVALID arrives on the detector prearmed before matcher work.
+       * Recovery must invalidate that latch and rearm for a fresh UP. */
+      mock.irq_index = 0;
+      mock.irq_count = 2;
+      mock.irq_events[0] = 0x11;
+      mock.irq_events[1] = 4;
+      run_ssm (self->backend->create_wait_release (self));
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (self->enroll_stages_passed, ==, stage);
+      g_assert_cmpuint (mock.irq_index, ==, 2);
+      g_assert_null (self->captured_image);
+      g_assert_true (self->idle_verified);
+      g_assert_false (self->armed);
+    }
+  teardown (self);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1443,6 +1657,19 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fw9369-backend/db-capture", GUINT_TO_POINTER (0), test_capture);
   g_test_add_data_func ("/fw9369-backend/smic-capture", GUINT_TO_POINTER (1), test_capture);
   g_test_add_func ("/fw9369-backend/cleanup-error", test_cleanup_error);
+  g_test_add_func ("/fw9369-backend/enroll-event-recovery", test_enroll_event_recovery);
+  for (guint i = 0; i < 16; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/event-recovery/%u", i);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_event_recovery);
+    }
+  for (guint i = 0; i < 16; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/event-recovery-error/%u", i);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_event_recovery_error);
+    }
   for (guint i = 0; i < 5; i++)
     {
       static const gchar *cases[] = { "db", "smic", "reset-error", "cancel", "changed-id" };

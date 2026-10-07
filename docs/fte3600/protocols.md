@@ -142,6 +142,23 @@ sleep, `C2 3D 00` starts finger detection, and `C4 3B 00` starts image acquisiti
 C4 is not the bulk pixel-read transaction. Events are read from word address
 `1A82`, enabled through `1A83`, and acknowledged through `1A84`.
 
+`INVALID` (`0010`) is a recovery event, not proof of a particular DAC failure.
+In Windows, `fw9369_query_event_status` tests this bit at RVA `103D3` and
+returns the ESD status through `10824`. The IRQ handler at `2DE7C` waits 5 ms
+and calls `fw9369_init_chip` through `2DF4A` / `FED8`. Initialization reacquires
+FDT and image calibration/baselines (`157C0`) before restarting detection.
+The preceding virtual call at `2DE99` resolves through FT9369 vtable
+`49410 + 68` to `35F60`, a no-op; it does not pulse GPIO.
+
+Linux acknowledges INVALID, RESET or ESD and reuses its initialization state
+machine after the same 5 ms wait. Successful recovery resumes the current
+DOWN or UP wait without discarding enrollment progress. It does not repeat
+factory discovery or the GPIO reset used when reopening from C1, even when
+the current open used a cached identity. A fresh finger event is still required.
+Three recoveries without completing that capture/release wait are allowed;
+this bound is Linux host policy. Calibration, transport, identity or cancellation
+failures propagate normally, with the existing resource-generation checks.
+
 The image FIFO read starts `06 F9 9A 05`. A frame contains a six-byte header and
 10,240 bytes of big-endian 16-bit samples (10,246 bytes total). The host collects
 an empty-sensor baseline and forms nonnegative baseline-minus-sample differences

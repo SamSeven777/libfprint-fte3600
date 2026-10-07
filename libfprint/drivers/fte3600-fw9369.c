@@ -3,7 +3,7 @@
  * Copyright (C) 2026 FTE3600 Linux contributors
  * SPDX-License-Identifier: LGPL-2.1-or-later
  *
- * Protocol facts: docs/fte3600/fw9369-protocol.md. Calibration and image
+ * Protocol facts: docs/fte3600/protocols.md. Calibration and image
  * processing are independent implementations; no vendor executable or table
  * is embedded in this driver.
  */
@@ -23,6 +23,9 @@
 #define MAX_SPURIOUS_EVENTS 64
 #define COMMUNICATION_WAKE_ATTEMPTS 10
 #define COMMUNICATION_SETTLE_MS 20
+#define RECOVERY_SETTLE_MS 5
+/* Host policy: bound consecutive recoveries without a usable finger event. */
+#define MAX_EVENT_RECOVERIES 3
 
 typedef struct
 {
@@ -718,7 +721,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
       /* Cached identity does not imply an awake sensor: shutdown enters C1.
        * Reuse the factory reset before accessing SPI configuration or ID;
        * the full discovery path already establishes communication. */
-      if (self->fast_open)
+      if (GPOINTER_TO_UINT (fpi_ssm_get_data (ssm)))
         fpi_ssm_start_subsm (ssm, fpi_fte3600_special_reset_new (self));
       else
         fpi_ssm_next_state (ssm);
@@ -879,7 +882,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
                                    FP_DEVICE_ERROR_PROTO, "FW9369 image ADC calibration failed"));
           break;
         }
-      /* Opening requires an uncovered sensor. Temporal stability below only
+      /* Calibration requires an uncovered sensor. Temporal stability below only
        * checks repeatability: it cannot establish that a stationary object is
        * absent. A release event after a later capture must never retroactively
        * be treated as evidence that this initial baseline was empty. */
@@ -940,15 +943,31 @@ init_run (FpiSsm *ssm, FpDevice *dev)
 }
 
 static FpiSsm *
+new_init (FpiDeviceFte3600 *self, gboolean reset_from_sleep)
+{
+  FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), init_run, INIT_STATES,
+                                  INIT_IDLE, "FW9369 initialization");
+
+  fpi_ssm_set_data (ssm, GUINT_TO_POINTER (reset_from_sleep), NULL);
+  return ssm;
+}
+
+static FpiSsm *
 create_init (FpiDeviceFte3600 *self)
 {
-  return fpi_ssm_new_full (FP_DEVICE (self), init_run, INIT_STATES,
-                           INIT_IDLE, "FW9369 initialization");
+  return new_init (self, self->fast_open);
 }
+
+typedef struct
+{
+  gboolean wait_release;
+  guint    recoveries;
+} Capture;
 
 enum {
   CAPTURE_ARM, CAPTURE_RESTART_FDT, CAPTURE_WAIT, CAPTURE_COMMUNICATION,
   CAPTURE_EVENTS, CAPTURE_ACK, CAPTURE_CHECK,
+  CAPTURE_RECOVER, CAPTURE_RECOVER_DONE,
   CAPTURE_SCAN, CAPTURE_IMAGE, CAPTURE_IDLE, CAPTURE_REARM_RELEASE,
   CAPTURE_REARM_CHECK, CAPTURE_REARM_CLEANUP, CAPTURE_DONE, CAPTURE_STATES,
 };
@@ -958,7 +977,8 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
   Fw9369Data *data = get_data (self);
-  gboolean wait_release = GPOINTER_TO_UINT (fpi_ssm_get_data (ssm));
+  Capture *capture = fpi_ssm_get_data (ssm);
+  gboolean wait_release = capture->wait_release;
 
   g_autoptr(GError) error = NULL;
   FpiSsm *script;
@@ -1042,9 +1062,26 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
                           FTE3600_FW9369_EVENT_INVALID))
         {
           data->calibrated = FALSE;
-          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                                 FP_DEVICE_ERROR_PROTO, "FW9369 lost calibrated state (events %04x); reopen",
-                                 data->events));
+          data->release_armed = FALSE;
+          data->communication_stopped_fdt = FALSE;
+          self->armed = FALSE;
+          self->idle_verified = FALSE;
+          if (capture->recoveries == MAX_EVENT_RECOVERIES)
+            {
+              fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                                     FP_DEVICE_ERROR_PROTO,
+                                     "FW9369 events %04x persist after %u reinitializations",
+                                     data->events, capture->recoveries));
+              break;
+            }
+          capture->recoveries++;
+          fp_dbg ("FW9369 events %04x; reinitializing (%u/%u)",
+                  data->events, capture->recoveries, MAX_EVENT_RECOVERIES);
+          /* Windows query_event_status maps INVALID to the ESD path
+           * (103D3 -> 10824). Its IRQ handler waits 5 ms, then calls
+           * init_chip (2DE7C -> 2DF4A -> FED8), not merely FDT auto_start.
+           * Keep the action and its enrollment progress while recovering. */
+          fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_RECOVER, RECOVERY_SETTLE_MS);
           break;
         }
       /* Simultaneous UP and DOWN does not establish event ordering. During
@@ -1070,8 +1107,25 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
       else
         {
           fpi_device_report_finger_status (dev, FP_FINGER_STATUS_PRESENT);
-          fpi_ssm_next_state (ssm);
+          fpi_ssm_jump_to_state (ssm, CAPTURE_SCAN);
         }
+      break;
+
+    case CAPTURE_RECOVER:
+      /* This is a live IRQ recovery, not a reopen from C1. In particular,
+      * fast_open must not add its GPIO reset to the vendor recovery path.
+      * Reuse initialization, including ID, DAC and baseline validation;
+      * transfers retain their ordinary cancellation/generation checks. */
+      fpi_ssm_start_subsm (ssm, new_init (self, FALSE));
+      break;
+
+    case CAPTURE_RECOVER_DONE:
+      data->events = 0;
+      fp_dbg ("FW9369 recovery complete; FDT DAC %u, image DAC %u; resuming %s detection",
+              data->fdt_dac, data->image_dac, wait_release ? "UP" : "DOWN");
+      /* Calibration is not a finger event. A release wait still needs an
+       * unambiguous UP; capture must wait for a new DOWN before scanning. */
+      fpi_ssm_jump_to_state (ssm, CAPTURE_ARM);
       break;
 
     case CAPTURE_SCAN:
@@ -1151,20 +1205,28 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
 }
 
 static FpiSsm *
+new_capture (FpiDeviceFte3600 *self, gboolean wait_release)
+{
+  FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), capture_run, CAPTURE_STATES,
+                                  CAPTURE_IDLE, wait_release ?
+                                  "FW9369 wait for finger release" : "FW9369 capture");
+  Capture *capture = g_new0 (Capture, 1);
+
+  capture->wait_release = wait_release;
+  fpi_ssm_set_data (ssm, capture, g_free);
+  return ssm;
+}
+
+static FpiSsm *
 create_capture (FpiDeviceFte3600 *self)
 {
-  return fpi_ssm_new_full (FP_DEVICE (self), capture_run, CAPTURE_STATES,
-                           CAPTURE_IDLE, "FW9369 capture");
+  return new_capture (self, FALSE);
 }
 
 static FpiSsm *
 create_wait_release (FpiDeviceFte3600 *self)
 {
-  FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), capture_run, CAPTURE_STATES,
-                                  CAPTURE_IDLE, "FW9369 wait for finger release");
-
-  fpi_ssm_set_data (ssm, GUINT_TO_POINTER (TRUE), NULL);
-  return ssm;
+  return new_capture (self, TRUE);
 }
 
 static gboolean
