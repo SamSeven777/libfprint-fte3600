@@ -304,6 +304,9 @@ static struct
   guint                next_frame;
   guint                irq_source;
   guint8               registers[256];
+  guint                config_marker_fault;
+  guint                config_marker_reads;
+  guint                config_marker_writes;
   gboolean             claimed;
   gboolean             armed;
   gboolean             finger_ready;
@@ -1281,6 +1284,12 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     case 0x11:
       g_assert_cmpuint (transfer->len, ==, 5);
       sensor.registers[tx[2]] = tx[3];
+      if (tx[2] == 0x30)
+        {
+          sensor.config_marker_writes++;
+          if (sensor.config_marker_fault == 1)
+            sensor.registers[0x30] = 0;
+        }
       if (tx[2] == 0x47 || tx[2] == 0x76)
         {
           g_assert_cmpuint (tx[2], ==, sensor.model->mode_register);
@@ -1359,6 +1368,12 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       else
         {
           rx[4] = sensor.registers[tx[2]];
+          if (tx[2] == 0x30)
+            {
+              sensor.config_marker_reads++;
+              if (sensor.config_marker_fault == 2)
+                result = -1;
+            }
         }
       break;
 
@@ -3112,7 +3127,7 @@ test_separate_irq_transport (void)
  * no cached identity, kernel generation or firmware pathname to this process.
  * Probe and open must independently confirm it without factory/OTP writes. */
 static void
-test_medion_capture_after_boot (void)
+test_medion_capture_after_boot (gconstpointer data)
 {
   g_autoptr(GError) error = NULL;
   g_autoptr(FpImage) image = NULL;
@@ -3123,12 +3138,30 @@ test_medion_capture_after_boot (void)
   sensor.rom_family = 0x1534;
   sensor.otp = 0;
   sensor.registers[0x30] = 0xbb;
-  open_device (device);
-  image = fp_device_capture_sync (device, TRUE, NULL, &error);
-  g_assert_no_error (error);
-  assert_image_matches_model (image);
-  g_assert_true (fp_device_close_sync (device, NULL, &error));
-  g_assert_no_error (error);
+  sensor.config_marker_fault = GPOINTER_TO_UINT (data);
+  if (sensor.config_marker_fault == 2)
+    {
+      g_assert_false (fp_device_open_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_clear_error (&error);
+      g_assert_cmpuint (sensor.images, ==, 0);
+    }
+  else
+    {
+      if (sensor.config_marker_fault == 1)
+        g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
+                               "*configuration marker is 00*continuing as Windows does*");
+      open_device (device);
+      if (sensor.config_marker_fault == 1)
+        g_test_assert_expected_messages ();
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      assert_image_matches_model (image);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+    }
+  g_assert_cmpuint (sensor.config_marker_reads, ==, 1);
+  g_assert_cmpuint (sensor.config_marker_writes, ==, 1);
   g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
   g_assert_cmpuint (sensor.factory_c6_writes[0] + sensor.factory_c6_writes[1], ==, 0);
   g_assert_cmpuint (sensor.factory_info_reads[0] + sensor.factory_info_reads[1], ==, 0);
@@ -3330,7 +3363,12 @@ main (int argc, char **argv)
 
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fte3600-lifecycle/transport/separate-irq", test_separate_irq_transport);
-  g_test_add_func ("/fte3600-lifecycle/transport/medion-capture-after-boot", test_medion_capture_after_boot);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/medion-capture-after-boot",
+                        GUINT_TO_POINTER (0), test_medion_capture_after_boot);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/medion-marker-warning-captures",
+                        GUINT_TO_POINTER (1), test_medion_capture_after_boot);
+  g_test_add_data_func ("/fte3600-lifecycle/transport/medion-marker-read-failure",
+                        GUINT_TO_POINTER (2), test_medion_capture_after_boot);
   g_test_add_func ("/fte3600-lifecycle/transport/medion-rechecks-runtime", test_medion_rechecks_runtime);
   g_test_add_data_func ("/fte3600-lifecycle/transport/separate-probe-close-error",
                         GINT_TO_POINTER (TRUE), test_separate_close_failure);

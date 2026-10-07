@@ -188,7 +188,13 @@ check_geometry (Boot *boot, gboolean before_start, GError **error)
   guint16 first, second;
   Fte3600Identity observed;
 
-  if (!read_geometry (boot, &first, error) || !read_geometry (boot, &second, error))
+  if (!read_geometry (boot, &first, error))
+    return FALSE;
+  /* Explicit FT9338 startup validates geometry once after configuration.
+  * Keep the older FT9348 experiment's repeated observations separate. */
+  second = first;
+  if (boot->sensor->sensor != FTE3600_SENSOR_FT9338 &&
+      !read_geometry (boot, &second, error))
     return FALSE;
   if (first != second)
     {
@@ -281,16 +287,43 @@ start_application (Boot *boot, GError **error)
 static gboolean
 wait_idle (Boot *boot, guint attempts, GError **error)
 {
+  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
+
+  g_autoptr(GError) read_error = NULL;
+
   for (guint i = 0; i < attempts; i++)
     {
-      if (!read_register (boot, FTE3600_REG_MCU_STATUS, 2, error))
-        return FALSE;
-      if (boot->rx[FTE3600_REG_RESULT_OFFSET] == FTE3600_MCU_IDLE_HIGH &&
-          boot->rx[FTE3600_REG_RESULT_OFFSET + 1] == FTE3600_MCU_IDLE_LOW)
-        return TRUE;
-      if (i + 1 < attempts &&
+      g_clear_error (&read_error);
+      if (read_register (boot, FTE3600_REG_MCU_STATUS, 2, &read_error))
+        {
+          if (boot->rx[FTE3600_REG_RESULT_OFFSET] == FTE3600_MCU_IDLE_HIGH &&
+              boot->rx[FTE3600_REG_RESULT_OFFSET + 1] == FTE3600_MCU_IDLE_LOW)
+            return TRUE;
+        }
+      else if (!is_38 ||
+               (!g_error_matches (read_error, G_IO_ERROR, G_IO_ERROR_FAILED) &&
+                !g_error_matches (read_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) ||
+               !proceed (boot, error))
+        {
+          if (!*error)
+            g_propagate_error (error, g_steal_pointer (&read_error));
+          return FALSE;
+        }
+      else
+        {
+          report (boot, "MCU poll %u failed: %s", i + 1, read_error->message);
+        }
+      /* Windows 3695c-36981 delays after every unsuccessful poll, including
+      * the twentieth. Session loss and cancellation never enter a retry. */
+      if ((is_38 || i + 1 < attempts) &&
           (!proceed (boot, error) || !delay (boot, FTE3600_INIT_MCU_POLL_MS, error)))
         return FALSE;
+    }
+  if (read_error)
+    {
+      g_propagate_prefixed_error (error, g_steal_pointer (&read_error),
+                                  "Application did not become idle in 20 polls: ");
+      return FALSE;
     }
   g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
                        "Application did not confirm MCU idle a5 5a");
@@ -333,13 +366,12 @@ configure_38 (Boot *boot, GError **error)
     }
   if (!read_register (boot, FTE3600_REG_CONFIG_MARKER, 1, error))
     return FALSE;
-  /* Same explicit diagnostic assertion as --test-ft9338. */
+  /* Windows 36b6e-36bc2 logs a marker mismatch and returns success. A failed
+  * transaction above is still an error; a successful non-BB reply is not. */
   if (boot->rx[FTE3600_REG_RESULT_OFFSET] != FTE3600_CONFIGURED_MARKER)
-    {
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                           "FT9338 MCU configuration marker is not bb");
-      return FALSE;
-    }
+    report (boot, "WARNING: MCU configuration marker is %02x, expected bb; "
+                  "continuing as Windows does",
+            boot->rx[FTE3600_REG_RESULT_OFFSET]);
   return TRUE;
 }
 
@@ -348,8 +380,10 @@ run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
   gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
 
-  report (boot, "explicit %s RAM experiment; checking initial application geometry", boot->sensor->name);
-  if (!check_geometry (boot, TRUE, error) || !proceed (boot, error))
+  report (boot, "explicit %s RAM experiment", boot->sensor->name);
+  /* FT9338 is explicitly selected: enter the vendor download sequence without
+   * application-register probes against a sensor still running its boot ROM. */
+  if ((!is_38 && !check_geometry (boot, TRUE, error)) || !proceed (boot, error))
     return FALSE;
   boot->touched = TRUE;
   report (boot, "boot entry: reset physical H10/L20/H followed by 55 aa");
@@ -366,7 +400,7 @@ run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
                       is_38 ? FTE3600_FT9338_FW_VERSION : FTE3600_A8_FW_VERSION, error) ||
       !check_version (boot, FTE3600_REG_AGC_VERSION,
                       is_38 ? FTE3600_FT9338_AGC_VERSION : FTE3600_A8_AGC_VERSION, error) ||
-      !wait_idle (boot, 1, error))
+      (!is_38 && !wait_idle (boot, 1, error)))
     return FALSE;
   return proceed (boot, error);
 }

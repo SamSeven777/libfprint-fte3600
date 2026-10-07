@@ -8,9 +8,9 @@
  * This reproduces Windows factory selection, including its documented FT9338
  * defaults; it must not be used as the automatic driver's identity policy.
  *
- * Success requires full RAM readback, idle MCU, configuration marker BB,
- * geometry 58/58 and firmware/AGC versions 40/10. These final checks are stricter
- * diagnostic assertions than the Windows configuration routine's return code.
+ * Success requires full RAM readback, idle MCU, successful MCU configuration
+ * transactions, geometry 58/58 and firmware/AGC versions 40/10. A non-BB
+ * configuration marker is reported without failing, as in Windows.
  * No image is captured. Failure leaves result zeroed, disables an outstanding
  * OTP read if necessary, and releases reset without another startup attempt.
  */

@@ -580,7 +580,12 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
                                  value));
           return;
         }
-      fpi_ssm_next_state (ssm);
+      /* FT9338 always configures the MCU; a preliminary marker read cannot
+       * skip those writes and is absent from its vendor configuration helper. */
+      if (self->sensor->sensor == FTE3600_SENSOR_FT9338)
+        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_WRITE_CONFIG_01);
+      else
+        fpi_ssm_next_state (ssm);
       return;
 
     case FTE3600_INIT_READ_CONFIG_MARKER:
@@ -626,12 +631,22 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       value = fpi_fte3600_read_result_byte (self);
       if (value != FTE3600_CONFIGURED_MARKER)
         {
-          fpi_ssm_mark_failed (
-            ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO,
-              "FTE3600 legacy MCU configuration verification failed (%02x)",
-              value));
-          return;
+          if (self->sensor->sensor == FTE3600_SENSOR_FT9338)
+            {
+              /* FT9338 InitMcuConfig (Windows 36b6e-36bc2) reports the
+               * mismatch without preventing subsequent sensor operation. */
+              fp_warn ("FT9338 MCU configuration marker is %02x, expected bb; "
+                       "continuing as Windows does", value);
+            }
+          else
+            {
+              fpi_ssm_mark_failed (
+                ssm, fpi_device_error_new_msg (
+                  FP_DEVICE_ERROR_PROTO,
+                  "FTE3600 legacy MCU configuration verification failed (%02x)",
+                  value));
+              return;
+            }
         }
       if (config->config_once)
         fpi_ssm_next_state (ssm);

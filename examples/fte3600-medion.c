@@ -563,10 +563,12 @@ out:
       g_print ("BOOT PASS: %s firmware started; runtime geometry and versions verified; "
                "%shost transport restored. Capture has not been tested.\n",
                fpi_fte3600_sensor_get (boot_sensor)->name,
-               boot_sensor == FTE3600_SENSOR_FT9338 ? "MCU configuration verified; " : "");
+               boot_sensor == FTE3600_SENSOR_FT9338 ?
+               "MCU configuration sequence completed (see marker readback above); " : "");
     }
   if (status == EXIT_SUCCESS && test_ft9338)
-    g_print ("FT9338 TEST PASS: ROM selection, complete RAM readback, application startup and MCU configuration verified; "
+    g_print ("FT9338 TEST PASS: ROM selection, complete RAM readback and application startup verified; "
+             "MCU configuration sequence completed (see marker readback above); "
              "host transport restored. Capture has not been tested.\n");
   return status;
 }

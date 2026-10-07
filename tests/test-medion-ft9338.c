@@ -521,9 +521,6 @@ test_runtime_validation (Fixture *f, gconstpointer value)
 
   switch (GPOINTER_TO_UINT (value))
     {
-    case 0: f->config_marker = 0;
-      break;
-
     case 1: f->geometry = 0;
       break;
 
@@ -540,6 +537,18 @@ test_runtime_validation (Fixture *f, gconstpointer value)
   g_assert_cmpuint (f->uploads, ==, 1);
   g_assert_cmpuint (f->config_writes, ==, 3);
   g_assert_cmpuint (f->syncs, ==, 2);
+}
+
+static void
+test_marker_warning (Fixture *f, gconstpointer unused)
+{
+  (void) unused;
+  f->config_marker = 0;
+  run_success (f);
+  g_assert_nonnull (strstr (f->reports->str, "WARNING: MCU configuration marker is 00"));
+  g_assert_nonnull (strstr (f->reports->str, "continuing as Windows does"));
+  g_assert_null (strstr (f->reports->str, "configuration validated"));
+  g_assert_cmpuint (f->status_reads, ==, 1);
 }
 
 static void
@@ -664,7 +673,7 @@ main (int argc, char **argv)
   ADD ("callback-missing-error", 2, test_otp_cleanup);
   ADD ("failed-start-assertion-releases", 0, test_start_cleanup);
   ADD ("cancel-start-pulse-completes", 1, test_start_cleanup);
-  ADD ("configuration-marker-validation", 0, test_runtime_validation);
+  ADD ("configuration-marker-warning", 0, test_marker_warning);
   ADD ("geometry-validation", 1, test_runtime_validation);
   ADD ("firmware-version-validation", 2, test_runtime_validation);
   ADD ("agc-version-validation", 3, test_runtime_validation);

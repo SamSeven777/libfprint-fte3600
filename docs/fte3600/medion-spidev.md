@@ -98,8 +98,11 @@ application with the 80 ms startup wait and polls for MCU idle. It then performs
 the vendor MCU writes `01=01`, `41=0f`, `30=bb`, with 1 ms waits, reads register
 `30`, and checks the runtime geometry and versions. It does not add an
 FT9361/A8 `70` reset pair.
-Runtime, version and final register checks are diagnostic acceptance criteria;
-the test does not claim identical Windows error handling.
+Runtime geometry and version checks are diagnostic acceptance criteria. A
+successful register `30` read returning something other than `bb` is reported
+as a warning and allowed to continue, matching Windows. A failed configuration
+transaction still stops the test. `PASS` does not imply a `bb` marker: include
+the marker readback and any warning when sharing the output.
 
 Share the text output, including the ROM/OTP selection and
 `FT9338 TEST PASS` or `FT9338 TEST FAIL`, plus the final restoration result.
@@ -251,13 +254,14 @@ It is mutually exclusive with all other stages.
 
 `--boot ft9338` explicitly selects the FT9338 RAM startup sequence. It is a
 manual candidate experiment, not the Windows automatic identification flow:
-it permits an initial `0x0000` application response without prior OTP
-identification. Windows's B38 identification does not treat OTP `00` as
+it starts the selected download sequence without pre-boot application queries
+or prior OTP identification. Windows's B38 identification does not treat OTP `00` as
 permission to load FT9338 firmware. Do not interpret this command as a fix for
 an unsuccessful identity check.
 
-The tool rejects an observed nonempty application identity that contradicts the
-selected profile. A failed FT9338 boot does not automatically retry FT9348.
+After FT9338 startup, the tool checks the runtime geometry once against the
+selected profile. FT9348 retains repeated pre-boot and post-boot geometry
+checks. A failed FT9338 boot does not automatically retry FT9348.
 If deliberately testing the FT9338 candidate, download and extract its payload
 from the pinned Microsoft Update Catalog package and run the separate test:
 
@@ -479,15 +483,29 @@ selects FT9536 and is rejected, and `ff` takes the vendor FT9338 fallback.
 The logs distinguish a default selection from positive chip evidence. A
 selected profile is not necessarily an independently confirmed silicon ID.
 
-The test's explicit runtime geometry, firmware/AGC version and final MCU-register
-checks make the result reviewable. They are diagnostic assertions, not a claim
-that every failure branch matches Windows. In particular, the test requires
-the final register `30` readback to equal `bb`; the audited Windows routine
-logs a mismatch and returns success. A passing test establishes these
-startup and configuration observations, not image capture or authentication.
+The test's explicit runtime geometry and firmware/AGC version checks make the
+result reviewable. They remain diagnostic assertions. Both startup commands
+and the FT9338 capture backend follow the Windows `36b6e`-`36bc2` behavior for
+register `30`: log a successful non-`bb` reply and continue. Failed configuration
+transactions still fail. Success messages describe completion of the MCU
+configuration sequence, not validation of its marker. A passing startup test
+does not establish image capture or authentication.
 The `--boot ft9338` action remains a separate manual experiment with explicit
 chip selection. It now includes the same three MCU writes, waits and marker
 check before runtime validation.
+
+Both FT9338 startup commands retry transient MCU status-read failures at 2 ms
+intervals within the same 20-read budget as busy replies (`3695c`-`36981`). The
+twentieth failed poll also waits 2 ms, as in Windows. Cancellation, a missing
+or closed device, and an invalidated session terminate immediately. Reads do
+not restart or re-upload the firmware. Manual FT9338 startup no longer probes
+application geometry before reset, repeats geometry after startup, or adds a
+final idle read after its version checks. FT9348 behavior is unchanged.
+
+The capture backend also omits the preliminary FT9338 marker read: that chip
+always performs the three configuration writes, so reading the marker first
+cannot skip any work. Its existing libfprint cancellation, resource checks and
+capture timeouts remain host lifecycle policies, not Windows wire behavior.
 
 The standalone reset-and-sync operation avoids intervening diagnostic checks
 and log output. The shared asynchronous driver now prepares and validates the
@@ -498,6 +516,18 @@ measure GPIO/SPI timing on the Medion. Physical startup and capture still need
 an actual device run.
 
 ## Local validation, 2026-10-06
+
+The FT9338 error-handling correction after `ee59ea3` passed all 35 selected
+suites in each authentication configuration, with warnings as errors. The
+disabled configuration ran four focused suites followed by the remaining 31;
+the enabled configuration ran all 35 together. New cases cover continuation
+after a non-`bb` marker in both startup engines and a subsequent real driver
+capture using synthetic I/O, failure of the marker-read transaction itself,
+transient status-read errors, recovery on the twentieth poll, exhaustion,
+cancellation and session/device loss. Exact command traces verify removal of
+the manual FT9338 pre-boot queries, repeated geometry and final idle read;
+FT9348 retains its prior sequence. These results are software validation,
+not an E3224 hardware result.
 
 The follow-up merges main through `395425c` and covers the issue #1 sequence:
 `--test-ft9338`, explicit `--boot ft9338` if needed, then a separate `--capture`.

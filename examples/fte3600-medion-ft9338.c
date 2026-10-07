@@ -448,15 +448,11 @@ configure_and_validate (Test *test, Fte3600Identity *result, GError **error)
       !app_read (test, FTE3600_REG_CONFIG_MARKER, &marker, 1, error))
     return FALSE;
   report (test, "MCU configuration marker = %02x", marker);
-  /* Windows 36a30 logs a non-BB marker but returns success. Our diagnostic
-   * reports failure instead; it sends no corrective writes or retry sequence. */
+  /* Windows 36b6e-36bc2 logs a non-BB marker and returns success. Do not add
+   * a startup gate, corrective writes or a retry sequence for this reply. */
   if (marker != FTE3600_CONFIGURED_MARKER)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                   "Hardware validation failed: configuration marker %02x, expected bb",
-                   marker);
-      return FALSE;
-    }
+    report (test, "WARNING: MCU configuration marker is %02x, expected bb; "
+                  "continuing as Windows does", marker);
 
   report (test, "read-only FT9338 runtime validation");
   if (!app_read (test, FTE3600_REG_SENSOR_ID_HIGH, geometry, 1, error) ||
@@ -546,6 +542,7 @@ fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
       return FALSE;
     }
   *result = verified;
-  report (&test, "FT9338 RAM startup and MCU configuration validated; no image captured");
+  report (&test, "FT9338 RAM startup validated; MCU configuration sequence completed "
+                 "(see marker readback above); no image captured");
   return TRUE;
 }

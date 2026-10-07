@@ -9,10 +9,12 @@
  * the selected chip's catalog size/SHA-256 loader before calling. This engine
  * also checks size/capacity before I/O, but length alone is not authentication.
  *
- * This explicit experiment can start from repeated empty application replies.
+ * FT9338 starts the selected download sequence without pre-boot application
+ * queries. FT9348 retains its repeated pre-boot geometry checks.
  * It never tries a different chip, programs flash, or modifies automatic driver
- * identity/firmware policy. TRUE requires application idle, repeated matching
- * geometry, and matching firmware/AGC versions after RAM startup. FALSE zeroes
+ * identity/firmware policy. TRUE requires application idle, matching geometry
+ * and firmware/AGC versions after RAM startup. FT9338 configuration-marker
+ * mismatches are reported without failing, as in Windows. FALSE zeroes
  * result and preserves the first failure, including any cleanup failure.
  * A successful result describes runtime geometry, not immutable silicon ID.
  */
