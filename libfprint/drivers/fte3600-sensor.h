@@ -72,6 +72,7 @@ typedef struct
   Fte3600SensorCapability capabilities;
   const Fte3600Firmware  *firmware;
   gsize                   firmware_count;
+  guint                   restart_wait_ms;
 } Fte3600SensorDescriptor;
 
 typedef enum {

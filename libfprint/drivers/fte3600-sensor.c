@@ -64,6 +64,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE | FTE3600_SENSOR_CAP_FIRMWARE_LOAD,
     .firmware = firmware_ft9338,
     .firmware_count = G_N_ELEMENTS (firmware_ft9338),
+    .restart_wait_ms = 80,
   },
   {
     .sensor = FTE3600_SENSOR_FT9348,
@@ -74,6 +75,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE | FTE3600_SENSOR_CAP_FIRMWARE_LOAD,
     .firmware = firmware_ft9348,
     .firmware_count = G_N_ELEMENTS (firmware_ft9348),
+    .restart_wait_ms = 80,
   },
   {
     .sensor = FTE3600_SENSOR_FT9361,
@@ -84,6 +86,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE | FTE3600_SENSOR_CAP_FIRMWARE_LOAD,
     .firmware = firmware_ft9361,
     .firmware_count = G_N_ELEMENTS (firmware_ft9361),
+    .restart_wait_ms = 80,
   },
   {
     .sensor = FTE3600_SENSOR_FT9536,
@@ -94,6 +97,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE | FTE3600_SENSOR_CAP_FIRMWARE_LOAD,
     .firmware = firmware_ft9536,
     .firmware_count = G_N_ELEMENTS (firmware_ft9536),
+    .restart_wait_ms = 180,
   },
   {
     .sensor = FTE3600_SENSOR_FT9365,
@@ -102,6 +106,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .width = 64, .height = 80,
     .image_ppmm = 552.0 / 25.4, /* Manufacturer's Simplified Chinese nominal DPI. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
+    .restart_wait_ms = 0,
   },
   {
     .sensor = FTE3600_SENSOR_FT9368,
@@ -112,6 +117,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
     .firmware = firmware_ft9368,
     .firmware_count = G_N_ELEMENTS (firmware_ft9368),
+    .restart_wait_ms = 80,
   },
   {
     .sensor = FTE3600_SENSOR_FT9369,
@@ -120,6 +126,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .width = 64, .height = 80,
     .image_ppmm = 0.0, /* Physical pixel pitch has not been established. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
+    .restart_wait_ms = 80,
   },
   {
     .sensor = FTE3600_SENSOR_FT9769,
@@ -128,6 +135,7 @@ static const Fte3600SensorDescriptor sensors[] = {
     .width = 40, .height = 196,
     .image_ppmm = 564.0 / 25.4, /* Manufacturer's Simplified Chinese nominal DPI. */
     .capabilities = FTE3600_SENSOR_CAP_CAPTURE,
+    .restart_wait_ms = 0,
   },
 };
 

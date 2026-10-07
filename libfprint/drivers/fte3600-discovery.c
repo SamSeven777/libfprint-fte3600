@@ -211,6 +211,13 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
     case DISCOVER_CHECK_FAMILY:
       self->family = ((guint16) self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET] << 8) |
                      self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET + 1];
+      if (self->family == 0x1534)
+        {
+          fp_dbg ("FTE3600 Boot-B38 ROM family %04x detected; branching to B38 identification",
+                  self->family);
+          fpi_ssm_jump_to_state (ssm, DISCOVER_IDENTIFY_38);
+          return;
+        }
       if (self->family != 0x2b50 && self->family != 0x95a8 && self->family != 0x23dd)
         fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                                FP_DEVICE_ERROR_NOT_SUPPORTED, "Unsupported FTE3600 ROM family %04x", self->family));

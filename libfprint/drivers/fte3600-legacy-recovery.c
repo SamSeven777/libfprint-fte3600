@@ -114,8 +114,10 @@ boot38_write (FpiSsm *ssm, guint8 reg, guint8 value)
 }
 
 static gboolean
-boot38_runtime_valid (const Fte3600Identity *identity)
+boot38_runtime_valid (const FpiDeviceFte3600 *self, const Fte3600Identity *identity)
 {
+  if (self->family == 0x1534)
+    return TRUE;
   return identity->evidence == FTE3600_IDENTITY_RUNTIME_GEOMETRY &&
          ((identity->sensor == FTE3600_SENSOR_FT9338 && identity->response == 0x5858) ||
           (identity->sensor == FTE3600_SENSOR_FT9536 && identity->response == 0x4080));
@@ -136,7 +138,7 @@ identify_handler (FpiSsm *ssm, FpDevice *dev)
     {
     case ID_VALIDATE:
       if (data->boot_a ? self->discovery_rx[FTE3600_BOOT_PROBE_RESULT_OFFSET] != FTE3600_BOOT_A_MARKER :
-          !boot38_runtime_valid (&data->runtime))
+          !boot38_runtime_valid (self, &data->runtime))
         boot38_fail (ssm, "FT9338-family boot identification lacks a positive current-session context");
       else
         fpi_ssm_next_state (ssm);
@@ -219,9 +221,9 @@ identify_handler (FpiSsm *ssm, FpDevice *dev)
       data->candidate = data->boot_a ? fpi_fte3600_identify_boot_a (data->otp) :
                         fpi_fte3600_identify_boot_b38_spi (data->otp);
       if (!data->boot_a)
-        data->candidate.response = data->runtime.response;
+        data->candidate.response = (self->family == 0x1534) ? 0x1534 : data->runtime.response;
       if (data->candidate.sensor == FTE3600_SENSOR_UNKNOWN ||
-          (!data->boot_a && data->candidate.sensor != data->runtime.sensor) ||
+          (!data->boot_a && self->family != 0x1534 && data->candidate.sensor != data->runtime.sensor) ||
           (data->runtime.sensor != FTE3600_SENSOR_UNKNOWN && data->runtime.sensor != data->candidate.sensor) ||
           (self->probed_sensor != FTE3600_SENSOR_UNKNOWN && self->probed_sensor != data->candidate.sensor))
         fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
@@ -273,8 +275,10 @@ recovery_load (FpiDeviceFte3600 *self, Recovery *data, GError **error)
            identity->evidence == FTE3600_IDENTITY_ROM_BOOT_A && identity->response == 2) ||
           (identity->evidence == FTE3600_IDENTITY_ROM_BOOT_B38_SPI_OTP &&
            fpi_fte3600_identify_boot_b38_spi (identity->otp).sensor == identity->sensor &&
-           ((identity->sensor == FTE3600_SENSOR_FT9338 && identity->response == 0x5858) ||
-            (identity->sensor == FTE3600_SENSOR_FT9536 && identity->response == 0x4080)));
+           ((identity->sensor == FTE3600_SENSOR_FT9338 &&
+             (identity->response == 0x5858 || identity->response == 0x1534)) ||
+            (identity->sensor == FTE3600_SENSOR_FT9536 &&
+             (identity->response == 0x4080 || identity->response == 0x1534))));
   if (!valid || !self->sensor || self->sensor->sensor != identity->sensor ||
       self->identity.sensor != identity->sensor ||
       self->identity.evidence != identity->evidence ||
