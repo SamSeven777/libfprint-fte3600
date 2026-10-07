@@ -27,11 +27,22 @@ G_DECLARE_FINAL_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FPI,
  * The caller owns transport_data through the device's complete lifetime. */
 typedef struct
 {
-  gboolean (*open) (FpiDeviceFte3600 *self, GError **error);
-  gboolean (*close) (FpiDeviceFte3600 *self, GError **error);
-  gboolean (*check) (FpiDeviceFte3600 *self, GError **error);
-  gboolean (*set_reset) (FpiDeviceFte3600 *self, gboolean asserted, GError **error);
-  gboolean (*get_events) (FpiDeviceFte3600 *self, guint32 *events, GError **error);
+  gboolean (*open) (FpiDeviceFte3600 *self,
+                    GError          **error);
+  gboolean (*close) (FpiDeviceFte3600 *self,
+                     GError          **error);
+  gboolean (*check) (FpiDeviceFte3600 *self,
+                     GError          **error);
+  gboolean (*set_reset) (FpiDeviceFte3600 *self,
+                         gboolean          asserted,
+                         GError          **error);
+  gboolean (*get_events) (FpiDeviceFte3600 *self,
+                          guint32          *events,
+                          GError          **error);
+  /* Standalone diagnostics may have booted RAM in a preceding command.
+   * Read and repeat the live application identity before factory negotiation;
+   * this never caches an identity across a transport close or power event. */
+  gboolean probe_runtime_first;
 } Fte3600TransportOps;
 
 struct _FpiDeviceFte3600
@@ -41,7 +52,7 @@ struct _FpiDeviceFte3600
   gint                           spi_fd;
   gint                           reset_fd;
   gint                           irq_fd;
-  const Fte3600TransportOps      *transport_ops;
+  const Fte3600TransportOps     *transport_ops;
   gpointer                       transport_data;
   gboolean                       spi_configured;
   gboolean                       spi_configuration_invalid;
@@ -69,6 +80,12 @@ struct _FpiDeviceFte3600
   Fte3600Identity                identity;
   Fte3600Identity                rom_identity;
   Fte3600Sensor                  probed_sensor;
+  Fte3600Identity                cached_identity;
+  guint64                        cached_generation;
+  gchar                         *cached_glue_path;
+  gboolean                       cached_identity_valid;
+  gboolean                       cached_cs_high;
+  gboolean                       fast_open;
   gsize                          image_size;
   gsize                          capture_frame_size;
   gboolean                       discovery_boot_only;
@@ -167,6 +184,7 @@ void fpi_fte3600_submit_reg_read (FpiSsm  *ssm,
                                   gboolean cancellable);
 guint8 fpi_fte3600_read_result_byte (FpiDeviceFte3600 *self);
 gboolean fpi_fte3600_mcu_is_idle (FpiDeviceFte3600 *self);
+void fpi_fte3600_release_reset_and_sync (FpiSsm *ssm);
 void fpi_fte3600_set_hardware_reset (FpiSsm           *ssm,
                                      FpiDeviceFte3600 *self,
                                      gboolean          asserted);

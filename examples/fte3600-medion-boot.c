@@ -313,6 +313,37 @@ check_version (Boot *boot, guint8 reg, guint8 expected, GError **error)
 }
 
 static gboolean
+configure_38 (Boot *boot, GError **error)
+{
+  const guint8 registers[] = { FTE3600_REG_CONFIG_01, FTE3600_REG_CONFIG_41,
+                               FTE3600_REG_CONFIG_MARKER };
+  const guint8 values[] = { FTE3600_CONFIG_01_ENABLE, FTE3600_CONFIG_41_VALUE,
+                            FTE3600_CONFIGURED_MARKER };
+
+  /* Windows FT9338 InitMcuConfig, RVA 36a30, immediately after RAM startup.
+   * Keep this in the manual path too: BOOT PASS includes MCU configuration. */
+  for (guint i = 0; i < G_N_ELEMENTS (registers); i++)
+    {
+      gsize size = fpi_fte3600_build_app_write (boot->tx, boot->capacity,
+                                                registers[i], values[i], error);
+
+      if (!size || !exchange (boot, size, error) ||
+          !delay (boot, FTE3600_38_CONFIG_DELAY_MS, error))
+        return FALSE;
+    }
+  if (!read_register (boot, FTE3600_REG_CONFIG_MARKER, 1, error))
+    return FALSE;
+  /* Same explicit diagnostic assertion as --test-ft9338. */
+  if (boot->rx[FTE3600_REG_RESULT_OFFSET] != FTE3600_CONFIGURED_MARKER)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                           "FT9338 MCU configuration marker is not bb");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
 run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
   gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
@@ -329,6 +360,7 @@ run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
       (is_38 && !verify_38_readback (boot, firmware, length, error)) ||
       !start_application (boot, error) ||
       !wait_idle (boot, FTE3600_INIT_MCU_MAX_ATTEMPTS, error) ||
+      (is_38 && !configure_38 (boot, error)) ||
       !check_geometry (boot, FALSE, error) ||
       !check_version (boot, FTE3600_REG_FW_VERSION,
                       is_38 ? FTE3600_FT9338_FW_VERSION : FTE3600_A8_FW_VERSION, error) ||

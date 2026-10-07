@@ -44,6 +44,14 @@ typedef struct _FpiSsm         FpiSsm;
 typedef gboolean (*FpiSpiTransferGuard)(FpDevice *device,
                                         GError  **error);
 
+/* Runs in the worker after validation and the pre-transfer guard, immediately
+ * before a single full-duplex message. Useful for a GPIO release that must
+ * precede the first SPI clock. Do not call main-context device methods here.
+ * A failed preparation suppresses the message; normal completion and the
+ * post-transfer guard still apply. The device must outlive the transfer. */
+typedef gboolean (*FpiSpiTransferPrepare)(FpDevice *device,
+                                          GError  **error);
+
 typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
                                        FpDevice       *dev,
                                        gpointer        user_data,
@@ -87,6 +95,7 @@ struct _FpiSpiTransfer
   gpointer               user_data;
   FpiSpiTransferCallback callback;
   FpiSpiTransferGuard    guard;
+  FpiSpiTransferPrepare  prepare;
 
   /* Data free function */
   GDestroyNotify free_buffer_wr;
@@ -131,6 +140,9 @@ void               fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
 
 void               fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
                                                    gboolean        sensitive);
+
+void               fpi_spi_transfer_set_prepare (FpiSpiTransfer       *transfer,
+                                                 FpiSpiTransferPrepare prepare);
 
 void               fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
                                             GCancellable          *cancellable,

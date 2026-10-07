@@ -31,8 +31,6 @@
 #include <fpi-device.h>
 #include "fte3600-protocol.h"
 
-#define FTE3600_SPI_SPEED_HZ 1000000U
-
 #define FT9361_IMAGE_WIDTH 64
 #define FT9361_IMAGE_HEIGHT 80
 #define FT9361_IMAGE_SIZE (FT9361_IMAGE_WIDTH * FT9361_IMAGE_HEIGHT)

@@ -29,10 +29,10 @@ fpi_ipa_projection_coefficient (guint row, guint column)
 static void
 ipa_secure_clear (gpointer data, gsize size)
 {
-  volatile guint8 *bytes = data;
+  if (data == NULL || size == 0)
+    return;
 
-  while (size-- > 0)
-    *bytes++ = 0;
+  explicit_bzero (data, size);
 }
 
 typedef struct
@@ -103,7 +103,6 @@ fpi_ipa_validate_feature_set (const FpiIpaFeatureSet *features)
 }
 
 static const gfloat probes_q[8] = { 6.00f, 0.00f, -6.00f, 0.00f, 0.00f, 6.00f, 0.00f, -6.00f };
-static const gfloat probes_k[8] = { 6.00f, 0.00f, -6.00f, 0.00f, 0.00f, 6.00f, 0.00f, -6.00f };
 
 static inline void
 normalize_desc (gfloat *v, int dim)
@@ -150,30 +149,28 @@ ipa_forward_attention (FpiIpaFeatureSet *set)
 
       for (int d = 0; d < FPI_IPA_DESC_DIM; d++)
         {
-          gfloat sum_q = 0.0f, sum_k = 0.0f, sum_v = 0.0f;
+          gfloat sum = 0.0f;
           for (int k = 0; k < FPI_IPA_DESC_DIM; k++)
             {
               const gfloat coefficient = fpi_ipa_projection_coefficient (d, k);
-              sum_q += desc[k] * coefficient;
-              sum_k += desc[k] * coefficient;
-              sum_v += desc[k] * coefficient;
+              sum += desc[k] * coefficient;
             }
-          Q[i][d] = sum_q;
-          K[i][d] = sum_k;
-          V[i][d] = sum_v;
+          Q[i][d] = sum;
+          K[i][d] = sum;
+          V[i][d] = sum;
         }
 
       for (int p = 0; p < FPI_IPA_NUM_PROBES; p++)
         {
           gfloat pq_x = probes_q[p * 2];
           gfloat pq_y = probes_q[p * 2 + 1];
-          gx_q[i][p] = xi + cos_t * pq_x - sin_t * pq_y;
-          gy_q[i][p] = yi + sin_t * pq_x + cos_t * pq_y;
+          gfloat proj_x = xi + cos_t * pq_x - sin_t * pq_y;
+          gfloat proj_y = yi + sin_t * pq_x + cos_t * pq_y;
 
-          gfloat pk_x = probes_k[p * 2];
-          gfloat pk_y = probes_k[p * 2 + 1];
-          gx_k[i][p] = xi + cos_t * pk_x - sin_t * pk_y;
-          gy_k[i][p] = yi + sin_t * pk_x + cos_t * pk_y;
+          gx_q[i][p] = proj_x;
+          gy_q[i][p] = proj_y;
+          gx_k[i][p] = proj_x;
+          gy_k[i][p] = proj_y;
         }
     }
 

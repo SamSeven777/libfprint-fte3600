@@ -20,24 +20,26 @@
 #define MEDION_IRQ_OFFSET 0U
 #define MEDION_EVENT_BATCH 16U
 #define MEDION_EVENT_LIMIT 256U
+/* The recorded E3224 SPI ACPI resource permits 1 MHz. */
+#define MEDION_SPI_SPEED_HZ 1000000U
 
 typedef struct
 {
-  gchar *spi_path;
-  gchar *reset_gpiochip;
-  gchar *irq_gpiochip;
+  gchar   *spi_path;
+  gchar   *reset_gpiochip;
+  gchar   *irq_gpiochip;
   gboolean skip_irq;
-  gint restore_fd;
-  gint reset_fd;
-  gint irq_fd;
-  guint32 original_speed;
-  guint32 configured_speed;
-  guint8 original_bits;
+  gint     restore_fd;
+  gint     reset_fd;
+  gint     irq_fd;
+  guint32  original_speed;
+  guint32  configured_speed;
+  guint8   original_bits;
   gboolean restore_parameters;
   gboolean configured;
-  guint32 event_seqno;
-  guint32 line_seqno;
-  GError *cleanup_error;
+  guint32  event_seqno;
+  guint32  line_seqno;
+  GError  *cleanup_error;
 } MedionTransport;
 
 static const Fte3600TransportOps medion_ops;
@@ -250,8 +252,8 @@ configure (FpiDeviceFte3600 *self, GError **error)
     }
   if (!g_file_get_contents ("/sys/module/spidev/parameters/bufsiz", &buffer_text, NULL, error) ||
       !g_ascii_string_to_unsigned (g_strstrip (buffer_text), 10,
-                                  FTE3600_COMMAND_MAX_SIZE, G_MAXUINT32,
-                                  &buffer_size, error))
+                                   FTE3600_COMMAND_MAX_SIZE, G_MAXUINT32,
+                                   &buffer_size, error))
     return FALSE;
   data->restore_fd = fcntl (self->spi_fd, F_DUPFD_CLOEXEC, 0);
   if (data->restore_fd < 0)
@@ -269,7 +271,7 @@ configure (FpiDeviceFte3600 *self, GError **error)
                            "Medion diagnostic requires existing MODE0 without a reported CS_HIGH flag and a nonzero SPI speed; CS polarity is never changed");
       goto fail;
     }
-  speed = MIN (data->original_speed, FTE3600_SPI_SPEED_HZ);
+  speed = MIN (data->original_speed, MEDION_SPI_SPEED_HZ);
   /* No transactions have been issued. Even a failed setup ioctl may have
    * reached the controller, so schedule restoration before making the call. */
   data->restore_parameters = TRUE;
@@ -282,7 +284,7 @@ configure (FpiDeviceFte3600 *self, GError **error)
       system_error (error, "Cannot configure diagnostic SPI parameters");
       goto fail;
     }
-  if (mode != SPI_MODE_0 || bits != 8 || !speed || speed > FTE3600_SPI_SPEED_HZ)
+  if (mode != SPI_MODE_0 || bits != 8 || !speed || speed > MEDION_SPI_SPEED_HZ)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                            "SPI configuration readback does not satisfy diagnostic limits");
@@ -304,8 +306,8 @@ configure (FpiDeviceFte3600 *self, GError **error)
   self->irq_fd = data->irq_fd;
   g_print ("Medion diagnostic transport: mode=0x%08x bits=%u configured_speed_limit_hz=%u "
            "spidev_bufsiz=%" G_GUINT64_FORMAT " max_transfer=%u "
-           "reset=%s:39 active_low logical0=physical_high "
-           "irq=%s:0 %s\n",
+                                              "reset=%s:39 active_low logical0=physical_high "
+                                              "irq=%s:0 %s\n",
            mode, bits, speed, buffer_size, self->max_transfer,
            data->reset_gpiochip, data->irq_gpiochip,
            data->skip_irq ? "not_requested (synchronous diagnostic)" : "active_high rising");
@@ -490,12 +492,13 @@ static const Fte3600TransportOps medion_ops = {
   .check = check,
   .set_reset = set_reset,
   .get_events = get_events,
+  .probe_runtime_first = TRUE,
 };
 
 gboolean
-fte3600_medion_transport_attach (FpiDeviceFte3600                    *self,
-                                const Fte3600MedionTransportConfig *config,
-                                GError                           **error)
+fte3600_medion_transport_attach (FpiDeviceFte3600                   *self,
+                                 const Fte3600MedionTransportConfig *config,
+                                 GError                            **error)
 {
   MedionTransport *data;
 

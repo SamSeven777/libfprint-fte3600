@@ -9,6 +9,8 @@ G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE)
 
 static struct
 {
+  guint         mode_reads, mode_failures;
+  gboolean      mode_io_error;
   GCancellable *cancellable;
   guint16       id;
   guint16       registers[0x2000];
@@ -175,6 +177,12 @@ emulate (FpiSpiTransfer *transfer)
       g_assert_cmphex (tx[4], ==, 0);
       g_assert_nonnull (rx);
       rx[4] = mock.sfr[tx[2]];
+      if (tx[2] == 0xc6)
+        {
+          mock.mode_reads++;
+          if (mock.mode_reads <= mock.mode_failures)
+            rx[4] = 0;
+        }
       if (tx[2] == 0xfe && mock.reject_pad_voltage)
         rx[4] = 0xff;
       return;
@@ -250,11 +258,19 @@ emulate (FpiSpiTransfer *transfer)
           g_assert_cmpuint (index, <, mock.sequence_count);
           switch (mock.sequence[index])
             {
-            case 0: signal = 3472; break;
-            case 1: signal = 3264 + (sample_index % 16) * 24; break;
+            case 0: signal = 3472;
+              break;
+
+            case 1: signal = 3264 + (sample_index % 16) * 24;
+              break;
+
             /* Low range alone or low gradient alone must not prove empty. */
-            case 2: signal = 3432 + (sample_index % 2) * 80; break;
-            case 3: signal = 3344 + (sample_index % mock.width) * 4; break;
+            case 2: signal = 3432 + (sample_index % 2) * 80;
+              break;
+
+            case 3: signal = 3344 + (sample_index % mock.width) * 4;
+              break;
+
             default: g_assert_not_reached ();
             }
         }
@@ -273,7 +289,7 @@ emulate (FpiSpiTransfer *transfer)
   if (mock.cancel_fifo || (mock.cancel_after_frame && mock.frames >= mock.cancel_after_frame &&
                            mock.fifo_offset == mock.raw_size) ||
       (mock.cancel_empty && mock.frames >= 3 &&
-                           mock.fifo_offset == mock.raw_size))
+       mock.fifo_offset == mock.raw_size))
     g_cancellable_cancel (mock.cancellable);
 }
 
@@ -297,6 +313,9 @@ complete_transfer (gpointer data)
     mock.cleanup_after_cancel++;
   if (!error && mock.transactions == mock.fail_transaction)
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected transport error");
+  if (!error && mock.mode_io_error && pending->transfer->buffer_wr[0] == 0x08 &&
+      pending->transfer->buffer_wr[2] == 0xc6)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "C6 transport failure");
   if (!error && mock.short_fifo && pending->transfer->buffer_wr[0] == 0x06)
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT, "Injected short FIFO transfer");
   if (!error)
@@ -619,13 +638,17 @@ test_wait_release (gconstpointer data)
       mock.cancel_after_frame = initial_frames + 3;
     }
   else if (scenario == 2)
-    mock.short_fifo = TRUE;
+    {
+      mock.short_fifo = TRUE;
+    }
   else if (scenario == 3)
-    mock.reject_idle = TRUE;
+    {
+      mock.reject_idle = TRUE;
+    }
   else
     {
       /* Match the public core's dispatch contract: it clears idle before
-       * invoking the child, even when cancellation is already pending. */
+      * invoking the child, even when cancellation is already pending. */
       self->idle_verified = FALSE;
       g_cancellable_cancel (mock.cancellable);
     }
@@ -644,7 +667,9 @@ test_wait_release (gconstpointer data)
       g_assert_cmpuint (mock.cleanup_after_cancel, >, 0);
     }
   else
-    g_assert_nonnull (mock.error);
+    {
+      g_assert_nonnull (mock.error);
+    }
   g_assert_cmpint (self->idle_verified, ==, scenario != 3);
   for (gsize i = 0; i < self->capture_frame_size; i++)
     g_assert_cmpuint (self->capture_rx[i], ==, 0);
@@ -670,7 +695,7 @@ test_empty_backoff (void)
   g_assert_nonnull (self->captured_image);
   for (guint i = 0; i < G_N_ELEMENTS (delays); i++)
     g_assert_cmpint (mock.frame_times[initial_frames + i + 1] -
-                    mock.frame_times[initial_frames + i], >=, delays[i] * 1000);
+                     mock.frame_times[initial_frames + i], >=, delays[i] * 1000);
   /* A new capture starts with its own 100ms delay, not the previous cap. */
   mock.sequence_start = mock.frames;
   mock.sequence_count = 2;
@@ -682,6 +707,35 @@ test_empty_backoff (void)
   g_assert_cmpuint (mock.frames - initial_frames, ==, 2);
   g_assert_cmpint (mock.frame_times[initial_frames + 1] - mock.frame_times[initial_frames],
                    >=, 100 * 1000);
+  teardown (self);
+}
+
+
+static void
+test_mode_negotiation (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  const guint16 ids[] = { 0x9365, 0x9391, 0x9392 };
+  FpiDeviceFte3600 *self = setup (ids[scenario / 4]);
+  guint variant = scenario % 4;
+
+  mock.mode_failures = variant == 0 ? 0 : variant == 1 ? 1 : G_MAXUINT;
+  mock.mode_io_error = variant == 3;
+  run (self->backend->create_init (self));
+  if (variant == 3)
+    {
+      g_assert_error (mock.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+    }
+  else
+    {
+      g_assert_no_error (mock.error);
+      g_assert_true (self->idle_verified);
+      g_assert_cmpuint (mock.mode_reads, ==, variant == 0 ? 2 : variant == 1 ? 3 : 8);
+      mock.texture = TRUE;
+      run (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_nonnull (self->captured_image);
+    }
   teardown (self);
 }
 
@@ -720,6 +774,11 @@ main (int argc, char **argv)
     {
       g_autofree gchar *name = g_strdup_printf ("/ft93xx/cleanup/%u", i);
       g_test_add_data_func (name, GUINT_TO_POINTER (i), test_cleanup_failure);
+    }
+  for (guint i = 0; i < 12; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/ft93xx-backend/mode-negotiation/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_mode_negotiation);
     }
   return g_test_run ();
 }

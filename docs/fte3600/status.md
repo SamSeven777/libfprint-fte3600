@@ -1,168 +1,115 @@
-# FTE3600 hardware and validation status
+# FTE3600 Hardware Support and Validation Status
 
-The current implementation uses ACPI resources and runtime/ROM chip discovery;
-there is no DMI admission table. The current transport has compile and mock-test
-evidence, but no physical-device validation in this change.
+[Documentation Index](README.md) · [Installation Guide](install.md) · [Wire Protocols](protocols.md)
 
-The transport migrated from the custom SPI bridge; its details are described in
-[ACPI glue / stock spidev](acpi-spidev.md). ABI 2 supports both GpioInt and
-ordinary ACPI IRQ/Interrupt resources, with a reset GPIO and a separate UIO
-interrupt device. FW9369 final shutdown now masks/acknowledges known events
-and sends C1; FT9368 has the confirmed bounded wake retry. These changes have
-software-test evidence, not a new hardware result. The
-[coverage record](windows-lifecycle-coverage.md) distinguishes the implemented
-fixes from remaining lifecycle differences.
+This page tracks implementation status, driver capabilities, and reported device validation results across the FocalTech FTE3600 sensor family.
 
-## Latest GPD result, checked on 2026-10-04
+---
 
-The tester's [resource correction](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987576100)
-and [capture result](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5987625692)
-supersede the earlier assumption that this board uses the GpioInt branch of
-its ACPI templates. Its active resource is ordinary `Interrupt(Edge, ActiveLow)`.
-With a local patch adding that IRQ resource to main `1ce4c74`, unmodified
-userspace identified `9362` using physical active-high CS, initialized,
-captured and completed two close/reopen runs. IRQ polarity needed no override.
-This is evidence for that patched revision on that board, not for the current
-ACPI glue / stock-spidev transport.
+## 1. Chip Implementation Matrix
 
-Images were discarded, so image quality, enrollment, verification and system
-suspend/resume remain untested in that report. Closed-device IRQ counts still
-rose at roughly 10 per second; no accompanying sensor-event registers identify
-the cause. Do not report either a proven sleep fix or an IRQ-polarity fault.
+| Sensor Profile | Geometry | Protocol Support | Firmware Requirement | Matcher Support | Hardware Status |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **FT9338** | 88 × 88 | Supported (Legacy A8) | `ft9338.bin` | BRISK | Implemented & Unit Tested |
+| **FT9348** | 96 × 96 | Supported (A8 Family) | `ft9348.bin` | BRISK | Implemented & Unit Tested |
+| **FT9361** | 64 × 80 | Supported (A8 Family) | `ft9361.bin` | BRISK / 2D-IPA | **Verified on Hardware** (One-Netbook A1) |
+| **FT9536** | 64 × 128 | Supported (Legacy A8) | `ft9536.bin` | BRISK | Implemented & Unit Tested |
+| **FT9365** | 64 × 80 | Supported (FT9365) | None (ROM mode) | BRISK | Implemented & Unit Tested |
+| **FT9368** | 64 × 80 | Supported (FT9368) | App + Pramboot | BRISK | Implemented & Unit Tested |
+| **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK / optional 2D-IPA | BRISK and optional IPA tested on GPD Pocket 3; see revision-specific results below |
+| **FT9769** (ID 9391/2) | 40 × 196 | Supported (FT9769) | None (ROM mode) | BRISK (Adaptive) | Implemented & Unit Tested |
 
-## Historical platform profiles
+The ordinary authentication build remains BRISK-only. Grand Synergy v3 is an
+explicit `-Dfte3600_ipa_auth=true` opt-in for FT9361 and FW9369, with
+`-Dfte3600_personal_auth=true` also required. It selects each sensor's template
+policy and preserves sensor isolation. Existing BRISK enrollments remain usable
+in BRISK or dual mode; re-enrollment is needed to add IPA features. FW9369 IPA
+support has synthetic coverage and a small hardware test report; population
+accuracy remains unmeasured. See [optional matcher installation](install.md#optional-grand-synergy-v3-matching).
 
-The following table records **historical observations from the previous
-spidev/GPIO-profile implementation**, not current routing rules or evidence
-that the new bridge works on those devices.
+---
 
-| Platform | Evidence and scope | Reset route | IRQ route |
-| --- | --- | --- | --- |
-| One-Netbook A1 | Maintainer reports discovery, capture, enrollment, verification and cold-boot recovery on A1. Independent replication and a complete power/cancellation matrix remain needed. | `\_SB_.PCI0.GPI0`, 85 (`0x55`), active-low | Same controller, 86 (`0x56`), active-high |
-| GPD Pocket 3, Jasper Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT34C8`. | `\_SB_.GPI0`, 211, active-low | Same controller, 56, active-high |
-| GPD Pocket 3, Tiger Lake | Experimental profile in main/upstream; no public enrollment/verification success closure yet. Requires controller HID `INT3455`. | `\_SB_.GPI0`, 179, active-low | Same controller, 24, active-high |
-| Medion E3224 | Separate experimental `medion-e3224` branch. Current implementation has not produced a successful identity/capture result on the reported machine. | `\_SB_.GPO1`, 39 (`0x27`); active-low is the current hypothesis, not a completed board-level validation | `\_SB_.GPO2`, 0; reported active-high IRQ |
+## 2. Tested Device Reports
 
-Those model strings and routes are retained as historical evidence only.
-The current driver obtains each controller/pin from ACPI. A shared ACPI ID does
-not establish chip identity, and successful operation still needs hardware tests.
+### GPD Pocket 3 (FW9369 / ID 0x9362)
+- **Environment**: Linux Kernel 7.2+, Arch / Omarchy.
+- **Hardware Profile**: ACPI `Interrupt(Edge, ActiveLow)`, SPI mode `0x4`.
+- **Validation**:
+  - The complete factory path identifies raw ID `0x9362`; C6 readback did not
+    acknowledge on the reported unit, but the vendor flow treats that result as
+    non-gating and the backend validates the identity again during initialization.
+  - Background baseline calibration and IRQ finger event capture confirmed.
+  - Multi-cycle close/reopen lifecycle verified.
+  - Unchanged kernel generations use fast open; suspend/resume forces a complete
+    factory rediscovery before the backend is cached again.
 
-## Earlier issue evidence checked on 2026-10-04
+The [2026-10-06 report on `549767a`](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6006608845)
+found that an unpatched second open in one fprintd process failed after C1 sleep.
+With the reporter's factory-reset fix, warm opens took 1.38–1.39 s and verification
+after suspend/resume succeeded. This tree integrates that wake sequence with
+regressions for retained sleep, reset failure, cancellation, and changed identity;
+the integrated revision still needs hardware retesting. Full factory discovery,
+including the C6 retries, is unchanged.
 
-The [earlier GPD Pocket 3 report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-5981476115)
-provides a positive identity for one **i7-1195G7 / G1621-02** board: SRAM query
-`04 fb 9a 8b 00 01` returns big-endian `93 62` with active-high SPI chip select.
-Both an eight-byte full-duplex transfer and write-then-read under one chip
-select work. Active-low returns zero, although this board's ACPI says
-`PolarityLow`. The initial reset/IRQ interpretation was INT34C5 lines 14/323,
-not the older Tiger Lake profile's 179/24; the IRQ interpretation was corrected
-by the newer ordinary-Interrupt report above. These observations apply to the reported board,
-not automatically to every Pocket 3 variant.
+In the same report, BRISK and IPA agreed on all seven captures with individual
+engine results logged (five matching and two nonmatching fingers). The reported
+dual-mode totals were 6/8 genuine attempts accepted and 0/3 other-finger attempts
+accepted. These counts do not establish FAR/FRR or an improvement over BRISK.
 
-**The reported GPD protocol and CS requirements are implemented; the newer
-patched-main test above provides limited physical capture evidence.** Discovery sends the factory's 12-byte ID query,
-tries both physical CS polarities if necessary, and requires two matching
-`9362` responses. The FW9369 backend performs AFE/FDT and image calibration,
-reads 16-bit samples, and independently constructs an 8-bit image. It requires
-an uncovered sensor during opening to establish its baseline. On this branch,
-CS negotiation uses stock spidev and requires the matched ABI2 reset/UIO glue;
-old custom bridge interfaces are not accepted by this transport. Reset GPIO
-active-low and SPI CS active-high are separate electrical signals.
+### One-Netbook A1 (FT9361)
+- **Environment**: Linux Kernel 6.x / 7.x.
+- **Hardware Profile**: A8 protocol with external firmware `ft9361.bin`.
+- **Validation**:
+  - Successful image capture and host-side authentication verified.
 
-**Medion E3224 remains unconfirmed.** Separate reset/IRQ controllers are handled
-by the bridge, but [the last sensor-response test](https://github.com/SamSeven777/libfprint-fte3600/issues/1#issuecomment-5928567443)
-still returned all zeroes before and after software reset with the SPI parent
-held in D0. The [newer baseline-tool report](https://github.com/SamSeven777/libfprint-fte3600/issues/1#issuecomment-5979436524)
-failed its isolated library ABI check before touching hardware; it is not a
-test of the new clean-room bridge and supplies no new chip identity. The old
-Mint stack's reported success remains a useful reference. Do not extrapolate
-the GPD chip identity or required CS polarity to Medion without evidence.
+---
 
-## Medion evidence and next comparison
+## 3. Test Suite & Quality Assurance
 
-The Medion report identifies separate GPO1/GPO2 controllers; the reset-controller
-log identifies `INT3453`, not `INT3452`. Do not substitute reset 40 / IRQ 39.
-The module's exact sensor IC has not been confirmed by a valid device response.
-Neither the shared ACPI ID nor all-zero responses proves FT9361, FT9362 or a
-missing power rail.
+Run the FTE3600 regression checks with warnings treated as errors:
 
-The same reported machine worked with an older Mint software stack. Preserve
-that known-good comparison as the starting point. Compare initialization,
-firmware, transport, GPIO and power-management behavior with that stack before
-requesting another experiment. Do not ask the reporter to repeat an unchanged
-recovery sequence that already failed. See the [hardware discussion](https://github.com/SamSeven777/libfprint-fte3600/issues/1).
+```bash
+./scripts/check-fte3600.sh
+```
 
-## Implemented functions and test limits
+### 2026-10-06: issue #2 fixes
 
-The current catalog contains eight chip profiles, six Windows protocol families
-and four Linux backend modules. Each has a native-image BRISK adapter for
-eight-sample enrollment and verification in the experimental opt-in build.
-The default build exposes capture only. Sharing a protocol or image size does
-not make templates or firmware interchangeable.
+Local validation used the working tree based on `549767a`, with the FW9369 C1
+wake, udev import ordering, and LTO test isolation fixes. GCC 13.3.0 and Meson
+1.3.2 ran in WSL Ubuntu with `-Ddrivers=fte3600` and `-Dwerror=true`:
 
-| Chip | Native image | Initialization and recovery boundary |
-| --- | --- | --- |
-| FT9338 | 88 × 88 | Running-application capture; RAM recovery needs current-open runtime identity plus matching boot-B OTP. First unidentified cold boot is unsupported. |
-| FT9348 | 96 × 96 | A8 runtime or matching ROM/SPI-OTP identity; its own external RAM firmware. |
-| FT9361 | 64 × 80 | A8 runtime or matching ROM/SPI-OTP identity; its own external RAM firmware. |
-| FT9536 | 64 × 128 | Running application, positive boot-A identity or current-open runtime plus boot-B OTP; its own RAM firmware and complete readback. |
-| FT9365 | 64 × 80 | Positive silicon identity and host AFE/DAC configuration; no application firmware upload. |
-| FT9368 | 64 × 80 | Healthy identified application; persistent update is separate and explicit. Blank/unresponsive recovery remains unsupported. |
-| FW9369 / raw ID 9362 | 64 × 80 | Positive silicon identity, host FDT/image calibration; uncover the sensor while opening. No application firmware upload. |
-| FT9769 / raw IDs 9391, 9392 | 40 × 196 | Positive identity and variant check, host AFE/DAC configuration; extra raw rows are drained and excluded from the image. |
+| Personal authentication | IPA authentication | Production LTO | Checks executed | Result |
+| :---: | :---: | :---: | :--- | :--- |
+| Disabled | Disabled | Disabled | Required script | 28/28 targets passed |
+| Enabled | Enabled | Disabled | Required script | 28/28 targets passed |
+| Enabled | Disabled | Enabled | Arch PKGBUILD's check list, release build | 25/25 targets passed |
 
-The [firmware installer](install.md#2-install-the-firmware-for-the-identified-chip)
-can validate and install all six catalogued payloads for FT9338, FT9348, FT9361,
-FT9536 and the FT9368 application/PRAM pair. It does not authorize device
-recovery or enable persistent updates. Installing FT9338 firmware cannot
-replace the missing first-cold-identity evidence, and installing the FT9368
-pair cannot establish a blank-chip recovery route. No vendor payload is bundled.
+The LTO run tests the package's selected suites on Ubuntu; it is not a native
+Arch `makepkg` run. Production objects retain LTO; linker-wrapped test objects
+and their private/driver archives use separate non-LTO builds. Both installed
+udev rule forms are checked for consistency and import ordering; `udevadm
+verify` 255 also accepted the standalone rule. The five new FW9369 cases cover
+DB/SMIC fast reopen after C1, reset failure, cancellation, and a changed ID.
 
-The bridge bounds transactions by the SPI controller limit and a 32,768-byte
-ceiling. Each backend checks its actual largest transaction before starting;
-the FT9365/9769 FIFO is deliberately chunked, while legacy image/RAM-readback
-transactions remain continuous. See [transport limits](dynamic-discovery.md#electrical-and-protocol-limits).
-Legacy application idle is `a5 5a`; `00 00` means that the expected response was
-not obtained and is not a diagnosis by itself.
+Logs are in `meson-logs/testlog.txt` under `build-fte3600-ci-false`,
+`build-fte3600-ci-true`, and `build-issue2-lto`. These are synthetic regressions;
+no local GPD hardware test was performed.
 
-ACPI resource discovery removes the computer-model whitelist, but it does not
-make missing or contradictory firmware descriptions usable. One SPI resource,
-one single-pin reset GpioIo and one single-pin edge GpioInt are required.
-Separate GPIO controllers are supported; ambiguous resources, unsupported
-trigger modes, reset mapping conflicts and transfer limits are explicit
-failures. The bridge cannot infer a missing power rail, inverter or undocumented
-board reset polarity. A shared `FTE3600` ACPI ID is not a chip identity.
+### 2026-10-05: optional FW9369 matcher
 
-Unit tests and mock lifecycle tests do not establish successful cold boot,
-suspend/resume, GPIO polarity, population accuracy or complete memory erasure.
-Synthetic installer tests check metadata consistency, input validation and
-atomic file replacement in temporary directories; they do not download vendor
-packages, write system firmware paths or exercise hardware programming.
-A CI definition is not an executed result; retain logs tied to the exact
-commit, branch and build options. Medion diagnostic/power tests are not
-interchangeable with main's production-driver lifecycle tests.
+Local validation on 2026-10-05 used the working tree based on `3a36d68`, with
+the FW9369 optional matcher changes, GCC 13.3.0 and Meson 1.3.2 in WSL Ubuntu.
+All configurations used `-Ddrivers=fte3600` and `-Dwerror=true`.
 
-## Authentication evidence
+| Personal authentication | IPA authentication | Checks executed | Result |
+| :---: | :---: | :--- | :--- |
+| Disabled | Disabled | Required script: 28 test targets | 28 passed |
+| Enabled | Enabled | Required script: 28 test targets | 28 passed |
+| Enabled | Disabled | 6 matcher/template/lifecycle targets; lifecycle rerun after adding runtime opt-in rejection cases | All passed |
+| Enabled | Enabled | Template, family-template and authentication lifecycle under ASan + UBSan | 3 passed |
 
-New enrollments on all eight sensor profiles use BRISK diagnostic policy 7 /
-optional personal policy 8, with native image parameters and rotation-invariant
-spatial-shape evidence. Verification accepts a passing comparison against any
-of eight individual samples or their canonically reconstructed mosaic. Each
-comparison retains the five mutual matches/inliers and residual gates.
-Existing wire-v1 FT9361 templates retain policy 5/6 through a compatibility
-path; they do not define the other profiles' geometry. Older extractor/policy
-versions remain unsupported. See [family authentication](family-authentication.md).
-
-Historical maintainer reports describe zero observed
-acceptances in 342,720 offline non-matching comparisons. The repository does not
-currently provide a complete independently reproducible protocol, independent
-evaluation split and deployment-level report for that result. Do not present it
-as measured population FAR=0 or as a latency/FRR guarantee.
-
-Those historical pair comparisons do not evaluate the current mosaic decision.
-Multi-person, multi-session FAR/FRR for the actual gallery-plus-mosaic decision,
-including retries and failed captures/enrollments, remains unmeasured. This is
-an evidence gap, not merely a missing laboratory certificate. Default
-authentication is disabled; opt-in use remains experimental with a working
-password fallback. Do not enable experimental biometric authentication for
-system-wide sudo or root access.
+Local logs are in `meson-logs/testlog.txt` under `build-fte3600-ci-false`,
+`build-fte3600-ci-true`, `build-fte3600-brisk-merge` (latest lifecycle run), and
+`build-fte3600-acpi-spidev-sanitize`. Counts refer to test targets, not individual
+test cases. The new matcher fixtures are synthetic; these results do not
+measure hardware reliability, biometric accuracy or FAR/FRR.

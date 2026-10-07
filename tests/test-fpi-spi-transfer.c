@@ -457,6 +457,40 @@ test_session_guard (gconstpointer data)
   g_assert_cmpuint (mock_ioctl.call_count, ==, guard_fail_at == 1 ? 0 : 1);
 }
 
+static guint prepare_calls;
+
+static gboolean
+fail_prepare (FpDevice *device, GError **error)
+{
+  prepare_calls++;
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "GPIO preparation failed");
+  return FALSE;
+}
+
+static void
+test_prepare_failure (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  guint8 request[] = { 0x55, 0xaa }, response[2] = { 0 };
+
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpiSpiTransfer) transfer = fpi_spi_transfer_new (device, MOCK_SPI_FD);
+  g_autoptr(GError) error = NULL;
+
+  prepare_calls = 0;
+  mock_ioctl_reset (MOCK_IOCTL_NONE, NULL, 0, NULL, 0, NULL);
+  fpi_spi_transfer_write_full (transfer, request, sizeof request, NULL);
+  fpi_spi_transfer_read_full (transfer, response, sizeof response, NULL);
+  fpi_spi_transfer_set_full_duplex (transfer, scenario != 1);
+  if (scenario == 2)
+    transfer->length_rd = 1;
+  fpi_spi_transfer_set_prepare (transfer, fail_prepare);
+  g_assert_false (fpi_spi_transfer_submit_sync (transfer, &error));
+  g_assert_error (error, G_IO_ERROR, (scenario == 0 ? G_IO_ERROR_FAILED : G_IO_ERROR_INVALID_ARGUMENT));
+  g_assert_cmpuint (prepare_calls, ==, scenario == 0 ? 1 : 0);
+  g_assert_cmpuint (mock_ioctl.call_count, ==, 0);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -479,6 +513,11 @@ main (int argc, char *argv[])
     }
   g_test_add_func ("/spi-transfer/transport/buffer-size", test_transport_buffer_size);
   g_test_add_func ("/spi-transfer/log/sensitive-redaction", test_sensitive_log_redaction);
+  for (guint i = 0; i < 3; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/spi-transfer/prepare/failure/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_prepare_failure);
+    }
 
   return g_test_run ();
 }

@@ -1,5 +1,8 @@
 # Reusing the 2D-IPA (2D Invariant Point Attention) core
 
+[Matcher architecture](../../../docs/fte3600/architecture.md) ·
+[Documentation index](../../../docs/fte3600/README.md)
+
 `ipa.c` and `ipa.h` implement an independent, host-based biometric feature
 extractor and rigid point-set matcher. They depend only on GLib, the C library,
 and libm. They do not include device drivers, GPIO/SPI/USB transport code,
@@ -10,7 +13,8 @@ or hardware authentication gates.
 
 1. **Local Contrast Normalization (LCN)**:
    Applies zero-mean integral-image local contrast normalization with regularized
-   noise floors, ensuring robustness against ambient temperature and skin contact variations.
+   noise floors. Its behavior across temperature and skin conditions still needs
+   device data.
 
 2. **Structure Tensor & Sub-Pixel Harris Corner Detection**:
    Computes spatial image gradients ($I_x, I_y$) and builds the structure tensor

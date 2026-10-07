@@ -18,39 +18,55 @@ enum { SPI_FD = 10, RESTORE_FD = 11, RESET_CHIP = 20, IRQ_CHIP = 21,
 typedef struct
 {
   FpiDeviceFte3600 self;
-  guint64 open_fds;
-  guint32 mode;
-  guint32 speed;
-  guint8 bits;
-  const gchar *bufsiz;
-  guint irq_requests;
-  guint reset_requests;
-  guint reset_value;
-  gint request_failure;
-  gboolean bits_failure;
-  gboolean restore_failure;
-  gboolean ignore_restore;
-  gboolean lock_busy;
-  guint32 next_event;
-  guint queued_events;
-  gboolean truncated_event;
-  gboolean interrupt_reads;
-  guint read_calls;
+  guint64          open_fds;
+  guint32          mode;
+  guint32          speed;
+  guint8           bits;
+  const gchar     *bufsiz;
+  guint            irq_requests;
+  guint            reset_requests;
+  guint            reset_value;
+  gint             request_failure;
+  gboolean         bits_failure;
+  gboolean         restore_failure;
+  gboolean         ignore_restore;
+  gboolean         lock_busy;
+  guint32          next_event;
+  guint            queued_events;
+  gboolean         truncated_event;
+  gboolean         interrupt_reads;
+  guint            read_calls;
 } Fixture;
 
 static Fixture *mock;
 
-int __wrap_open64 (const char *path, int flags, ...);
-int __wrap_fstat64 (int fd, struct stat64 *st);
-int __wrap_stat64 (const char *path, struct stat64 *st);
-int __wrap_fcntl64 (int fd, int cmd, ...);
-int __wrap_ioctl (int fd, unsigned long cmd, ...);
+int __wrap_open64 (const char *path,
+                   int         flags,
+                   ...);
+int __wrap_fstat64 (int            fd,
+                    struct stat64 *st);
+int __wrap_stat64 (const char    *path,
+                   struct stat64 *st);
+int __wrap_fcntl64 (int fd,
+                    int cmd,
+                    ...);
+int __wrap_ioctl (int           fd,
+                  unsigned long cmd,
+                  ...);
 int __wrap_close (int fd);
-int __wrap_flock (int fd, int operation);
-ssize_t __wrap_read (int fd, void *buf, size_t size);
-ssize_t __wrap___read_chk (int fd, void *buf, size_t size, size_t capacity);
-gboolean __wrap_g_file_get_contents (const gchar *filename, gchar **contents,
-                                     gsize *length, GError **error);
+int __wrap_flock (int fd,
+                  int operation);
+ssize_t __wrap_read (int    fd,
+                     void  *buf,
+                     size_t size);
+ssize_t __wrap___read_chk (int    fd,
+                           void  *buf,
+                           size_t size,
+                           size_t capacity);
+gboolean __wrap_g_file_get_contents (const gchar *filename,
+                                     gchar      **contents,
+                                     gsize       *length,
+                                     GError     **error);
 
 static void
 check_fd (int fd)
@@ -149,12 +165,15 @@ __wrap_ioctl (int fd, unsigned long cmd, ...)
         case SPI_IOC_RD_MODE32:
           *(guint32 *) value = mock->mode;
           return 0;
+
         case SPI_IOC_RD_BITS_PER_WORD:
           *(guint8 *) value = mock->bits;
           return 0;
+
         case SPI_IOC_RD_MAX_SPEED_HZ:
           *(guint32 *) value = mock->speed;
           return 0;
+
         case SPI_IOC_WR_BITS_PER_WORD:
           if (mock->ignore_restore && fd == RESTORE_FD)
             return 0;
@@ -165,6 +184,7 @@ __wrap_ioctl (int fd, unsigned long cmd, ...)
             }
           mock->bits = *(guint8 *) value;
           return 0;
+
         case SPI_IOC_WR_MAX_SPEED_HZ:
           if (mock->ignore_restore && fd == RESTORE_FD)
             return 0;
@@ -175,6 +195,7 @@ __wrap_ioctl (int fd, unsigned long cmd, ...)
             }
           mock->speed = *(guint32 *) value;
           return 0;
+
         default:
           /* No mode/CS write and no SPI packet are allowed in configuration. */
           g_error ("Unexpected SPI ioctl %lu", cmd);
@@ -263,7 +284,7 @@ __wrap_read (int fd, void *buf, size_t size)
   count = MIN (mock->queued_events, size / sizeof *events);
   for (guint i = 0; i < count; i++)
     {
-      events[i] = (struct gpio_v2_line_event) {
+      events[i] = (struct gpio_v2_line_event){
         .id = GPIO_V2_LINE_EVENT_RISING_EDGE,
         .offset = 0,
         .seqno = mock->next_event,
@@ -303,6 +324,7 @@ setup_transport (Fixture *f, gboolean skip_irq)
     .irq_gpiochip = "/diagnostic/irq-chip",
     .skip_irq = skip_irq,
   };
+
   g_autoptr(GError) error = NULL;
 
   mock = f;
@@ -363,6 +385,7 @@ test_configuration (Fixture *f, gconstpointer unused)
 
   (void) unused;
   configured (f);
+  g_assert_true (f->self.transport_ops->probe_runtime_first);
   g_assert_cmpuint (f->speed, ==, 1000000);
   g_assert_cmpuint (f->bits, ==, 8);
   g_assert_cmpuint (f->self.max_transfer, ==, 32768);
@@ -405,7 +428,7 @@ test_synchronous_without_irq (Fixture *f, gconstpointer unused)
 
   (void) unused;
   /* Simulate an unavailable interrupt line. Synchronous identification should
-   * not even try that request, while reset and SPI restoration remain real. */
+  * not even try that request, while reset and SPI restoration remain real. */
   f->request_failure = IRQ_CHIP;
   for (guint session = 0; session < 2; session++)
     {
@@ -495,25 +518,31 @@ test_bad_events (Fixture *f, gconstpointer reason)
       f->next_event = 0;
       f->queued_events = 1;
       break;
+
     case 1:
       f->next_event = 2;
       f->queued_events = 1;
       break;
+
     case 2:
       f->queued_events = 1;
       g_assert_true (f->self.transport_ops->get_events (&f->self, &events, &error));
       f->next_event = 3;
       f->queued_events = 1;
       break;
+
     case 3:
       f->truncated_event = TRUE;
       break;
+
     case 4:
       f->queued_events = 512;
       break;
+
     case 5:
       f->interrupt_reads = TRUE;
       break;
+
     default:
       g_assert_not_reached ();
     }
@@ -531,12 +560,19 @@ test_guard (Fixture *f, gconstpointer reason)
   g_assert_true (f->self.transport_ops->check (&f->self, &error));
   switch (GPOINTER_TO_INT (reason))
     {
-    case 0: f->mode = SPI_MODE_1; break;
-    case 1: f->bits = 16; break;
-    case 2: f->speed = 2000000; break;
+    case 0: f->mode = SPI_MODE_1;
+      break;
+
+    case 1: f->bits = 16;
+      break;
+
+    case 2: f->speed = 2000000;
+      break;
+
     case 3:
       g_assert_true (f->self.transport_ops->close (&f->self, &error));
       break;
+
     default: g_assert_not_reached ();
     }
   g_assert_false (f->self.transport_ops->check (&f->self, &error));

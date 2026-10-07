@@ -56,8 +56,8 @@ fpi_fte3600_fail_if_cancelled (FpiSsm *ssm, FpDevice *dev)
   return TRUE;
 }
 
-void
-fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean asserted)
+static gboolean
+set_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean asserted)
 {
   if (!asserted && mock.asserted)
     g_assert_cmpint (g_get_monotonic_time () - mock.assertion_time, >=, 19000);
@@ -66,7 +66,7 @@ fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean as
     {
       fpi_ssm_mark_failed (ssm, g_error_new_literal (
                              G_IO_ERROR, G_IO_ERROR_FAILED, "Injected reset release failure"));
-      return;
+      return FALSE;
     }
   mock.asserted = asserted;
   self->idle_verified = FALSE;
@@ -77,7 +77,31 @@ fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean as
       if (mock.cancel_reset || (mock.cancel_start && mock.reads))
         g_cancellable_cancel (mock.cancel);
     }
-  fpi_ssm_next_state (ssm);
+  return TRUE;
+}
+
+void
+fpi_fte3600_set_hardware_reset (FpiSsm *ssm, FpiDeviceFte3600 *self, gboolean asserted)
+{
+  if (set_reset (ssm, self, asserted))
+    fpi_ssm_next_state (ssm);
+}
+
+void
+fpi_fte3600_release_reset_and_sync (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+
+  if (!set_reset (ssm, self, FALSE))
+    return;
+  transfer = fpi_spi_transfer_new_with_buffer_size (FP_DEVICE (self), self->spi_fd, self->max_transfer);
+  fpi_spi_transfer_write (transfer, 2);
+  transfer->buffer_wr[0] = 0x55;
+  transfer->buffer_wr[1] = 0xaa;
+  fpi_spi_transfer_read (transfer, 2);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  fpi_fte3600_submit_transfer (ssm, transfer, FALSE);
 }
 
 guint8

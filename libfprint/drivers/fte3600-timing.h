@@ -25,11 +25,17 @@
 #define FTE3600_INIT_MCU_POLL_MS 2
 #define FTE3600_INIT_MCU_MAX_ATTEMPTS 20
 
-/* Linux retains the 2 ms post-pair reply wait used by the A1 wake path.
- * Windows Detect instead reads status immediately after the second 70.
- * Its six-attempt bound, failed-round interval and idle-to-geometry delay
- * supply the fallback for an application whose first response stays blank. */
-#define FTE3600_LEGACY_WAKE_REPLY_MS 2
+/* Reference SPI factory, EvtDevicePrepareHardware: rounds 0 and 1 precede
+ * legacy ROM recovery. Later forced-family firmware guesses are not used.
+ * FT9368 ReadChipID (26d9c) has its own 5 ms wait, distinct from the 10 ms
+ * application wake helper (28cc4). */
+#define FTE3600_FACTORY_APPLICATION_ROUNDS 2
+#define FTE3600_FACTORY_FT9368_ATTEMPTS 2
+#define FTE3600_FACTORY_FT9368_WAKE_MS 5
+
+/* CheckFWExist (270e4/28c54): 70, 5 ms, 70, then status immediately.
+ * MultiCheckFWExist (28344) retries failures; the factory waits 350 ms only
+ * after MCU idle before reading geometry (2422a/27290). */
 #define FTE3600_LEGACY_WAKE_MAX_ATTEMPTS 6
 #define FTE3600_LEGACY_WAKE_RETRY_MS 5
 #define FTE3600_LEGACY_WAKE_GEOMETRY_MS 350

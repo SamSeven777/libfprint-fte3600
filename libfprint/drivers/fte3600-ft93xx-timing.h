@@ -5,6 +5,7 @@
 /* Millisecond protocol requirements observed in the reference. */
 #define FT93XX_COMMAND_SETTLE_MS 1
 #define FT93XX_SFR_PROTOCOL_SETTLE_MS 4
+#define FT93XX_SFR_PROTOCOL_ATTEMPTS 4
 
 /* Linux host bounds. These are not claimed hardware characteristics. */
 #define FT93XX_IDLE_ATTEMPTS 5

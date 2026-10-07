@@ -59,6 +59,8 @@ WRAPPED (fpi_fte3600_transport_open);
 WRAPPED (fpi_fte3600_transport_close);
 WRAPPED (g_file_get_contents);
 WRAPPED (g_unix_fd_source_new);
+WRAPPED (fpi_ssm_next_state_delayed);
+WRAPPED (fpi_ssm_jump_to_state_delayed);
 #undef WRAPPED
 
 __typeof__ (g_unix_fd_source_new) __real_g_unix_fd_source_new;
@@ -69,6 +71,8 @@ __typeof__ (read) __real_read;
 __typeof__ (fpi_fte3600_transport_open) __real_fpi_fte3600_transport_open;
 __typeof__ (fpi_fte3600_transport_close) __real_fpi_fte3600_transport_close;
 __typeof__ (g_file_get_contents) __real_g_file_get_contents;
+__typeof__ (fpi_ssm_next_state_delayed) __real_fpi_ssm_next_state_delayed;
+__typeof__ (fpi_ssm_jump_to_state_delayed) __real_fpi_ssm_jump_to_state_delayed;
 int __wrap_open64 (const char *path,
                    int         flags,
                    ...);
@@ -134,10 +138,22 @@ typedef struct
   gboolean     success;
   gboolean     exercise_open_failure;
   gboolean     mode_required;
+  gboolean     legacy_after_reset;
+  gboolean     fail_wake;
+  gboolean     short_wake;
+  gboolean     cancel_wake;
 } ProbeFixture;
 
 static const ProbeFixture *probe_fixture;
 static gboolean boot38_fixture;
+static guint b38_header_fixture;
+static struct
+{
+  gboolean enabled, done;
+  guint    scenario, checks, releases, messages;
+  GThread *worker;
+  GError  *error;
+} sync_test;
 static gboolean wake_fixture;
 static gboolean stale_wake_fixture;
 
@@ -174,119 +190,173 @@ typedef struct
 
 static const CsFixture *cs_fixture;
 
+typedef enum {
+  MOCK_APPLICATION_RUNNING,
+  MOCK_APPLICATION_DORMANT,
+  MOCK_APPLICATION_RESET_NEEDS_WAKE,
+} MockApplicationState;
+
 static struct
 {
-  GMutex           lock;
-  GArray          *reset_events;
-  GArray          *soft_reset_times;
-  const MockModel *model;
-  guint            spi_transactions;
-  guint32          spi_mode;
-  guint32          original_spi_mode;
-  guint32          last_closed_spi_mode;
-  guint            cs_changes;
-  guint            spi_mode_writes;
-  guint            selected_geometry_reads;
-  guint            wrong_cs_transfers;
-  guint            special_reads;
-  guint            special_variant_reads;
-  guint            special_resets;
-  guint8           special_mode;
-  gboolean         special_wake;
-  guint            wake_commands[2];
-  guint            wake_status_reads[2];
-  guint            wake_early_geometry_reads[2];
-  guint            wake_geometry_reads;
-  guint            sleeping_geometry_reads;
-  guint            resets_before_wake;
-  guint            wake_rom_queries;
-  gint64           wake_command_time[2];
-  gint64           wake_status_time[2];
-  gint64           wake_ready_time;
-  guint8           wake_previous_opcode;
-  gboolean         wake_fault_injected;
-  gboolean         probe_started;
-  guint            ioctl_count;
-  guint            mode_writes;
-  guint            fail_cleanup_status;
-  gboolean         cleanup_started;
-  gboolean         short_image;
-  guint32          buffer_size;
-  gboolean         bad_abi;
-  gboolean         bad_mode;
-  gboolean         rom_probe;
-  gboolean         persistent_cold;
-  guint16          rom_family;
-  guint8           otp;
-  guint8           boot_reply;
-  guint8           boot38_id;
-  guint            probe_packets;
-  guint            fail_probe_packet;
-  guint            cancel_probe_packet;
-  guint            firmware_opens;
-  guint            firmware_open_spi_transactions;
-  guint            firmware_open_resets;
-  gsize            firmware_file_size;
-  gint             firmware_fd;
-  gboolean         otp_enabled;
-  gint             spi_fd;
-  gint             gpio_fd;
-  gint             reset_fd;
-  gint             event_fd;
-  gint             irq_path_fd;
-  guint32          irq_counter;
-  guint            irq_read_fault;
-  gboolean         closing_transport;
-  gboolean         configuring_transport;
-  guint32          speed;
-  guint8           bits;
-  guint            transport_failure;
-  gboolean         transport_failure_fired;
-  gboolean         fail_restore;
-  gboolean         restore_failed;
-  guint            fail_cs_writes;
-  guint64          epoch;
-  gboolean         suspended;
-  gint             irq_pipe[2];
-  guint            opens;
-  guint            closes;
-  guint            claims;
-  guint            releases;
-  guint            resets;
-  gboolean         inactive;
-  guint            inactive_wake_commands;
-  gint64           wake_first;
-  gint64           wake_last;
-  guint            awake_id_reads;
-  guint            fail_wake_at;
-  gboolean         cancel_wake;
-  gboolean         unstable_wake;
-  guint            discovery_wakes;
-  guint            hardware_asserts;
-  guint            hardware_deasserts;
-  guint            images;
-  const guint8    *frames;
-  guint            n_frames;
-  guint            next_frame;
-  guint            irq_source;
-  guint8           registers[256];
-  gboolean         claimed;
-  gboolean         armed;
-  gboolean         finger_ready;
-  gboolean         bad_id;
-  gboolean         fail_config;
-  gboolean         fail_claim;
-  gboolean         fail_image;
-  gboolean         fail_reset;
-  gboolean         cancel_image;
-  gboolean         hardware_recovery;
-  gboolean         cold_start;
-  gboolean         reset_asserted;
-  gboolean         cancel_hardware_reset;
-  gboolean         fail_hardware_reset;
-  IrqAction        irq_action;
-  GCancellable    *cancellable;
+  GMutex               lock;
+  GArray              *reset_events;
+  GArray              *soft_reset_times;
+  gint                 protocol_clock_ms;
+  const MockModel     *model;
+  guint                spi_transactions;
+  guint32              spi_mode;
+  guint32              original_spi_mode;
+  guint32              last_closed_spi_mode;
+  guint                cs_changes;
+  guint                spi_mode_writes;
+  guint                selected_geometry_reads;
+  guint                wrong_cs_transfers;
+  guint                special_reads;
+  guint                special_variant_reads;
+  guint                special_resets;
+  guint                factory_info_reads[2];
+  guint                factory_c6_writes[2];
+  guint                factory_c6_reads[2];
+  guint                factory_id_reads[2];
+  gint64               factory_wake_time;
+  gint64               c6_write_time;
+  gboolean             factory_pending;
+  guint                factory_geometry_reads;
+  guint                discovery_application_commands;
+  guint8               special_mode;
+  gboolean             special_wake;
+  guint                wake_commands[2];
+  guint                wake_status_reads[2];
+  guint                wake_early_geometry_reads[2];
+  guint                wake_geometry_reads;
+  guint                sleeping_geometry_reads;
+  guint                resets_before_wake;
+  guint                wake_rom_queries;
+  gint64               wake_command_time[2];
+  gint64               wake_status_time[2];
+  gint64               wake_ready_time;
+  guint8               wake_previous_opcode;
+  gboolean             wake_fault_injected;
+  gboolean             probe_started;
+  guint                ioctl_count;
+  guint                mode_writes;
+  guint                fail_cleanup_status;
+  gboolean             cleanup_started;
+  gboolean             short_image;
+  guint32              buffer_size;
+  gboolean             bad_abi;
+  gboolean             bad_mode;
+  gboolean             rom_probe;
+  gboolean             persistent_cold;
+  guint16              rom_family;
+  guint8               otp;
+  guint8               boot_reply;
+  guint8               boot38_id;
+  guint                probe_packets;
+  guint                fail_probe_packet;
+  guint                cancel_probe_packet;
+  guint                firmware_opens;
+  guint                firmware_open_spi_transactions;
+  guint                firmware_open_resets;
+  gsize                firmware_file_size;
+  gint                 firmware_fd;
+  gboolean             otp_enabled;
+  gint                 spi_fd;
+  gint                 gpio_fd;
+  gint                 reset_fd;
+  gint                 event_fd;
+  gint                 irq_path_fd;
+  guint32              irq_counter;
+  guint                irq_read_fault;
+  gboolean             closing_transport;
+  gboolean             configuring_transport;
+  guint32              speed;
+  guint8               bits;
+  guint                transport_failure;
+  gboolean             transport_failure_fired;
+  gboolean             fail_restore;
+  gboolean             restore_failed;
+  guint                fail_cs_writes;
+  guint64              epoch;
+  gboolean             suspended;
+  gint                 irq_pipe[2];
+  guint                opens;
+  guint                closes;
+  guint                claims;
+  guint                releases;
+  guint                resets;
+  MockApplicationState application_state;
+  gboolean             retained_application_ram;
+  guint                retained_application_resets;
+  guint                inactive_wake_commands;
+  gint64               wake_first;
+  gint64               wake_last;
+  guint                awake_id_reads;
+  guint                fail_wake_at;
+  gboolean             cancel_wake;
+  gboolean             unstable_wake;
+  guint                discovery_wakes;
+  guint                hardware_asserts;
+  guint                hardware_deasserts;
+  guint                images;
+  const guint8        *frames;
+  guint                n_frames;
+  guint                next_frame;
+  guint                irq_source;
+  guint8               registers[256];
+  gboolean             claimed;
+  gboolean             armed;
+  gboolean             finger_ready;
+  gboolean             bad_id;
+  gboolean             fail_config;
+  gboolean             fail_claim;
+  gboolean             fail_image;
+  gboolean             fail_reset;
+  gboolean             cancel_image;
+  gboolean             hardware_recovery;
+  gboolean             cold_start;
+  gboolean             reset_asserted;
+  gboolean             cancel_hardware_reset;
+  gboolean             fail_hardware_reset;
+  guint                backend_reset_case;
+  gboolean             backend_cold_only;
+  guint                backend_reset_asserts;
+  guint                backend_reset_deasserts;
+  IrqAction            irq_action;
+  GCancellable        *cancellable;
 } sensor;
+
+/* Advance only the protocol clock, while preserving the real asynchronous
+ * state-machine dispatch and SPI worker/cancellation boundaries. General SSM
+ * timer tests cover wall-clock scheduling; this suite checks the requested
+ * hardware intervals without spending minutes in negative C6 retry loops. */
+static gint64
+protocol_time (void)
+{
+  return ((gint64) g_atomic_int_get (&sensor.protocol_clock_ms) + 1) * 1000;
+}
+
+void
+__wrap_fpi_ssm_next_state_delayed (FpiSsm *ssm, int delay)
+{
+  g_assert_cmpint (delay, >=, 0);
+  g_atomic_int_add (&sensor.protocol_clock_ms, delay);
+  __real_fpi_ssm_next_state_delayed (ssm, 0);
+}
+
+void
+__wrap_fpi_ssm_jump_to_state_delayed (FpiSsm *ssm, int state, int delay)
+{
+  g_assert_cmpint (delay, >=, 0);
+  g_atomic_int_add (&sensor.protocol_clock_ms, delay);
+  __real_fpi_ssm_jump_to_state_delayed (ssm, state, 0);
+}
+
+static guint
+backend_reset_commands (void)
+{
+  return sensor.resets - sensor.discovery_application_commands;
+}
 
 int
 __wrap_open (const char *path, int flags, ...)
@@ -534,6 +604,12 @@ __wrap_fpi_fte3600_resources_resolve (const gchar *root, dev_t spi, dev_t gpio, 
 gboolean
 __wrap_fpi_fte3600_resources_check (const Fte3600Resources *resources, GError **error)
 {
+  if (sync_test.enabled)
+    {
+      /* No resource query may be inserted between GPIO release and SPI. */
+      g_assert_false (sync_test.releases > 0 && sync_test.messages == 0);
+      sync_test.checks++;
+    }
   g_assert_cmpstr (resources->glue_path, ==, "/mock/glue");
   if (resources->generation != sensor.epoch || sensor.suspended)
     {
@@ -594,7 +670,7 @@ __wrap_g_file_get_contents (const gchar *path, gchar **contents,
 static int
 set_reset (guint32 value)
 {
-  ResetEvent event = { value, g_get_monotonic_time () };
+  ResetEvent event = { value, protocol_time () };
 
   g_array_append_val (sensor.reset_events, event);
   g_assert_true (sensor.claimed);
@@ -614,12 +690,27 @@ set_reset (guint32 value)
     }
   else if (sensor.reset_asserted)
     {
+      gboolean special_reset = sensor.special_wake;
+
       sensor.hardware_deasserts++;
       sensor.reset_asserted = FALSE;
       sensor.otp_enabled = FALSE;
       sensor.special_wake = FALSE;
       sensor.special_mode = 0;
-      if (!sensor.persistent_cold)
+      if (special_reset && sensor.retained_application_ram)
+        {
+          /* This fixture models an application retained across reset, not a
+           * claim that every board retains RAM. Reset alone must not expose
+           * running geometry: a subsequent application wake is still needed. */
+          sensor.application_state = MOCK_APPLICATION_RESET_NEEDS_WAKE;
+          sensor.retained_application_resets++;
+          sensor.inactive_wake_commands = 0;
+          sensor.wake_first = sensor.wake_last = 0;
+          sensor.wake_ready_time = 0;
+          sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = 0;
+          sensor.registers[FT9361_REG_SENSOR_ID_LOW] = 0;
+        }
+      else if (!special_reset && !sensor.persistent_cold && !(sensor.rom_probe && !sensor.probe_started))
         {
           sensor.cold_start = FALSE;
           sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
@@ -627,6 +718,15 @@ set_reset (guint32 value)
         }
     }
   return 0;
+}
+
+static void
+resume_retained_application (void)
+{
+  g_assert_true (sensor.retained_application_ram);
+  sensor.application_state = MOCK_APPLICATION_RUNNING;
+  sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
+  sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
 }
 
 static gboolean
@@ -667,7 +767,7 @@ sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
   gboolean high = !!(sensor.spi_mode & SPI_CS_HIGH);
   gboolean selected = high == fixture->required_high;
   guint8 previous = sensor.wake_previous_opcode;
-  gint64 now = g_get_monotonic_time ();
+  gint64 now = protocol_time ();
 
   if (sensor.wake_fault_injected)
     {
@@ -685,7 +785,11 @@ sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
     case 0x70:
       g_assert_cmpuint (length, ==, 1);
       if (!sensor.wake_commands[0] && !sensor.wake_commands[1])
-        sensor.resets_before_wake = sensor.hardware_asserts;
+        {
+          sensor.resets_before_wake = sensor.hardware_asserts;
+          g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RESET_NEEDS_WAKE);
+          g_assert_true (sensor.retained_application_ram);
+        }
       sensor.wake_commands[high]++;
       g_assert_cmpuint (sensor.wake_commands[high], <=, 12);
       if (sensor.wake_commands[high] % 2 == 0)
@@ -724,10 +828,9 @@ sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
       if (tx[2] == 0x20)
         {
           g_assert_cmpuint (length, ==, 6);
-          g_assert_cmpuint (previous, ==, sensor.wake_status_reads[high] ? 0x70 : 0x10);
-          if (!sensor.wake_status_reads[high])
-            g_assert_cmpuint (sensor.wake_early_geometry_reads[high], ==, 2);
-          g_assert_cmpint (now - sensor.wake_command_time[high], >=, 2000);
+          g_assert_cmpuint (previous, ==, 0x70);
+          /* CheckFWExist reads MCU status immediately after the pair. */
+          g_assert_cmpint (now, ==, sensor.wake_command_time[high]);
           g_assert_cmpuint (sensor.wake_commands[high], ==, 2 * (sensor.wake_status_reads[high] + 1));
           sensor.wake_status_reads[high]++;
           sensor.wake_status_time[high] = now;
@@ -746,26 +849,20 @@ sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
           if (selected && sensor.wake_ready_time)
             {
               g_assert_cmpint (now - sensor.wake_ready_time, >=, 350000);
+              resume_retained_application ();
               sensor.wake_geometry_reads++;
               g_assert_cmpuint (tx[2], ==, sensor.wake_geometry_reads % 2 ? 0x14 : 0x15);
               rx[4] = tx[2] == 0x14 ? sensor.model->width : sensor.model->height;
+              if (fixture->fault == LEGACY_WAKE_UNKNOWN)
+                rx[4] = 0x7f;
               if (fixture->fault == LEGACY_WAKE_UNSTABLE && sensor.wake_geometry_reads > 2)
                 rx[4] = 0x7f;
             }
           else if (sensor.wake_commands[high])
             {
-              /* The immediate A1 fast path must remain blank for a sensor
-               * which needs MCU readiness and the later settling interval. */
-              g_assert_cmpuint (sensor.wake_commands[high], ==, 2);
-              g_assert_cmpint (now - sensor.wake_command_time[high], >=, 2000);
+              /* Any geometry read before readiness is observable and must
+               * not manufacture a running application for the driver. */
               sensor.wake_early_geometry_reads[high]++;
-              g_assert_cmpuint (sensor.wake_early_geometry_reads[high], <=, 2);
-              g_assert_cmpuint (tx[2], ==, sensor.wake_early_geometry_reads[high] % 2 ? 0x14 : 0x15);
-              if (selected && fixture->fault == LEGACY_WAKE_UNKNOWN)
-                {
-                  sensor.wake_geometry_reads++;
-                  rx[4] = 0x7f;
-                }
             }
           else
             {
@@ -798,6 +895,49 @@ sleeping_legacy_transfer (const guint8 *tx, guint8 *rx, guint length)
 
     default:
       g_assert_not_reached ();
+    }
+}
+
+/* Count actual bus transactions, not state-machine states. A zero C6 reply
+ * remains zero even after all retries; it is not an artificial early ack. */
+static void
+record_factory_transaction (const guint8 *tx, guint length)
+{
+  guint high = !!(sensor.spi_mode & SPI_CS_HIGH);
+  gint64 now = protocol_time ();
+
+  if (tx[0] == 0xff)
+    {
+      g_assert_cmpuint (length, ==, 4);
+      g_assert_cmpuint (tx[1], ==, 0);
+      g_assert_cmpuint (tx[2], ==, 0);
+      g_assert_cmpuint (tx[3], ==, 0);
+      sensor.factory_wake_time = now;
+      sensor.factory_pending = TRUE;
+      sensor.factory_geometry_reads = 0;
+    }
+  else if (tx[0] == 0x91 && length == 39)
+    {
+      g_assert_cmpint (now - sensor.factory_wake_time, >=, 5000);
+      sensor.factory_info_reads[high]++;
+    }
+  else if (length >= 4 && tx[0] == 0x09 && tx[2] == 0xc6)
+    {
+      sensor.factory_c6_writes[high]++;
+      sensor.c6_write_time = now;
+    }
+  else if (length >= 4 && tx[0] == 0x08 && tx[2] == 0xc6)
+    {
+      g_assert_cmpint (now - sensor.c6_write_time, >=, 4000);
+      sensor.factory_c6_reads[high]++;
+    }
+  else if (length == 12 && tx[0] == 0x04 && tx[2] == 0x9a && tx[3] == 0x8b)
+    {
+      sensor.factory_id_reads[high]++;
+    }
+  else if (tx[0] == 0x90)
+    {
+      sensor.factory_pending = FALSE;
     }
 }
 
@@ -843,6 +983,19 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       struct gpio_v2_line_values *value = argument;
       g_assert_cmpint (fd, ==, sensor.reset_fd);
       g_assert_cmpuint (value->mask, ==, 1);
+      if (sync_test.enabled)
+        {
+          g_assert_cmpuint (value->bits, ==, 0);
+          g_assert_cmpuint (sync_test.checks, ==, 1);
+          sync_test.worker = g_thread_self ();
+          sync_test.releases++;
+          if (sync_test.scenario == 7)
+            {
+              errno = EIO;
+              return -1;
+            }
+          return 0;
+        }
       if (sensor.closing_transport)
         {
           g_assert_cmpuint (value->bits, ==, 0);
@@ -943,9 +1096,30 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   transfer = argument;
   tx = (const guint8 *) (guintptr) transfer->tx_buf;
   rx = (guint8 *) (guintptr) transfer->rx_buf;
+  if (sync_test.enabled)
+    {
+      const guint8 expected[] = { 0x55, 0xaa };
+      g_assert_cmpuint (sync_test.releases, ==, 1);
+      g_assert_true (sync_test.worker == g_thread_self ());
+      g_assert_cmpmem (tx, transfer->len, expected, sizeof expected);
+      sync_test.messages++;
+      if (sync_test.scenario == 4)
+        sensor.epoch++;
+      if (sync_test.scenario == 5)
+        {
+          errno = EIO;
+          return -1;
+        }
+      return sync_test.scenario == 1 ? 0 : sync_test.scenario == 2 ? 1 : 2;
+    }
   result = transfer->len;
   g_mutex_lock (&sensor.lock);
   sensor.spi_transactions++;
+  record_factory_transaction (tx, transfer->len);
+  if (tx[0] == 0x5a)
+    sensor.special_wake = TRUE;
+  else if (tx[0] == 0x70 || tx[0] == 0x90)
+    sensor.special_wake = FALSE;
   if (cs_fixture)
     {
       if (!!(sensor.spi_mode & SPI_CS_HIGH) != cs_fixture->required_high)
@@ -959,8 +1133,6 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
       if (tx[0] == 0x10 && (tx[2] == 0x14 || tx[2] == 0x15))
         sensor.selected_geometry_reads++;
     }
-  if (tx[0] == 0x5a)
-    sensor.special_wake = TRUE;
   if (tx[0] == 0x90)
     sensor.probe_started = TRUE;
   if (probe_fixture && tx[0] == 0x70)
@@ -978,27 +1150,38 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
 
       if (rx)
         memset (rx, 0, transfer->len);
+      if (selected && tx[0] == 0x5a)
+        {
+          if (probe_fixture->cancel_wake)
+            g_cancellable_cancel (sensor.cancellable);
+          if (probe_fixture->fail_wake || probe_fixture->short_wake)
+            {
+              g_mutex_unlock (&sensor.lock);
+              errno = EIO;
+              return probe_fixture->fail_wake ? -1 : (int) transfer->len - 1;
+            }
+        }
+      if (selected && probe_fixture->legacy_after_reset && sensor.hardware_deasserts &&
+          tx[0] == 0x10 && (tx[2] == 0x14 || tx[2] == 0x15))
+        {
+          /* A supported-looking application reply cannot override the
+           * already confirmed unsupported silicon identity after cleanup. */
+          g_assert_cmpuint (transfer->len, ==, 5);
+          rx[4] = tx[2] == 0x14 ? 0x40 : 0x50;
+        }
       if (selected && probe_fixture->mode_required && tx[0] == 0x09 && tx[2] == 0xc6)
         sensor.special_mode = tx[3];
       if (selected && tx[0] == 0x08 && tx[2] == 0xc6)
         rx[4] = sensor.special_mode;
       if (selected && (!probe_fixture->mode_required || sensor.special_mode == 1) &&
           tx[0] == 0x04 && tx[2] == 0x9a && tx[3] == 0x8b &&
-          ((id == 0x9362 && transfer->len == 12 && tx[5] == 1) ||
-           (sensor.special_mode == 1 && transfer->len == 12 && tx[5] == 1) ||
-           (id != 0x9362 && id != 0x9368 && transfer->len == 10 && tx[5] == 0)))
+          id != 0x9368 && transfer->len == 12 && tx[5] == 1)
         {
           sensor.special_reads++;
           if (probe_fixture->unstable && sensor.special_reads > 1)
             id = 0;
           rx[6] = id >> 8;
           rx[7] = id;
-          if (transfer->len == 10)
-            {
-              guint16 crc = fpi_fte3600_ft93xx_crc16 (rx + 6, 2);
-              rx[8] = crc >> 8;
-              rx[9] = crc ^ (probe_fixture->corrupt_crc ? 1 : 0);
-            }
         }
       else if (selected && tx[0] == 0x04 && tx[2] == 0x98 && tx[3] == 0x16)
         {
@@ -1063,11 +1246,12 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
           break;
         }
       {
-        gint64 when = g_get_monotonic_time ();
+        gint64 when = protocol_time ();
 
         g_array_append_val (sensor.soft_reset_times, when);
-        if (sensor.inactive)
+        if (sensor.application_state != MOCK_APPLICATION_RUNNING)
           {
+            g_assert_true (sensor.retained_application_ram);
             sensor.inactive_wake_commands++;
             if (sensor.inactive_wake_commands == 1)
               sensor.wake_first = when;
@@ -1084,6 +1268,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
           }
       }
       sensor.resets++;
+      if (sensor.factory_pending)
+        sensor.discovery_application_commands++;
       sensor.armed = FALSE;
       sensor.finger_ready = FALSE;
       if (sensor.images && sensor.fail_cleanup_status)
@@ -1117,7 +1303,7 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     case 0x10:
       g_assert_nonnull (rx);
       memset (rx, 0, transfer->len);
-      if (sensor.inactive)
+      if (sensor.application_state != MOCK_APPLICATION_RUNNING)
         {
           if (sensor.inactive_wake_commands < 2)
             {
@@ -1125,8 +1311,18 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
                 memset (rx, 1, transfer->len);
               break;
             }
-          g_assert_cmpint (g_get_monotonic_time () - sensor.wake_last, >=, 2000);
-          sensor.inactive = FALSE;
+          if (tx[2] == FT9361_REG_MCU_STATUS)
+            {
+              rx[4] = 0xa5;
+              rx[5] = 0x5a;
+              sensor.wake_ready_time = protocol_time ();
+              break;
+            }
+          g_assert_true (tx[2] == FT9361_REG_SENSOR_ID_HIGH ||
+                         tx[2] == FT9361_REG_SENSOR_ID_LOW);
+          g_assert_cmpint (sensor.wake_ready_time, >, 0);
+          g_assert_cmpint (protocol_time () - sensor.wake_ready_time, >=, 350000);
+          resume_retained_application ();
         }
       if (wake_fixture && (tx[2] == FT9361_REG_SENSOR_ID_HIGH || tx[2] == FT9361_REG_SENSOR_ID_LOW))
         {
@@ -1218,6 +1414,8 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         }
       if (transfer->len == 8 && tx[2] == 0x85 && tx[3] == 0xc0)
         {
+          if (b38_header_fixture == 2)
+            rx[2] = 0xef;
           rx[6] = sensor.rom_family >> 8;
           rx[7] = sensor.rom_family & 0xff;
           break;
@@ -1248,6 +1446,31 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
     default:
       g_assert_not_reached ();
     }
+  if (sensor.factory_pending && tx[0] == 0x10 &&
+      (tx[2] == 0x14 || tx[2] == 0x15) && ++sensor.factory_geometry_reads == 4)
+    {
+      sensor.factory_pending = FALSE;
+      if (sensor.backend_cold_only)
+        {
+          sensor.backend_cold_only = FALSE;
+          sensor.rom_probe = TRUE;
+          sensor.cold_start = TRUE;
+          sensor.persistent_cold = TRUE;
+        }
+      if (sensor.backend_reset_case)
+        {
+          /* Inject loss of MCU readiness after discovery, so this test still
+           * exercises the backend's recovery, not factory retry cleanup. */
+          sensor.hardware_recovery = TRUE;
+          sensor.cold_start = TRUE;
+          sensor.cancel_hardware_reset = sensor.backend_reset_case == 2;
+          sensor.fail_hardware_reset = sensor.backend_reset_case == 3;
+          sensor.backend_reset_asserts = sensor.hardware_asserts;
+          sensor.backend_reset_deasserts = sensor.hardware_deasserts;
+          g_array_set_size (sensor.reset_events, 0);
+          g_array_set_size (sensor.soft_reset_times, 0);
+        }
+    }
   g_mutex_unlock (&sensor.lock);
   if (result < 0)
     errno = EIO;
@@ -1255,7 +1478,7 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
 }
 
 /* Model a standalone descriptor owner without ACPI glue metadata. The real
- * core still installs its worker/IRQ guards and propagates close errors. */
+* core still installs its worker/IRQ guards and propagates close errors. */
 static gboolean
 separate_open (FpiDeviceFte3600 *self, GError **error)
 {
@@ -1275,6 +1498,11 @@ static gboolean
 separate_check (FpiDeviceFte3600 *self, GError **error)
 {
   transport_checks++;
+  if (sync_test.enabled)
+    {
+      g_assert_false (sync_test.releases > 0 && sync_test.messages == 0);
+      sync_test.checks++;
+    }
   g_assert_cmpint (self->spi_fd, >=, 0);
   g_assert_cmpint (self->irq_fd, !=, self->spi_fd);
   g_assert_null (self->resources.glue_path);
@@ -1284,7 +1512,10 @@ separate_check (FpiDeviceFte3600 *self, GError **error)
 static gboolean
 separate_reset (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
 {
-  if (set_reset (asserted) == 0)
+  struct gpio_v2_line_values value = { .mask = 1, .bits = !!asserted };
+
+  if ((sync_test.enabled ? __wrap_ioctl (self->reset_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &value) :
+       set_reset (asserted)) == 0)
     return TRUE;
   g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Synthetic reset failure");
   return FALSE;
@@ -1332,6 +1563,7 @@ static const Fte3600TransportOps separate_ops = {
   .check = separate_check,
   .set_reset = separate_reset,
   .get_events = separate_events,
+  .probe_runtime_first = TRUE,
 };
 
 typedef struct
@@ -1378,7 +1610,9 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   sensor.speed = 1000000;
   sensor.bits = 8;
   sensor.firmware_fd = -1;
-  sensor.inactive = wake_fixture;
+  sensor.retained_application_ram = wake_fixture || legacy_wake_fixture;
+  sensor.application_state = sensor.retained_application_ram ?
+                             MOCK_APPLICATION_DORMANT : MOCK_APPLICATION_RUNNING;
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
   sensor.registers[FT9361_REG_FW_VERSION] = sensor.model->firmware_version;
@@ -1395,6 +1629,12 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
       sensor.persistent_cold = TRUE;
       sensor.boot_reply = 0xef;
       sensor.boot38_id = 2;
+      if (b38_header_fixture)
+        {
+          sensor.boot_reply = 0;
+          sensor.rom_family = 0x1534;
+          sensor.otp = 0x10;
+        }
       sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = 0;
       sensor.registers[FT9361_REG_SENSOR_ID_LOW] = 0;
     }
@@ -1407,7 +1647,8 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   if (use_separate_irq_transport)
     FPI_DEVICE_FTE3600 (device)->transport_ops = &separate_ops;
   g_async_initable_init_async (G_ASYNC_INITABLE (device), G_PRIORITY_DEFAULT,
-                               legacy_wake_fixture ? sensor.cancellable : NULL,
+                               legacy_wake_fixture || (probe_fixture && probe_fixture->cancel_wake) ?
+                               sensor.cancellable : NULL,
                                init_complete, &initialized);
   while (!initialized.complete)
     g_main_context_iteration (NULL, TRUE);
@@ -1528,21 +1769,29 @@ test_sleeping_legacy_discovery (gconstpointer data)
   g_assert_cmpuint (sensor.wake_commands[!fixture->required_high], ==,
                     fixture->required_high || (fixture->cs_control && fixture->fault == LEGACY_WAKE_EXHAUSTED) ? 12 : 0);
   g_assert_cmpuint (sensor.wake_status_reads[fixture->required_high], ==,
-                    fixture->fault_command || fixture->fault == LEGACY_WAKE_UNKNOWN ? 0 : expected_commands / 2);
-  g_assert_cmpuint (sensor.sleeping_geometry_reads, ==, fixture->cs_control ? 4 : 2);
-  g_assert_cmpuint (sensor.wake_early_geometry_reads[fixture->required_high], ==,
-                    fixture->fault_command ? 0 : 2);
-  g_assert_cmpuint (sensor.wake_early_geometry_reads[!fixture->required_high], ==,
-                    fixture->required_high || (fixture->cs_control && fixture->fault == LEGACY_WAKE_EXHAUSTED) ? 2 : 0);
-  if (fixture->fault == LEGACY_WAKE_CANCEL)
-    g_assert_cmpint (g_get_monotonic_time () - sensor.wake_command_time[fixture->required_high], >=, 2000);
+                    fixture->fault_command ? 0 : expected_commands / 2);
+  g_assert_cmpuint (sensor.sleeping_geometry_reads, ==, 0);
+  g_assert_cmpuint (sensor.wake_early_geometry_reads[0], ==, 0);
+  g_assert_cmpuint (sensor.wake_early_geometry_reads[1], ==, 0);
   g_assert_cmpuint (sensor.wake_rom_queries, ==, fixture->fault == LEGACY_WAKE_EXHAUSTED ? 1 : 0);
-  /* Wake runs before the factory-mode negotiation. Only an unknown or fully
-   * exhausted application can reach that later negotiation and its cleanup. */
-  g_assert_cmpuint (sensor.resets_before_wake, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==,
-                    fixture->fault == LEGACY_WAKE_UNKNOWN || fixture->fault == LEGACY_WAKE_EXHAUSTED ?
-                    (fixture->cs_control ? 2 : 1) : 0);
+  /* Both factory rounds examine every connection before legacy wake. Each
+   * round has two full FT9368 reads and two special attempts; a special
+   * attempt still reads ID after both 31-try C6 helpers return zero. */
+  for (guint high = 0; high < 2; high++)
+    {
+      gboolean available = high == 0 || fixture->cs_control;
+
+      g_assert_cmpuint (sensor.factory_info_reads[high], ==, available ? 4 : 0);
+      g_assert_cmpuint (sensor.factory_c6_writes[high], ==, available ? 248 : 0);
+      g_assert_cmpuint (sensor.factory_c6_reads[high], ==, sensor.factory_c6_writes[high]);
+      g_assert_cmpuint (sensor.factory_id_reads[high], ==, available ? 8 : 0);
+    }
+  g_assert_cmpuint (sensor.resets_before_wake, ==, fixture->cs_control ? 4 : 2);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, sensor.resets_before_wake);
+  g_assert_cmpuint (sensor.retained_application_resets, ==, sensor.hardware_asserts);
+  g_assert_true (sensor.retained_application_ram);
+  if (fixture->fault == LEGACY_WAKE_OK)
+    g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
   g_assert_cmpuint (sensor.hardware_deasserts, ==, sensor.hardware_asserts);
   g_assert_false (sensor.reset_asserted);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -1589,8 +1838,8 @@ test_special_discovery (gconstpointer data)
       g_assert_no_error (error);
       g_assert_nonnull (strstr (fp_device_get_name (device), fixture->name));
       g_assert_cmpuint (sensor.special_reads, ==, 2);
-      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? (fixture->mode_required ? 5 : 1) : 0);
-      g_assert_cmpuint (sensor.resets, ==, fixture->mode_required ? (fixture->cs_control ? 24 : 12) : 0);
+      g_assert_cmpuint (sensor.cs_changes, ==, fixture->required_high ? 1 : 0);
+      g_assert_cmpuint (backend_reset_commands (), ==, 0);
       g_assert_cmpuint (sensor.last_closed_spi_mode, ==, fixture->required_high ? SPI_CS_HIGH : 0);
       g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
       g_assert_true (fp_device_has_feature (device, FP_DEVICE_FEATURE_CAPTURE));
@@ -1613,6 +1862,20 @@ test_special_discovery (gconstpointer data)
       g_assert_nonnull (error);
       g_assert_cmpuint (sensor.last_closed_spi_mode, ==, SPI_MODE_0);
       g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+      if (fixture->legacy_after_reset)
+        {
+          g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+          g_assert_cmpuint (sensor.special_reads, ==, 2);
+          g_assert_cmpuint (sensor.hardware_deasserts, >, 0);
+          g_assert_cmpuint (sensor.special_variant_reads, ==, fixture->id == 0x9391 ? 2 : 0);
+        }
+      if (fixture->fail_wake || fixture->short_wake || fixture->cancel_wake)
+        {
+          g_assert_error (error, G_IO_ERROR,
+                          (fixture->fail_wake ? G_IO_ERROR_FAILED :
+                           fixture->short_wake ? G_IO_ERROR_PARTIAL_INPUT : G_IO_ERROR_CANCELLED));
+          g_assert_cmpuint (sensor.special_reads, ==, 0);
+        }
       if (fixture->mode_required &&
           (fixture->unstable || fixture->unstable_variant || fixture->corrupt_crc))
         {
@@ -1626,12 +1889,15 @@ test_special_discovery (gconstpointer data)
           g_assert_cmpuint (sensor.special_reads, ==, 2);
         }
     }
+  /* Positive family evidence and failed/cancelled special transfers must not
+   * spill into another family's wake, ROM identification or firmware loader. */
+  g_assert_cmpuint (backend_reset_commands (), ==, 0);
+  g_assert_false (sensor.probe_started);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
-  /* Read-only rejection needs no reset. Stateful factory negotiation must
-   * clean up each failed polarity, including failed identity confirmation. */
-  if (fixture->id && (!fixture->required_high || fixture->cs_control))
-    g_assert_cmpuint (sensor.hardware_asserts, ==,
-                      fixture->mode_required ? fixture->required_high + !fixture->success : 0);
+  /* An ordinary negative retries on the same CS. Positive identity loss,
+   * cancellation and unsupported silicon terminate after bounded cleanup. */
+  g_assert_cmpuint (sensor.hardware_deasserts, ==, sensor.hardware_asserts);
+  g_assert_false (sensor.reset_asserted);
   finish_device (device);
 }
 
@@ -1661,27 +1927,39 @@ test_inactive_discovery (gconstpointer data)
   g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
   g_assert_cmpuint (sensor.awake_id_reads, ==, 4);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 2);
+  g_assert_cmpuint (sensor.retained_application_resets, ==, 2);
+  g_assert_true (sensor.retained_application_ram);
+  g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
 
   /* Enumeration's successful identity must not hide an inactive device at
    * the next open, nor make a failed/unstable wake authorize ROM recovery. */
-  sensor.inactive = TRUE;
+  sensor.application_state = MOCK_APPLICATION_DORMANT;
   sensor.inactive_wake_commands = 0;
   sensor.awake_id_reads = 0;
   sensor.fail_wake_at = scenario == 1 ? 1 : scenario == 2 ? 2 : 0;
   sensor.unstable_wake = scenario == 3;
   sensor.cancel_wake = scenario == 4;
+  if (scenario != 0 && scenario != 5)
+    sensor.epoch++; /* Exercise factory rediscovery after a PM generation change. */
   if (scenario == 0 || scenario == 5)
     {
       open_device (device);
       g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+      g_assert_cmpuint (sensor.retained_application_resets, ==, 2);
+      /* Fast open runs only the known backend's repeated identity check. */
+      g_assert_cmpuint (sensor.awake_id_reads, ==, 2);
+      g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
       g_assert_true (fp_device_close_sync (device, NULL, &error));
       g_assert_no_error (error);
-      sensor.inactive = TRUE;
+      sensor.application_state = MOCK_APPLICATION_DORMANT;
       sensor.inactive_wake_commands = 0;
       sensor.awake_id_reads = 0;
       open_device (device);
       g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
+      g_assert_cmpuint (sensor.retained_application_resets, ==, 2);
+      g_assert_cmpuint (sensor.awake_id_reads, ==, 2);
+      g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
     }
   else
     {
@@ -1697,6 +1975,7 @@ test_inactive_discovery (gconstpointer data)
       g_assert_false (fp_device_is_open (device));
     }
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_true (sensor.retained_application_ram);
   g_assert_false (sensor.probe_started);
   finish_device (device);
   wake_fixture = FALSE;
@@ -1729,7 +2008,7 @@ test_capture_reopen (void)
       g_assert_cmpuint (size, ==, FT9361_IMAGE_SIZE);
       for (guint i = 0; i < size; i++)
         g_assert_cmpuint (pixels[i], ==, (guint8) ~((i * 37 + 11) & 0xff));
-      g_assert_cmpuint (sensor.resets, ==, (round + 1) * 4);
+      g_assert_cmpuint (backend_reset_commands (), ==, (round + 1) * 4);
       resets = sensor.resets;
       g_assert_true (fp_device_close_sync (device, NULL, &error));
       g_assert_no_error (error);
@@ -1754,27 +2033,39 @@ test_cs_restore_reopen (gconstpointer data)
   g_assert_nonnull (strstr (fp_device_get_name (device), "FT9361"));
   g_assert_cmpuint (sensor.opens, ==, 1);
   g_assert_cmpuint (sensor.closes, ==, 1);
-  g_assert_cmpuint (sensor.cs_changes, ==, 1);
+  g_assert_cmpuint (sensor.cs_changes, ==, 5);
   g_assert_cmpuint (sensor.selected_geometry_reads, ==, 4);
   g_assert_cmpuint (sensor.last_closed_spi_mode, ==, selected_mode);
   g_assert_cmpuint (sensor.spi_mode, ==, original_mode);
 
-  for (guint round = 0; round < 2; round++)
+  for (guint round = 0; round < 3; round++)
     {
       g_autoptr(GError) error = NULL;
       g_autoptr(FpImage) image = NULL;
       guint geometry_reads = sensor.selected_geometry_reads;
       guint wrong_cs_transfers = sensor.wrong_cs_transfers;
 
-      /* Probe has already closed its descriptor. Each application open must
-       * begin at the original polarity, negotiate again, and reread identity
-       * before initializing the backend rather than reuse the probed mode. */
+      /* The first open reuses the probe result within the same kernel
+       * generation. Advancing the generation models suspend/resume and must
+       * force one complete factory discovery; the following open is fast
+       * again using the identity selected after resume. */
+      if (round == 1)
+        sensor.epoch++;
       open_device (device);
       g_assert_cmpuint (sensor.original_spi_mode, ==, original_mode);
       g_assert_cmpuint (sensor.spi_mode, ==, selected_mode);
-      g_assert_cmpuint (sensor.cs_changes, ==, round + 2);
-      g_assert_cmpuint (sensor.wrong_cs_transfers, >, wrong_cs_transfers);
-      g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, >=, 4);
+      if (round == 1)
+        {
+          g_assert_cmpuint (sensor.cs_changes, ==, 11);
+          g_assert_cmpuint (sensor.wrong_cs_transfers, >, wrong_cs_transfers);
+          g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, >=, 4);
+        }
+      else
+        {
+          g_assert_cmpuint (sensor.cs_changes, ==, round == 0 ? 6 : 12);
+          g_assert_cmpuint (sensor.wrong_cs_transfers, ==, wrong_cs_transfers);
+          g_assert_cmpuint (sensor.selected_geometry_reads - geometry_reads, ==, 2);
+        }
       image = fp_device_capture_sync (device, TRUE, NULL, &error);
       g_assert_no_error (error);
       g_assert_nonnull (image);
@@ -1787,8 +2078,8 @@ test_cs_restore_reopen (gconstpointer data)
       g_assert_cmpuint (sensor.opens, ==, round + 2);
       g_assert_cmpuint (sensor.closes, ==, round + 2);
     }
-  g_assert_cmpuint (sensor.images, ==, 2);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.images, ==, 3);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -1837,7 +2128,7 @@ test_controller_managed_cs (gconstpointer data)
       g_autoptr(FpImage) image = NULL;
       FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
 
-      sensor.inactive = TRUE;
+      sensor.application_state = MOCK_APPLICATION_DORMANT;
       sensor.inactive_wake_commands = 0;
       open_device (device);
       g_assert_cmpuint (sensor.inactive_wake_commands, ==, 2);
@@ -1857,7 +2148,10 @@ test_controller_managed_cs (gconstpointer data)
       g_assert_cmpuint (sensor.speed, ==, 500000);
     }
   g_assert_cmpuint (sensor.wrong_cs_transfers, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 4);
+  g_assert_cmpuint (sensor.retained_application_resets, ==, 4);
+  g_assert_true (sensor.retained_application_ram);
+  g_assert_cmpint (sensor.application_state, ==, MOCK_APPLICATION_RUNNING);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
   wake_fixture = FALSE;
@@ -1903,7 +2197,7 @@ test_family_warm_capture (gconstpointer data)
     }
   g_assert_cmpuint (sensor.images, ==, 2);
   g_assert_cmpuint (sensor.mode_writes, >=, 2);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -1928,7 +2222,7 @@ test_family_cancel_and_reuse (gconstpointer data)
   image = fp_device_capture_sync (device, TRUE, NULL, &error);
   g_assert_no_error (error);
   assert_image_matches_model (image);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -1943,6 +2237,7 @@ test_ft9348_rom_and_firmware (gconstpointer data)
 
   sensor.rom_probe = TRUE;
   sensor.cold_start = TRUE;
+  sensor.epoch++; /* A real power transition invalidates the kernel generation. */
   sensor.hardware_recovery = TRUE;
   if (scenario == 0)
     {
@@ -1955,7 +2250,9 @@ test_ft9348_rom_and_firmware (gconstpointer data)
     }
   else
     {
-      sensor.persistent_cold = TRUE;
+      sensor.rom_probe = FALSE;
+      sensor.cold_start = FALSE;
+      sensor.backend_cold_only = TRUE;
       if (scenario == 1)
         sensor.buffer_size = 9500; /* Fits 9224-byte capture, not 10319-byte firmware. */
       if (scenario == 3)
@@ -2006,10 +2303,10 @@ test_family_transfer_limit (gconstpointer data)
   else
     {
       g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (sensor.resets, ==, 0);
+      g_assert_cmpuint (backend_reset_commands (), ==, 0);
       g_assert_cmpuint (sensor.images, ==, 0);
     }
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -2022,19 +2319,21 @@ test_probe_open_identity_change (gconstpointer data)
   FpDevice *device = new_device_for_model (model);
 
   g_autoptr(GError) error = NULL;
-  guint transactions = sensor.spi_transactions;
+  guint geometry_reads = sensor.factory_geometry_reads;
 
   sensor.model = &models[changed_model];
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = sensor.model->width;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = sensor.model->height;
   sensor.registers[FT9361_REG_FW_VERSION] = sensor.model->firmware_version;
   sensor.registers[FT9361_REG_AGC_VERSION] = sensor.model->agc_version;
+  sensor.epoch++; /* Rebinding different silicon invalidates the kernel generation. */
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-  g_assert_cmpuint (sensor.spi_transactions, ==, transactions + 4);
-  g_assert_cmpuint (sensor.resets, ==, 0);
+  g_assert_cmpuint (sensor.factory_geometry_reads, ==, geometry_reads);
+  g_assert_cmpuint (sensor.factory_id_reads[0], ==, 16);
+  g_assert_cmpuint (backend_reset_commands (), ==, 0);
   g_assert_cmpuint (sensor.mode_writes, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -2124,9 +2423,8 @@ test_legacy_reject_unready_application (gconstpointer data)
     }
   else
     {
-      sensor.cold_start = TRUE;
-      sensor.rom_probe = TRUE;
-      sensor.persistent_cold = TRUE;
+      sensor.backend_cold_only = TRUE;
+      sensor.epoch++; /* Force factory discovery before injecting backend loss. */
       g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                              "*Sensor reset after open failure also failed:*");
     }
@@ -2136,7 +2434,7 @@ test_legacy_reject_unready_application (gconstpointer data)
   if (failure == 2)
     g_test_assert_expected_messages ();
   g_assert_cmpuint (sensor.mode_writes, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, failure == 2 ? 2 : 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, failure == 2 ? 2 : 0);
   if (failure != 2)
     g_assert_cmpuint (sensor.probe_packets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -2191,8 +2489,8 @@ test_bridge_reject (gconstpointer data)
   sensor.bad_mode = scenario == 2;
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
-  g_assert_cmpuint (sensor.resets, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (backend_reset_commands (), ==, 0);
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -2207,6 +2505,7 @@ test_rom_discovery (gconstpointer data)
 
   sensor.rom_probe = TRUE;
   sensor.cold_start = TRUE;
+  sensor.epoch++; /* A real power transition invalidates the kernel generation. */
   sensor.registers[FT9361_REG_SENSOR_ID_HIGH] = 0;
   sensor.registers[FT9361_REG_SENSOR_ID_LOW] = 0;
   if (scenario == 1)
@@ -2241,7 +2540,7 @@ test_rom_discovery (gconstpointer data)
       else
         g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
       /* Application wake is counted separately from backend resets. */
-      g_assert_cmpuint (sensor.resets, ==, 0);
+      g_assert_cmpuint (backend_reset_commands (), ==, 0);
     }
   g_assert_false (sensor.otp_enabled);
   g_assert_false (sensor.reset_asserted);
@@ -2261,10 +2560,9 @@ test_firmware_identity_gate (gconstpointer data)
   FpDevice *device = new_device ();
 
   /* A stale 40/50 signature does not authorize a firmware upload. */
-  sensor.rom_probe = TRUE;
   sensor.hardware_recovery = TRUE;
-  sensor.cold_start = TRUE;
-  sensor.persistent_cold = TRUE;
+  sensor.backend_cold_only = TRUE;
+  sensor.epoch++; /* Exercise the post-discovery firmware identity gate. */
   if (scenario == 0)
     sensor.rom_family = 0;
   if (scenario == 1)
@@ -2308,8 +2606,8 @@ assert_hardware_recovery_timing (void)
         {
           ResetEvent previous = g_array_index (sensor.reset_events, ResetEvent, i - 1);
 
-          /* Lower bounds only: scheduler latency must not cause flaky upper
-           * limits, and a removed wait must not silently pass. */
+          /* These are requested protocol delays on the virtual clock.
+           * Removing a wait must still fail even though dispatch uses 0 ms. */
           g_assert_cmpint (current.when - previous.when, >=, minimum_ms[i - 1] * 1000);
         }
     }
@@ -2344,10 +2642,8 @@ test_hardware_reset (gconstpointer data)
 
   g_autoptr(GError) error = NULL;
 
-  sensor.hardware_recovery = TRUE;
-  sensor.cold_start = TRUE;
-  sensor.cancel_hardware_reset = scenario == 1;
-  sensor.fail_hardware_reset = scenario == 2;
+  sensor.backend_reset_case = scenario + 1;
+  sensor.epoch++; /* Exercise recovery after a fresh factory discovery. */
   if (scenario == 2)
     g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                            "*Sensor reset after open failure also failed:*");
@@ -2370,14 +2666,14 @@ test_hardware_reset (gconstpointer data)
   if (scenario == 2)
     {
       g_test_assert_expected_messages ();
-      g_assert_cmpuint (sensor.hardware_asserts, ==, 1);
-      g_assert_cmpuint (sensor.hardware_deasserts, ==, 0);
+      g_assert_cmpuint (sensor.hardware_asserts - sensor.backend_reset_asserts, ==, 1);
+      g_assert_cmpuint (sensor.hardware_deasserts - sensor.backend_reset_deasserts, ==, 0);
     }
   else
     {
       /* Cancellation during the first pulse must not truncate either pulse. */
-      g_assert_cmpuint (sensor.hardware_asserts, ==, 2);
-      g_assert_cmpuint (sensor.hardware_deasserts, ==, 2);
+      g_assert_cmpuint (sensor.hardware_asserts - sensor.backend_reset_asserts, ==, 2);
+      g_assert_cmpuint (sensor.hardware_deasserts - sensor.backend_reset_deasserts, ==, 2);
       assert_hardware_recovery_timing ();
     }
   finish_device (device);
@@ -2402,7 +2698,7 @@ test_capture_error (gconstpointer data)
   image = fp_device_capture_sync (device, TRUE, sensor.cancellable, &error);
   g_assert_null (image);
   g_assert_error (error, G_IO_ERROR, (cancel ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
-  g_assert_cmpuint (sensor.resets, ==, 4);
+  g_assert_cmpuint (backend_reset_commands (), ==, 4);
   g_assert_cmpuint (sensor.images, ==, cancel_wait ? 0 : 1);
   g_assert_cmpint (fpi_device_get_current_action (device), ==, FPI_DEVICE_ACTION_NONE);
 
@@ -2561,7 +2857,7 @@ test_enroll_cancel (void)
   g_assert_null (enrolled);
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
   g_assert_cmpuint (sensor.images, ==, 0);
-  g_assert_cmpuint (sensor.resets, ==, 4);
+  g_assert_cmpuint (backend_reset_commands (), ==, 4);
   g_assert_cmpint (fpi_device_get_current_action (device), ==, FPI_DEVICE_ACTION_NONE);
   finish_device (device);
 }
@@ -2587,7 +2883,9 @@ test_open_error (gconstpointer data)
   if (sensor.bad_id)
     {
       g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
-      g_assert_cmpuint (sensor.resets, ==, 2);
+      /* Fast open reaches the known backend, which detects the conflicting
+       * identity and completes its bounded cleanup reset. */
+      g_assert_cmpuint (backend_reset_commands (), ==, 4);
       g_assert_cmpuint (sensor.firmware_opens, ==, 0);
       g_assert_false (sensor.probe_started);
     }
@@ -2650,10 +2948,12 @@ test_transport_restore_failure (void)
   g_assert_false (sensor.reset_asserted);
   g_clear_error (&error);
   /* A close failure can leave stock spidev in the trial state. The next
-   * session must recover the immutable ACPI baseline before sensor I/O. */
+   * session must recover the immutable ACPI baseline and repeat factory
+   * discovery before sensor I/O. */
   sensor.restore_failed = FALSE;
   open_device (device);
   g_assert_cmpuint (sensor.spi_mode, ==, SPI_MODE_0);
+  g_assert_cmpuint (sensor.factory_geometry_reads, ==, 4);
   finish_device (device);
 }
 
@@ -2802,9 +3102,57 @@ test_separate_irq_transport (void)
   transport_opens = transport_event_reads = transport_checks = 0;
   test_family_warm_capture (GUINT_TO_POINTER (2)); /* FT9338: 88 x 88. */
   test_family_cancel_and_reuse (GUINT_TO_POINTER (2));
-  g_assert_cmpuint (transport_opens, >=, 4);
+  g_assert_cmpuint (transport_opens, >=, 3);
   g_assert_cmpuint (transport_event_reads, >, 0);
   g_assert_cmpuint (transport_checks, >, transport_opens);
+  use_separate_irq_transport = FALSE;
+}
+
+/* The preceding standalone boot leaves application RAM running, but passes
+ * no cached identity, kernel generation or firmware pathname to this process.
+ * Probe and open must independently confirm it without factory/OTP writes. */
+static void
+test_medion_capture_after_boot (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpImage) image = NULL;
+  FpDevice *device;
+
+  use_separate_irq_transport = TRUE;
+  device = new_device_for_model (2);
+  sensor.rom_family = 0x1534;
+  sensor.otp = 0;
+  sensor.registers[0x30] = 0xbb;
+  open_device (device);
+  image = fp_device_capture_sync (device, TRUE, NULL, &error);
+  g_assert_no_error (error);
+  assert_image_matches_model (image);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.factory_c6_writes[0] + sensor.factory_c6_writes[1], ==, 0);
+  g_assert_cmpuint (sensor.factory_info_reads[0] + sensor.factory_info_reads[1], ==, 0);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_false (FPI_DEVICE_FTE3600 (device)->cached_identity_valid);
+  finish_device (device);
+  use_separate_irq_transport = FALSE;
+}
+
+static void
+test_medion_rechecks_runtime (void)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device;
+
+  use_separate_irq_transport = TRUE;
+  device = new_device_for_model (2);
+  sensor.registers[0x14] = 0x12;
+  g_assert_false (fp_device_open_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_assert_cmpuint (sensor.hardware_asserts, ==, 0);
+  g_assert_cmpuint (sensor.firmware_opens, ==, 0);
+  g_assert_cmpuint (sensor.factory_c6_writes[0] + sensor.factory_c6_writes[1], ==, 0);
+  finish_device (device);
   use_separate_irq_transport = FALSE;
 }
 
@@ -2812,6 +3160,7 @@ static void
 test_separate_close_failure (gconstpointer data)
 {
   gboolean probe_failure = GPOINTER_TO_INT (data);
+
   g_autoptr(GError) error = NULL;
   FpDevice *device;
 
@@ -2836,6 +3185,82 @@ test_separate_close_failure (gconstpointer data)
 }
 
 #include "fte3600-test-load.h"
+
+
+static void
+sync_test_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  fpi_fte3600_release_reset_and_sync (ssm);
+}
+
+static void
+sync_test_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  sync_test.done = TRUE;
+  sync_test.error = error;
+}
+
+static void
+test_reset_sync (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data) % 8;
+
+  use_separate_irq_transport = GPOINTER_TO_UINT (data) >= 8;
+  FpDevice *device = new_device ();
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+
+  open_device (device);
+  memset (&sync_test, 0, sizeof sync_test);
+  sync_test.enabled = TRUE;
+  sync_test.scenario = scenario;
+  if (scenario == 3)
+    sensor.epoch++;
+  if (scenario == 6)
+    self->spi_configuration_invalid = TRUE;
+  fpi_ssm_start (fpi_ssm_new (device, sync_test_handler, 1), sync_test_done);
+  while (!sync_test.done)
+    g_main_context_iteration (NULL, TRUE);
+  sync_test.enabled = FALSE;
+  g_assert_true (sync_test.worker != g_thread_self ());
+  if (scenario == 0)
+    g_assert_no_error (sync_test.error);
+  else if (scenario == 1 || scenario == 2)
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+  else if (scenario == 5 || scenario == 7)
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  else
+    g_assert_error (sync_test.error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+  g_assert_cmpuint (sync_test.releases, ==, scenario == 3 || scenario == 6 ? 0 : 1);
+  g_assert_cmpuint (sync_test.messages, ==, scenario == 3 || scenario == 6 || scenario == 7 ? 0 : 1);
+  if (scenario == 0 || scenario == 4)
+    g_assert_cmpuint (sync_test.checks, ==, 2);
+  g_clear_error (&sync_test.error);
+  if (scenario == 3 || scenario == 4 || scenario == 6)
+    {
+      g_autoptr(GError) error = NULL;
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+    }
+  finish_device (device);
+  use_separate_irq_transport = FALSE;
+}
+
+static void
+test_b38_header (gconstpointer data)
+{
+  GError *error = NULL;
+  FpDevice *device;
+
+  use_separate_irq_transport = GPOINTER_TO_UINT (data) == 3;
+  b38_header_fixture = use_separate_irq_transport ? 1 : GPOINTER_TO_UINT (data);
+  boot38_fixture = TRUE;
+  device = new_device_for_model_checked (2, 32768, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (fp_device_get_name (device), "FT9338"));
+  finish_device (device);
+  b38_header_fixture = 0;
+  use_separate_irq_transport = FALSE;
+}
 
 int
 main (int argc, char **argv)
@@ -2876,7 +3301,7 @@ main (int argc, char **argv)
     { .name = "FT9368", .id = 0x9368, .required_high = TRUE, .cs_control = TRUE, .success = TRUE },
     { .name = "9362-unstable", .id = 0x9362, .required_high = TRUE, .cs_control = TRUE, .unstable = TRUE },
     { .name = "9395-rejected", .id = 0x9391, .variant = 0xfff },
-    { .name = "9365-corrupt-crc", .id = 0x9365, .corrupt_crc = TRUE },
+    { .name = "9365-unstable", .id = 0x9365, .unstable = TRUE },
     { .name = "9368-bad-geometry", .id = 0x9368, .unstable = TRUE },
     { .name = "cs-setup-failure", .id = 0x9362, .required_high = TRUE, .cs_control = TRUE, .fail_cs = TRUE },
     { .name = "9362-transfer-too-small", .id = 0x9362, .limit = 8192 },
@@ -2891,10 +3316,22 @@ main (int argc, char **argv)
     { .name = "cold-alternate-id-disappears", .id = 0x9362, .mode_required = TRUE, .unstable = TRUE, .required_high = TRUE, .cs_control = TRUE },
     { .name = "cold-variant-changes", .id = 0x9391, .variant = 0x123, .mode_required = TRUE, .unstable_variant = TRUE },
     { .name = "cold-variant-bad-crc", .id = 0x9391, .variant = 0x123, .mode_required = TRUE, .corrupt_crc = TRUE },
+    { .name = "cold-9395-variant-blocks-legacy", .id = 0x9391, .variant = 0xfff,
+      .mode_required = TRUE, .legacy_after_reset = TRUE },
+    { .name = "cold-9395-alternate-blocks-legacy", .id = 0x9395, .required_high = TRUE,
+      .cs_control = TRUE, .mode_required = TRUE, .legacy_after_reset = TRUE },
+    { .name = "cold-wake-error-blocks-legacy", .id = 0x9362,
+      .mode_required = TRUE, .fail_wake = TRUE },
+    { .name = "cold-wake-short-blocks-legacy", .id = 0x9362,
+      .mode_required = TRUE, .short_wake = TRUE },
+    { .name = "cold-wake-cancel-blocks-legacy", .id = 0x9362,
+      .mode_required = TRUE, .cancel_wake = TRUE },
   };
 
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fte3600-lifecycle/transport/separate-irq", test_separate_irq_transport);
+  g_test_add_func ("/fte3600-lifecycle/transport/medion-capture-after-boot", test_medion_capture_after_boot);
+  g_test_add_func ("/fte3600-lifecycle/transport/medion-rechecks-runtime", test_medion_rechecks_runtime);
   g_test_add_data_func ("/fte3600-lifecycle/transport/separate-probe-close-error",
                         GINT_TO_POINTER (TRUE), test_separate_close_failure);
   g_test_add_data_func ("/fte3600-lifecycle/transport/separate-close-error",
@@ -3027,5 +3464,19 @@ main (int argc, char **argv)
                         test_open_error);
   g_test_add_data_func ("/fte3600-lifecycle/open/id-error", GUINT_TO_POINTER (2),
                         test_open_error);
+  for (guint i = 0; i < 8; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fte3600/reset-sync/%u", i);
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_reset_sync);
+    }
+  g_test_add_data_func ("/fte3600/b38-header/zero", GUINT_TO_POINTER (1), test_b38_header);
+  g_test_add_data_func ("/fte3600/b38-header/ef", GUINT_TO_POINTER (2), test_b38_header);
+  g_test_add_data_func ("/fte3600/b38-header/standalone", GUINT_TO_POINTER (3), test_b38_header);
+  for (guint i = 0; i < 8; i++)
+    if (i != 3 && i != 4 && i != 6) /* No kernel generation in standalone mode. */
+      {
+        g_autofree gchar *name = g_strdup_printf ("/fte3600/reset-sync/standalone-%u", i);
+        g_test_add_data_func (name, GUINT_TO_POINTER (i + 8), test_reset_sync);
+      }
   return g_test_run ();
 }

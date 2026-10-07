@@ -199,6 +199,50 @@ test_profile_registry (void)
 }
 
 static void
+test_ipa_adapter (void)
+{
+  guint8 pixels[FTE3600_IPA_IMAGE_SIZE];
+  Fte3600IpaFeatureSet expected, actual;
+  const Fte3600IpaFeatureSet empty = { 0 };
+
+  make_pattern (pixels, FTE3600_IPA_WIDTH, FTE3600_IPA_HEIGHT, FTE3600_IPA_WIDTH);
+  g_assert_cmpint (fpi_fte3600_ipa_extract (pixels, sizeof pixels, &expected),
+                   ==, FTE3600_IPA_OK);
+  g_assert_false (fpi_fte3600_ipa_supports_profile (NULL));
+  for (guint i = 0; i < G_N_ELEMENTS (expected_profiles); i++)
+    {
+      const Fte3600Sensor sensor = expected_profiles[i].sensor;
+      const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (sensor);
+      const gboolean supported = sensor == FTE3600_SENSOR_FT9361 ||
+                                 sensor == FTE3600_SENSOR_FT9369;
+      Fte3600MatchProfile copy = *profile;
+
+      g_assert_cmpint (fpi_fte3600_ipa_supports_profile (&copy), ==, supported);
+      memset (&actual, 0xa5, sizeof actual);
+      g_assert_cmpint (fpi_fte3600_ipa_extract_for_profile (&copy, pixels, sizeof pixels, &actual),
+                       ==, supported ? FTE3600_IPA_OK : FTE3600_IPA_ERR_PARAM);
+      g_assert_cmpmem (&actual, sizeof actual,
+                       supported ? &expected : &empty, sizeof expected);
+      if (!supported)
+        continue;
+
+      /* A matching byte count must not authorize a changed image geometry. */
+      copy.width *= 2;
+      copy.height /= 2;
+      g_assert_false (fpi_fte3600_ipa_supports_profile (&copy));
+      g_assert_cmpint (fpi_fte3600_ipa_extract_for_profile (&copy, pixels, sizeof pixels, &actual),
+                       ==, FTE3600_IPA_ERR_PARAM);
+      g_assert_cmpmem (&actual, sizeof actual, &empty, sizeof empty);
+      copy = *profile;
+      copy.processing_version++;
+      g_assert_false (fpi_fte3600_ipa_supports_profile (&copy));
+      g_assert_cmpint (fpi_fte3600_ipa_extract_for_profile (profile, pixels, sizeof pixels - 1, &actual),
+                       ==, FTE3600_IPA_ERR_PARAM);
+      g_assert_cmpmem (&actual, sizeof actual, &empty, sizeof empty);
+    }
+}
+
+static void
 test_extract (gconstpointer user_data)
 {
   const ExpectedProfile *expected = user_data;
@@ -1003,6 +1047,7 @@ main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fte3600/family-template/profiles", test_profile_registry);
+  g_test_add_func ("/fte3600/family-template/ipa-adapter", test_ipa_adapter);
   g_test_add_func ("/fte3600/family-template/identity-isolation", test_identity_isolation);
   g_test_add_func ("/fte3600/family-template/legacy-v1", test_legacy_compatibility);
   g_test_add_func ("/fte3600/family-template/ft9769-mosaic", test_narrow_mosaic);

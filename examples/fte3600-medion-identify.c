@@ -257,16 +257,8 @@ wake_application (Diagnostic *diag, Fte3600Identity *identity, GError **error)
       if (!length || !exchange (diag, tx, rx, length, FALSE, error) ||
           !delay (diag, FTE3600_SOFT_RESET_INTERVAL_MS, error) ||
           !exchange (diag, tx, rx, length, FALSE, error) ||
-          !delay (diag, FTE3600_LEGACY_WAKE_REPLY_MS, error) ||
           !proceed (diag, error))
         return FALSE;
-      if (attempt == 0)
-        {
-          if (!awake_identity (diag, identity, error))
-            return FALSE;
-          if (identity->sensor != FTE3600_SENSOR_UNKNOWN)
-            return TRUE;
-        }
 
       length = fpi_fte3600_build_app_read (tx, sizeof tx, FTE3600_REG_MCU_STATUS, 2, error);
       if (!length || !exchange (diag, tx, rx, length, TRUE, error))

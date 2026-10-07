@@ -59,9 +59,15 @@ error differently in the virtual environment (by means of
 FTE3600 lifecycle tests
 ----------------------
 
+[FTE3600 documentation](../docs/fte3600/README.md) ·
+[Contribution and evidence rules](../CONTRIBUTING.md)
+
+FTE3600 fixtures use generated mathematical patterns only. The USB recording
+procedure above is not the procedure for creating FTE3600 fixtures.
+
 `test-fte3600-lifecycle` exercises the production FTE3600 driver through the
 public asynchronous device API (using its synchronous convenience wrappers).
-Link-time wrappers replace SPI ioctls, GPIO requests/events and platform
+Link-time wrappers replace SPI ioctls, reset GPIO requests, UIO IRQ reads and platform
 discovery; the real SPI worker threads, state machines and cancellation paths
 are retained. The image payload is an arithmetic pattern, not biometric data.
 No sensor, root access or firmware file is required.
@@ -75,3 +81,5 @@ the same device to detect stale state.
 
 Run both build policies with `./scripts/check-fte3600.sh`, or run
 `meson test -C BUILD fte3600-lifecycle --print-errorlogs` in an FTE3600 build.
+See the [validation records](../docs/fte3600/README.md#validation-and-historical-records)
+for executed results, build options and hardware-test limits.

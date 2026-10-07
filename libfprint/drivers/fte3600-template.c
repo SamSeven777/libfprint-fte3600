@@ -60,12 +60,43 @@ struct _Fte3600Template
   Fte3600BriskFeatureSet mosaic;
 };
 
+static gboolean
+template_uses_profile_policy (guint16 wire_version)
+{
+  return wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION ||
+         wire_version == FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION;
+}
+
+static gboolean
+template_has_ipa_records (guint16 wire_version)
+{
+  return wire_version == FTE3600_TEMPLATE_WIRE_VERSION_V3 ||
+         wire_version == FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION;
+}
+
 static guint16
 template_authentication_policy (const Fte3600Template *templ)
 {
-  return templ->wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION ?
+  return template_uses_profile_policy (templ->wire_version) ?
          fpi_fte3600_brisk_authentication_policy_version (templ->profile) :
          FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION;
+}
+
+static Fte3600BriskStatus
+template_match_for_version (const Fte3600Template        *templ,
+                            guint16                       wire_version,
+                            const Fte3600BriskFeatureSet *query,
+                            const Fte3600BriskFeatureSet *reference,
+                            gboolean                      mosaic,
+                            Fte3600BriskMatchResult      *result)
+{
+  /* Wire v1 and v3 preserve the historical FT9361 raw-coordinate policy. Every
+   * modern profile follows the same principal-axis geometry policy. */
+  if (!template_uses_profile_policy (wire_version))
+    return mosaic ? fpi_fte3600_brisk_match_mosaic (query, reference, result) :
+           fpi_fte3600_brisk_match (query, reference, result);
+  return mosaic ? fpi_fte3600_brisk_match_mosaic_for_profile (templ->profile, query, reference, result) :
+         fpi_fte3600_brisk_match_for_profile (templ->profile, query, reference, result);
 }
 
 static Fte3600BriskStatus
@@ -75,13 +106,8 @@ template_match (const Fte3600Template        *templ,
                 gboolean                      mosaic,
                 Fte3600BriskMatchResult      *result)
 {
-  /* Wire v1 and v3 preserve the historical FT9361 raw-coordinate policy. Every
-   * modern profile follows the same principal-axis geometry policy. */
-  if (templ->wire_version != FTE3600_TEMPLATE_PROFILE_WIRE_VERSION)
-    return mosaic ? fpi_fte3600_brisk_match_mosaic (query, reference, result) :
-           fpi_fte3600_brisk_match (query, reference, result);
-  return mosaic ? fpi_fte3600_brisk_match_mosaic_for_profile (templ->profile, query, reference, result) :
-         fpi_fte3600_brisk_match_for_profile (templ->profile, query, reference, result);
+  return template_match_for_version (templ, templ->wire_version, query,
+                                     reference, mosaic, result);
 }
 
 static void
@@ -756,6 +782,7 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
   g_auto(TemplateRoundingGuard) rounding_guard = { 0 };
   CanonicalSubtemplate candidate;
   FeatureSetValidation validation;
+  guint16 wire_version;
   gboolean have_nearest = FALSE;
   gboolean duplicate = FALSE;
 #if FTE3600_ENABLE_PERSONAL_AUTH
@@ -768,10 +795,9 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
     return FTE3600_TEMPLATE_INVALID_WIRE;
   if (templ == NULL)
     return FTE3600_TEMPLATE_INVALID_WIRE;
-  /* The current IPA adapter and V3 policy are scoped to FT9361. Equal
-   * dimensions do not make another sensor's templates interchangeable. */
-  if (ipa_features != NULL && templ->profile->sensor != FTE3600_SENSOR_FT9361)
+  if (ipa_features != NULL && !fpi_fte3600_ipa_supports_profile (templ->profile))
     return FTE3600_TEMPLATE_INVALID_WIRE;
+  wire_version = templ->wire_version;
   validation = canonicalize_feature_set (templ->profile, brisk_features, &candidate);
   if (validation != FEATURE_SET_VALID)
     return validation_to_status (validation);
@@ -783,6 +809,9 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
       if (!canonicalize_ipa_feature_set (ipa_features, &candidate.ipa_features))
         return FTE3600_TEMPLATE_INVALID_WIRE;
       candidate.has_ipa = TRUE;
+      wire_version = templ->profile->sensor == FTE3600_SENSOR_FT9361 ?
+                     FTE3600_TEMPLATE_WIRE_VERSION_V3 :
+                     FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION;
     }
 
   for (guint i = 0; i < templ->n_subtemplates; i++)
@@ -791,10 +820,10 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
 
       duplicate |=
         subtemplate_compare (&candidate, &templ->subtemplates[i]) == 0;
-      (void) template_match (templ, &candidate.features,
-                             &templ->subtemplates[i].features, FALSE, &match);
+      (void) template_match_for_version (templ, wire_version, &candidate.features,
+                                         &templ->subtemplates[i].features, FALSE, &match);
 #if FTE3600_ENABLE_PERSONAL_AUTH
-      if (templ->wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION)
+      if (template_uses_profile_policy (wire_version))
         consistent |= match.authentication_accepted;
       else
         consistent |= fte3600_match_practical_brisk (&match);
@@ -832,6 +861,10 @@ fpi_fte3600_template_add_dual_features (Fte3600Template              *templ,
     return FTE3600_TEMPLATE_RETRY_INCONSISTENT;
 #endif
 
+  /* Select the persisted policy as soon as IPA is accepted. Enrollment,
+   * mosaic reconstruction and verification must agree before and after an
+   * encode/decode roundtrip. Rejected samples never change the policy. */
+  templ->wire_version = wire_version;
   templ->subtemplates[templ->n_subtemplates++] = candidate;
   if (templ->n_subtemplates == FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES)
     {
@@ -918,7 +951,7 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
 
   data = g_malloc0 (total_size);
   memcpy (data, template_magic, sizeof (template_magic));
-  put_uint16_le (&data[8], has_any_ipa ? FTE3600_TEMPLATE_WIRE_VERSION_V3 : templ->wire_version);
+  put_uint16_le (&data[8], templ->wire_version);
   const gsize header_size = has_any_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
                             FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   put_uint16_le (&data[10], header_size);
@@ -928,12 +961,10 @@ fpi_fte3600_template_encode (const Fte3600Template *templ,
   put_uint16_le (&data[20], templ->profile->height);
   put_uint16_le (&data[22], FTE3600_TEMPLATE_FEATURE_RECORD_SIZE);
   put_uint16_le (&data[24], FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION);
-  put_uint16_le (&data[26], (!has_any_ipa && templ->wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION) ?
+  put_uint16_le (&data[26], template_uses_profile_policy (templ->wire_version) ?
                  fpi_fte3600_brisk_diagnostic_policy_version (templ->profile) :
                  FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION);
-  put_uint16_le (&data[28], (!has_any_ipa && templ->wire_version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION) ?
-                 template_authentication_policy (templ) :
-                 FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION);
+  put_uint16_le (&data[28], template_authentication_policy (templ));
   put_uint16_le (&data[30], FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   put_uint32_le (&data[36], templ->wire_processing_version);
   if (has_any_ipa)
@@ -1017,15 +1048,20 @@ validate_header (const guint8               *data,
   version = get_uint16_le (&data[8]);
   if (version != FTE3600_TEMPLATE_WIRE_VERSION &&
       version != FTE3600_TEMPLATE_PROFILE_WIRE_VERSION &&
-      version != FTE3600_TEMPLATE_WIRE_VERSION_V3)
+      version != FTE3600_TEMPLATE_WIRE_VERSION_V3 &&
+      version != FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_SCHEMA;
   identified = fpi_fte3600_match_profile_find (get_uint16_le (&data[16]));
   if (!identified ||
-      (version != FTE3600_TEMPLATE_PROFILE_WIRE_VERSION &&
-       identified->sensor != FTE3600_SENSOR_FT9361))
+      ((version == FTE3600_TEMPLATE_WIRE_VERSION ||
+        version == FTE3600_TEMPLATE_WIRE_VERSION_V3) &&
+       identified->sensor != FTE3600_SENSOR_FT9361) ||
+      (version == FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION &&
+       (identified->sensor != FTE3600_SENSOR_FT9369 ||
+        !fpi_fte3600_ipa_supports_profile (identified))))
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
-  const gboolean has_ipa = (version == FTE3600_TEMPLATE_WIRE_VERSION_V3);
+  const gboolean has_ipa = template_has_ipa_records (version);
   const gsize header_size = has_ipa ? FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE :
                             FTE3600_TEMPLATE_WIRE_HEADER_SIZE;
   const gsize max_size = has_ipa ? FTE3600_TEMPLATE_V3_CURRENT_MAX_WIRE_SIZE :
@@ -1045,7 +1081,8 @@ validate_header (const guint8               *data,
       if (get_uint32_le (&data[32]) != 1)
         return FTE3600_TEMPLATE_INVALID_WIRE;
       if (get_uint32_le (&data[36]) != identified->processing_version &&
-          get_uint32_le (&data[36]) != 0)
+          !(version == FTE3600_TEMPLATE_WIRE_VERSION_V3 &&
+            get_uint32_le (&data[36]) == 0))
         return FTE3600_TEMPLATE_INVALID_WIRE;
       if (get_uint16_le (&data[40]) != FTE3600_IPA_EXTRACTOR_SCHEMA_VERSION)
         return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
@@ -1066,11 +1103,11 @@ validate_header (const guint8               *data,
       FTE3600_BRISK_EXTRACTOR_SCHEMA_VERSION)
     return FTE3600_TEMPLATE_UNSUPPORTED_EXTRACTOR;
   if (get_uint16_le (&data[26]) !=
-      (version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION ?
+      (template_uses_profile_policy (version) ?
        fpi_fte3600_brisk_diagnostic_policy_version (identified) :
        FTE3600_BRISK_DIAGNOSTIC_POLICY_VERSION) ||
       get_uint16_le (&data[28]) !=
-      (version == FTE3600_TEMPLATE_PROFILE_WIRE_VERSION ?
+      (template_uses_profile_policy (version) ?
        fpi_fte3600_brisk_authentication_policy_version (identified) :
        FTE3600_BRISK_AUTHENTICATION_POLICY_VERSION))
     return FTE3600_TEMPLATE_UNSUPPORTED_POLICY;
@@ -1172,7 +1209,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
                              &canonical.features.features[i]) != 0)
           return FTE3600_TEMPLATE_INVALID_WIRE;
 
-      if (version == FTE3600_TEMPLATE_WIRE_VERSION_V3)
+      if (template_has_ipa_records (version))
         {
           if (offset > size || size - offset < FTE3600_TEMPLATE_IPA_RECORD_HEADER_SIZE)
             return FTE3600_TEMPLATE_INVALID_WIRE;
@@ -1237,7 +1274,7 @@ fpi_fte3600_template_decode (GBytes                    *wire,
       decoded->n_subtemplates++;
     }
   if (offset != size ||
-      (version == FTE3600_TEMPLATE_WIRE_VERSION_V3 && !has_any_ipa))
+      (template_has_ipa_records (version) && !has_any_ipa))
     return FTE3600_TEMPLATE_INVALID_WIRE;
 
   template_reconstruct_mosaic (decoded);

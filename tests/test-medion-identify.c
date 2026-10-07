@@ -405,7 +405,7 @@ test_wake_runtime (void)
   const Fte3600Sensor sensors[] = { FTE3600_SENSOR_FT9338, FTE3600_SENSOR_FT9348,
                                     FTE3600_SENSOR_FT9361, FTE3600_SENSOR_FT9536 };
   const gchar *expected = "[10ef140000][10ef150000][10ef140000][10ef150000]"
-                          "[70]W5;[70]W2;"
+                          "[70]W5;[70][10ef20000000]W350;"
                           "[10ef140000][10ef150000][10ef140000][10ef150000]";
 
   for (guint i = 0; i < G_N_ELEMENTS (signatures); i++)
@@ -416,13 +416,15 @@ test_wake_runtime (void)
 
         fixture_init (&f);
         f.runtime[0] = f.runtime[1] = blank ? 0xffff : 0;
-        f.awake[0] = f.awake[1] = signatures[i];
+        f.mcu[0] = 0xa55a;
+        f.settled[0] = f.settled[1] = signatures[i];
         result = run_success (&f);
         g_assert_cmpint (result.sensor, ==, sensors[i]);
         g_assert_cmpint (result.evidence, ==, FTE3600_IDENTITY_RUNTIME_GEOMETRY);
         g_assert_cmphex (result.response, ==, signatures[i]);
         g_assert_cmpstr (f.events->str, ==, expected);
-        g_assert_cmpuint (f.resets + f.boot_reads + f.mcu_reads, ==, 0);
+        g_assert_cmpuint (f.resets + f.boot_reads + f.awake_reads, ==, 0);
+        g_assert_cmpuint (f.mcu_reads, ==, 1);
         fixture_clear (&f);
       }
 }
@@ -442,9 +444,9 @@ test_wake_settle (void)
       g_assert_cmpint (result.sensor, ==, FTE3600_SENSOR_FT9338);
       g_assert_cmpuint (f.wake_commands, ==, attempt * 2);
       g_assert_cmpuint (f.mcu_reads, ==, attempt);
-      g_assert_cmpuint (f.awake_reads, ==, 2);
+      g_assert_cmpuint (f.awake_reads, ==, 0);
       g_assert_cmpuint (f.settled_reads, ==, 4);
-      g_assert_cmpuint (f.waits, ==, attempt * 3);
+      g_assert_cmpuint (f.waits, ==, attempt * 2);
       g_assert_cmpuint (f.resets + f.boot_reads, ==, 0);
       g_assert_true (g_str_has_suffix (f.events->str,
                                        "[10ef20000000]W350;[10ef140000][10ef150000]"
@@ -467,18 +469,11 @@ test_wake_rejection (void)
         g_autoptr(GError) error = NULL;
 
         fixture_init (&f);
-        if (settled)
-          {
-            f.mcu[0] = 0xa55a;
-            memcpy (f.settled, signatures[i], sizeof f.settled);
-          }
-        else
-          {
-            memcpy (f.awake, signatures[i], sizeof f.awake);
-          }
+        f.mcu[settled] = 0xa55a;
+        memcpy (f.settled, signatures[i], sizeof f.settled);
         error = run_failure (&f, i < 2 ? G_IO_ERROR_NOT_SUPPORTED : G_IO_ERROR_INVALID_DATA);
-        g_assert_cmpuint (f.wake_commands, ==, 2);
-        g_assert_cmpuint (f.mcu_reads, ==, settled);
+        g_assert_cmpuint (f.wake_commands, ==, 2 * (settled + 1));
+        g_assert_cmpuint (f.mcu_reads, ==, settled + 1);
         g_assert_cmpuint (f.resets + f.boot_reads, ==, 0);
         fixture_clear (&f);
       }
@@ -497,16 +492,18 @@ test_wake_cancel (void)
         f.cancel_exchange = 4; /* Before the first command. */
       else if (variant < 3)
         f.cancel_wake = variant;
+      else if (variant == 4)
+        f.cancel_exchange = 7; /* MCU read after the pair. */
       else
-        f.cancel_wait_ms = variant == 3 ? 5 : variant == 4 ? 2 : 350;
+        f.cancel_wait_ms = variant == 3 ? 5 : 350;
       f.mcu[0] = 0xa55a;
       error = run_failure (&f, G_IO_ERROR_CANCELLED);
       g_assert_cmpuint (f.wake_commands, ==, variant == 0 ? 0 : 2);
       g_assert_cmpuint (f.resets + f.boot_reads + f.settled_reads, ==, 0);
-      if (variant > 0 && variant < 5)
+      if (variant > 0 && variant < 4)
         {
           g_assert_cmpuint (f.awake_reads + f.mcu_reads, ==, 0);
-          g_assert_true (g_str_has_suffix (f.events->str, "[70]W5;[70]W2;"));
+          g_assert_true (g_str_has_suffix (f.events->str, "[70]W5;[70]"));
         }
       fixture_clear (&f);
     }
@@ -547,9 +544,7 @@ test_boot38_trace (void)
 
       for (guint attempt = 0; attempt < 6; attempt++)
         {
-          g_string_append (expected, "[70]W5;[70]W2;");
-          if (attempt == 0)
-            g_string_append (expected, "[10ef140000][10ef150000]");
+          g_string_append (expected, "[70]W5;[70]");
           g_string_append (expected, "[10ef20000000]");
           if (attempt < 5)
             g_string_append (expected, "W5;");

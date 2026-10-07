@@ -456,8 +456,28 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
   return status;
 }
 
+/**
+ * fpi_spi_transfer_set_prepare:
+ * @transfer: A single full-duplex SPI transfer
+ * @prepare: (nullable): Worker callback immediately before the message
+ *
+ * Set a preparation callback, for example to release a reset GPIO. Buffer and
+ * session validation precede this callback. Preparation and the SPI ioctl run
+ * in the same worker without another main-context dispatch or guard between
+ * them. The normal post-transfer guard and complete-length check still apply.
+ * A cancelled or invalid transfer does not run preparation.
+ */
+void
+fpi_spi_transfer_set_prepare (FpiSpiTransfer       *transfer,
+                              FpiSpiTransferPrepare prepare)
+{
+  g_return_if_fail (transfer != NULL);
+  g_return_if_fail (transfer->callback == NULL);
+  transfer->prepare = prepare;
+}
+
 static int
-transfer_full_duplex (FpiSpiTransfer *transfer)
+transfer_full_duplex (FpiSpiTransfer *transfer, GError **error)
 {
   struct spi_ioc_transfer xfer = {
     .tx_buf = (gsize) transfer->buffer_wr,
@@ -465,6 +485,8 @@ transfer_full_duplex (FpiSpiTransfer *transfer)
     .len = transfer->length_wr,
   };
 
+  if (transfer->prepare && !transfer->prepare (transfer->device, error))
+    return -1;
   /* This ioctl cannot be interrupted. */
   return ioctl (transfer->spidev_fd, SPI_IOC_MESSAGE (1), &xfer);
 }
@@ -481,6 +503,16 @@ transfer_thread_func (GTask        *task,
   int status = 0;
 
   g_autoptr(GError) error = NULL;
+
+  if (transfer->prepare && g_task_return_error_if_cancelled (task))
+    return;
+
+  if (transfer->prepare && !transfer->full_duplex)
+    {
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                               "SPI preparation requires one full-duplex message");
+      return;
+    }
 
   if (transfer->buffer_wr == NULL && transfer->buffer_rd == NULL)
     {
@@ -521,8 +553,14 @@ transfer_thread_func (GTask        *task,
           g_task_return_error (task, g_steal_pointer (&error));
           return;
         }
-      status = transfer_full_duplex (transfer);
-      if (status < 0)
+      if (transfer->prepare && g_task_return_error_if_cancelled (task))
+        return;
+      status = transfer_full_duplex (transfer, &error);
+      if (error)
+        {
+          g_task_return_error (task, g_steal_pointer (&error));
+        }
+      else if (status < 0)
         {
           g_task_return_new_error (task,
                                    G_IO_ERROR,

@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/spi/spidev.h>
 #include <unistd.h>
 
 G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE);
@@ -71,6 +72,8 @@ static void fte3600_start_reset (FpiDeviceFte3600   *self,
                                  GError             *operation_error);
 static void fte3600_complete_action_error (FpiDeviceFte3600 *self,
                                            GError           *error);
+static void fte3600_invalidate_cached_identity (FpiDeviceFte3600 *self);
+static void fte3600_cache_discovery (FpiDeviceFte3600 *self);
 
 void
 fpi_fte3600_clear_captured_image (FpiDeviceFte3600 *self)
@@ -157,6 +160,7 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
   if (error)
     {
+      fte3600_invalidate_cached_identity (self);
       self->idle_verified = FALSE;
       fpi_fte3600_deassert_hardware_reset_best_effort (
         self, "recovering from initialization failure");
@@ -169,6 +173,7 @@ fte3600_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       return;
     }
 
+  fte3600_cache_discovery (self);
   fpi_device_open_complete (dev, NULL);
 }
 
@@ -292,8 +297,9 @@ fte3600_enroll_worker (GTask        *task,
   job->extract_status =
     fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
 #if FTE3600_ENABLE_IPA_AUTH
-  if (job->input.profile->sensor == FTE3600_SENSOR_FT9361 &&
-      fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features) == FTE3600_IPA_OK)
+  if (fpi_fte3600_ipa_supports_profile (job->input.profile) &&
+      fpi_fte3600_ipa_extract_for_profile (job->input.profile, job->input.view.data,
+                                          job->input.view.length, &ipa_features) == FTE3600_IPA_OK)
     p_ipa = &ipa_features;
 #endif
 
@@ -698,6 +704,18 @@ fte3600_verify_worker (GTask        *task,
       goto out;
     }
 
+  if (!fpi_fte3600_ipa_supports_profile (job->input.profile))
+    {
+      if (job->engine_mode == FTE3600_ENGINE_MODE_IPA_ONLY)
+        {
+          g_task_return_error (task, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                 "IPA matching is not supported for this sensor profile"));
+          goto out;
+        }
+      job->engine_mode = FTE3600_ENGINE_MODE_BRISK_ONLY;
+    }
+
   job->extract_status = FTE3600_BRISK_INSUFFICIENT_FEATURES;
   job->ipa_extract_status = FTE3600_IPA_ERR_TOO_FEW_POINTS;
 
@@ -705,11 +723,11 @@ fte3600_verify_worker (GTask        *task,
     job->extract_status =
       fpi_fte3600_brisk_extract_for_profile (job->input.profile, &job->input.view, &features);
 
-  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY &&
-      job->input.profile->sensor == FTE3600_SENSOR_FT9361)
+  if (job->engine_mode != FTE3600_ENGINE_MODE_BRISK_ONLY)
     {
       job->ipa_extract_status =
-        fpi_fte3600_ipa_extract (job->input.view.data, job->input.view.length, &ipa_features);
+        fpi_fte3600_ipa_extract_for_profile (job->input.profile, job->input.view.data,
+                                            job->input.view.length, &ipa_features);
       if (job->ipa_extract_status == FTE3600_IPA_OK)
         p_ipa = &ipa_features;
     }
@@ -1046,6 +1064,8 @@ fte3600_reset_complete (FpiSsm *ssm, FpDevice *dev, GError *reset_error)
         if (!fpi_fte3600_transport_close (self, &cleanup) && !reset_error)
           reset_error = g_steal_pointer (&cleanup);
       }
+      if (reset_error)
+        fte3600_invalidate_cached_identity (self);
       fpi_fte3600_release_transport (self);
       fpi_device_close_complete (dev, reset_error);
       return;
@@ -1160,12 +1180,51 @@ fte3600_select_backend (FpiDeviceFte3600 *self, GError **error)
 }
 
 static void
+fte3600_invalidate_cached_identity (FpiDeviceFte3600 *self)
+{
+  self->cached_identity_valid = FALSE;
+  self->fast_open = FALSE;
+  self->cached_identity = (Fte3600Identity) { 0 };
+  g_clear_pointer (&self->cached_glue_path, g_free);
+}
+
+static void
+fte3600_reset_session (FpiDeviceFte3600 *self)
+{
+  self->idle_verified = FALSE;
+  self->session_failed = FALSE;
+  self->init_hardware_reset_attempted = FALSE;
+  self->init_firmware_upload_attempted = FALSE;
+  self->identity = (Fte3600Identity) { 0 };
+  self->rom_identity = (Fte3600Identity) { 0 };
+  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+}
+
+static void
+fte3600_cache_discovery (FpiDeviceFte3600 *self)
+{
+  if (!self->resources.glue_path)
+    {
+      fte3600_invalidate_cached_identity (self);
+      return;
+    }
+  self->cached_identity = self->identity;
+  self->cached_generation = self->resources.generation;
+  g_free (self->cached_glue_path);
+  self->cached_glue_path = g_strdup (self->resources.glue_path);
+  self->cached_cs_high = !!(self->spi_mode & SPI_CS_HIGH);
+  self->cached_identity_valid = TRUE;
+  self->fast_open = FALSE;
+}
+
+static void
 fte3600_discovery_failed (FpDevice *dev, GError *error)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
   g_autoptr(GError) cleanup = NULL;
 
+  fte3600_invalidate_cached_identity (self);
   if (!fpi_fte3600_transport_close (self, &cleanup) &&
       !g_error_matches (cleanup, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
     fp_warn ("Failed to release FTE3600 transport after discovery failure: %s", cleanup->message);
@@ -1199,6 +1258,7 @@ fte3600_discover_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       auth = fte3600_device_match_profile (self) != NULL;
 #endif
       self->probed_sensor = self->sensor->sensor;
+      fte3600_cache_discovery (self);
       fpi_device_update_features (dev, FP_DEVICE_FEATURE_VERIFY,
                                   auth ? FP_DEVICE_FEATURE_VERIFY : 0);
       if (auth)
@@ -1224,13 +1284,7 @@ fte3600_begin_discovery (FpDevice *dev)
       return;
     }
 
-  self->idle_verified = FALSE;
-  self->session_failed = FALSE;
-  self->init_hardware_reset_attempted = FALSE;
-  self->init_firmware_upload_attempted = FALSE;
-  self->identity = (Fte3600Identity){ 0 };
-  self->rom_identity = (Fte3600Identity){ 0 };
-  g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+  fte3600_reset_session (self);
   fpi_ssm_start (fpi_fte3600_discovery_new (self, FALSE), fte3600_discover_complete);
 }
 
@@ -1245,9 +1299,47 @@ fte3600_probe (FpDevice *dev)
 static void
 fte3600_open (FpDevice *dev)
 {
-  /* Revalidate identity in every new session; cached geometry cannot authorize
-  * firmware upload, and a different sensor cannot inherit old capabilities. */
-  fte3600_begin_discovery (dev);
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  GError *error = NULL;
+
+  if (!fpi_fte3600_transport_open (self, &error))
+    {
+      fte3600_discovery_failed (dev, error);
+      return;
+    }
+
+  fte3600_reset_session (self);
+  if (!self->cached_identity_valid ||
+      self->cached_generation != self->resources.generation ||
+      !self->cached_glue_path || !self->resources.glue_path ||
+      !g_str_equal (self->cached_glue_path, self->resources.glue_path))
+    {
+      fte3600_invalidate_cached_identity (self);
+      fpi_ssm_start (fpi_fte3600_discovery_new (self, FALSE), fte3600_discover_complete);
+      return;
+    }
+
+  /* The kernel generation changes across suspend/resume and invalidated reset
+   * leases. Within one unchanged generation, reuse the identity selected by
+   * the complete vendor factory probe. Backend initialization still performs
+   * its protocol-specific wake, identity checks and calibration. */
+  if (!fpi_fte3600_set_cs_polarity (self, self->cached_cs_high, &error))
+    {
+      fte3600_invalidate_cached_identity (self);
+      fte3600_discovery_failed (dev, error);
+      return;
+    }
+  self->identity = self->cached_identity;
+  self->fast_open = TRUE;
+  if (!fte3600_select_backend (self, &error))
+    {
+      fte3600_invalidate_cached_identity (self);
+      fte3600_discovery_failed (dev, error);
+      return;
+    }
+  fp_dbg ("Reusing %s for unchanged FTE3600 generation %" G_GUINT64_FORMAT,
+          self->sensor->name, self->resources.generation);
+  fpi_ssm_start (self->backend->create_init (self), fte3600_init_complete);
 }
 
 static void
@@ -1256,6 +1348,8 @@ fte3600_close (FpDevice *dev)
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
 
   g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+  if (self->session_failed)
+    fte3600_invalidate_cached_identity (self);
   if (self->spi_fd < 0)
     {
       fpi_device_close_complete (dev, NULL);
@@ -1271,7 +1365,8 @@ fte3600_close (FpDevice *dev)
     {
       GError *error = NULL;
 
-      fpi_fte3600_transport_close (self, &error);
+      if (!fpi_fte3600_transport_close (self, &error))
+        fte3600_invalidate_cached_identity (self);
       self->idle_verified = FALSE;
       fpi_fte3600_release_transport (self);
       fpi_device_close_complete (dev, error);
@@ -1489,6 +1584,7 @@ fpi_device_fte3600_finalize (GObject *object)
   g_clear_pointer (&self->capture_tx, g_free);
   g_clear_pointer (&self->capture_rx, g_free);
   g_clear_pointer (&self->firmware_bytes, g_bytes_unref);
+  g_clear_pointer (&self->cached_glue_path, g_free);
   fpi_fte3600_clear_captured_image (self);
 
   G_OBJECT_CLASS (fpi_device_fte3600_parent_class)->finalize (object);

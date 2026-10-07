@@ -25,10 +25,13 @@ G_BEGIN_DECLS
  * preserves this layout, requires a registered model/geometry pair, and uses
  * the final reserved u32 as the image-processing revision.
  * Wire v3 uses a 48-byte header and dual-engine container storing both
- * BRISK and 2D-IPA features with Grand Synergy v3 fusion policy. */
+ * BRISK and 2D-IPA features with Grand Synergy v3 fusion policy for FT9361.
+ * Wire v4 uses the same layout and limits for FW9369, retaining its profiled
+ * BRISK policy and requiring its image-processing revision. */
 #define FTE3600_TEMPLATE_WIRE_VERSION 1
 #define FTE3600_TEMPLATE_PROFILE_WIRE_VERSION 2
 #define FTE3600_TEMPLATE_WIRE_VERSION_V3 3
+#define FTE3600_TEMPLATE_PROFILE_DUAL_WIRE_VERSION 4
 #define FTE3600_TEMPLATE_WIRE_HEADER_SIZE 40
 #define FTE3600_TEMPLATE_V3_WIRE_HEADER_SIZE 48
 #define FTE3600_TEMPLATE_FUSION_POLICY_VERSION 3

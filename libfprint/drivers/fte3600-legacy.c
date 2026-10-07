@@ -65,7 +65,6 @@ enum fte3600_init_state {
   FTE3600_INIT_FW_RESET_HIGH,
   FTE3600_INIT_FW_RESET_ASSERT,
   FTE3600_INIT_FW_RESET_HOLD,
-  FTE3600_INIT_FW_RESET_DEASSERT,
   FTE3600_INIT_FW_SYNC,
   FTE3600_INIT_FW_UPLOAD,
   FTE3600_INIT_FW_UPLOAD_SETTLE,
@@ -319,9 +318,17 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_INIT_RESET_DELAY:
       if (!config->cold_recovery)
-        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+        {
+          if (self->fast_open)
+            fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
+                                           FTE3600_LEGACY_WAKE_GEOMETRY_MS);
+          else
+            fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+        }
       else
-        fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
+        {
+          fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
+        }
       return;
 
     case FTE3600_INIT_RESET_SETTLE:
@@ -377,7 +384,11 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
               self->small_rx[4], self->small_rx[5]));
           return;
         }
-      fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+      if (self->fast_open)
+        fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
+                                       FTE3600_LEGACY_WAKE_GEOMETRY_MS);
+      else
+        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
       return;
 
     case FTE3600_INIT_IDENTIFY_BOOT:
@@ -443,14 +454,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_next_state_delayed (ssm, FTE3600_RESET_LOW_MS);
       return;
 
-    case FTE3600_INIT_FW_RESET_DEASSERT:
-      fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
-      return;
-
     case FTE3600_INIT_FW_SYNC:
       /* Entry uses one H10/L20/H pulse followed immediately by 55 AA.
        * The 160 ms application startup delay belongs after upload. */
-      fte3600_submit_command (ssm, FTE3600_COMMAND_BOOT_SYNC, FALSE);
+      fpi_fte3600_release_reset_and_sync (ssm);
       return;
 
     case FTE3600_INIT_FW_UPLOAD:
@@ -951,9 +958,21 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
         fp_image_new (self->sensor->width, self->sensor->height);
       self->captured_image->flags |= FPI_IMAGE_PARTIAL;
 
-      for (gsize i = 0; i < self->image_size; i++)
-        self->captured_image->data[i] =
-          (guint8) ~self->capture_rx[FTE3600_IMAGE_DATA_OFFSET + i];
+      {
+        const guint8 *src = &self->capture_rx[FTE3600_IMAGE_DATA_OFFSET];
+        guint8 *dst = self->captured_image->data;
+        gsize i = 0;
+
+        for (; i + sizeof (guint64) <= self->image_size; i += sizeof (guint64))
+          {
+            guint64 word;
+            memcpy (&word, src + i, sizeof (word));
+            word = ~word;
+            memcpy (dst + i, &word, sizeof (word));
+          }
+        for (; i < self->image_size; i++)
+          dst[i] = (guint8) ~src[i];
+      }
 
       fp_dbg ("Captured FTE3600 image (turnaround %02x %02x)",
               self->capture_rx[6], self->capture_rx[7]);

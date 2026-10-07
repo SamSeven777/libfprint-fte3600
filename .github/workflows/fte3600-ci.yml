@@ -45,3 +45,10 @@ jobs:
           make -C kernel/fte3600 check
       - name: Build both authentication policies
         run: ./scripts/check-fte3600.sh
+      - name: Check linker-wrapped tests with production LTO
+        run: |
+          meson configure build-fte3600-ci-true -Db_lto=true
+          meson compile -C build-fte3600-ci-true
+          meson test -C build-fte3600-ci-true --no-rebuild --print-errorlogs \
+            fpi-device-cancel fte3600-context ft9368-backend fw9369-backend \
+            fte3600-special-probe fte3600-lifecycle fte3600-auth-lifecycle

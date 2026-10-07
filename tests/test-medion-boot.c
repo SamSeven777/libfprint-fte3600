@@ -22,6 +22,8 @@ typedef struct
   guint                   uploads;
   guint                   readbacks;
   guint                   prep_writes;
+  guint                   config_writes;
+  gboolean                bad_config_marker;
   guint                   soft_resets;
   guint                   geometry_before;
   guint                   geometry_after;
@@ -96,12 +98,33 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
               rx[5] = 0x5a;
             }
         }
+      else if (reg == 0x30)
+        {
+          g_assert_cmpuint (f->config_writes, ==, 3);
+          rx[4] = f->bad_config_marker ? 0 : 0xbb;
+        }
       else
         {
           g_assert_true (reg == 0x1a || reg == 0x3c);
           rx[4] = reg == 0x1a ? f->fw_version : f->agc_version;
           f->version_reads++;
         }
+    }
+  else if (tx[0] == 0x11)
+    {
+      const guint8 config[][5] = {
+        { 0x11, 0xee, 0x01, 0x01, 0 }, { 0x11, 0xee, 0x41, 0x0f, 0 },
+        { 0x11, 0xee, 0x30, 0xbb, 0 },
+      };
+
+      g_assert_cmpint (f->sensor, ==, FTE3600_SENSOR_FT9338);
+      g_assert_cmpuint (f->uploads, ==, 1);
+      g_assert_cmpuint (f->readbacks, ==, 1);
+      g_assert_cmpuint (f->status_reads, >, 0);
+      g_assert_cmpuint (f->config_writes, <, G_N_ELEMENTS (config));
+      g_assert_cmpmem (tx, length, config[f->config_writes], sizeof config[0]);
+      f->config_writes++;
+      g_string_append_printf (f->trace, "C%02x=%02x;", tx[2], tx[3]);
     }
   else if (tx[0] == 0x55)
     {
@@ -296,7 +319,7 @@ test_exact_boot (gconstpointer data)
     "A14;A15;A14;A15;R0;W10;R1;W20;R0;SYNC;"
     "Bc8=ff;Bca=ff;Bcb=ff;Bb9=bf;Bb9=ff;W20;UPLOAD;W2;READBACK;"
     "R0;W10;R1;W20;R0;W10;R0;W10;R1;W20;R0;W80;"
-    "A20;A14;A15;A14;A15;A1a;A3c;A20;R0;";
+    "A20;C01=01;W1;C41=0f;W1;C30=bb;W1;A30;A14;A15;A14;A15;A1a;A3c;A20;R0;";
   const gchar *expected48 =
     "A14;A15;A14;A15;R0;W10;R1;W20;R0;SYNC;UPLOAD;W2;"
     "R0;W10;R1;W20;R0;W10;R0;W10;R1;W20;R0;W160;SOFT;W5;SOFT;W2;"
@@ -405,7 +428,7 @@ test_readback_last_byte (void)
 static void
 test_application_rejected (void)
 {
-  for (guint variant = 0; variant < 6; variant++)
+  for (guint variant = 0; variant < 7; variant++)
     {
       Fixture f;
       g_autoptr(GError) error = NULL;
@@ -421,8 +444,10 @@ test_application_rejected (void)
         f.fw_version = 0x30;
       else if (variant == 4)
         f.agc_version = 0x31;
-      else
+      else if (variant == 5)
         f.final_status_busy = TRUE;
+      else
+        f.bad_config_marker = TRUE;
       error = run_failure (&f);
       g_assert_cmpuint (f.uploads, ==, 1);
       g_assert_cmpuint (f.asserts, ==, 3); /* Failure cleanup must not reboot. */

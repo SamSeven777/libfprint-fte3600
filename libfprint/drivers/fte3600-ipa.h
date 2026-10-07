@@ -9,6 +9,7 @@
 #include <glib.h>
 #include "../matchers/ipa/ipa.h"
 #include "fte3600-build-config.h"
+#include "fte3600-match-profile.h"
 
 G_BEGIN_DECLS
 
@@ -50,6 +51,14 @@ typedef struct
 Fte3600IpaStatus fpi_fte3600_ipa_extract (const guint8         *image,
                                           gsize                 length,
                                           Fte3600IpaFeatureSet *features);
+
+/* Experimental adapters for native 64x80 images. Capability does not make
+ * templates from distinct sensor profiles interchangeable. */
+gboolean fpi_fte3600_ipa_supports_profile (const Fte3600MatchProfile *profile);
+Fte3600IpaStatus fpi_fte3600_ipa_extract_for_profile (const Fte3600MatchProfile *profile,
+                                                     const guint8             *image,
+                                                     gsize                     length,
+                                                     Fte3600IpaFeatureSet     *features);
 
 Fte3600IpaStatus fpi_fte3600_ipa_match (const Fte3600IpaFeatureSet *query,
                                         const Fte3600IpaFeatureSet *reference,

@@ -9,8 +9,6 @@
 #include "fte3600-private.h"
 #include "fte3600-timing.h"
 #include "fte3600-protocol.h"
-#include "fte3600-fw9369-protocol.h"
-#include "fte3600-ft93xx-protocol.h"
 #include "fte3600-ft9368-protocol.h"
 #include "fte3600-legacy-recovery.h"
 #include "fte3600-special-probe.h"
@@ -25,6 +23,8 @@ enum fte3600_discover_state {
   DISCOVER_CHECK_BOOT,
   DISCOVER_IDENTIFY_38,
   DISCOVER_IDENTIFY_38_DONE,
+  DISCOVER_IDENTIFY_B38,
+  DISCOVER_IDENTIFY_B38_DONE,
   DISCOVER_ENTER,
   DISCOVER_QUERY,
   DISCOVER_QUERY_DELAY,
@@ -184,7 +184,14 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case DISCOVER_IDENTIFY_38_DONE:
+    case DISCOVER_IDENTIFY_B38_DONE:
       fpi_ssm_mark_completed (ssm);
+      return;
+
+    case DISCOVER_IDENTIFY_B38:
+      /* FAMILY_READ has replaced the boot-probe receive buffer. Its header
+      * bytes carry no boot-edition evidence. 1534 selects the B38 path. */
+      fpi_ssm_start_subsm (ssm, fpi_fte3600_legacy38_identify_new (self, FALSE));
       return;
 
     case DISCOVER_ENTER:
@@ -213,6 +220,13 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
     case DISCOVER_CHECK_FAMILY:
       self->family = ((guint16) self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET] << 8) |
                      self->discovery_rx[FTE3600_FAMILY_RESULT_OFFSET + 1];
+      if (self->family == 0x1534)
+        {
+          fp_dbg ("FTE3600 Boot-B38 ROM family %04x detected; branching to B38 identification",
+                  self->family);
+          fpi_ssm_jump_to_state (ssm, DISCOVER_IDENTIFY_B38);
+          return;
+        }
       if (self->family != 0x2b50 && self->family != 0x95a8 && self->family != 0x23dd)
         fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                                FP_DEVICE_ERROR_NOT_SUPPORTED, "Unsupported FTE3600 ROM family %04x", self->family));
@@ -343,7 +357,6 @@ enum {
   LEGACY_WAKE_FIRST,
   LEGACY_WAKE_INTERVAL,
   LEGACY_WAKE_SECOND,
-  LEGACY_WAKE_REPLY,
   LEGACY_WAKE_NSTATES,
 };
 
@@ -376,33 +389,26 @@ fte3600_legacy_wake_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
       break;
 
-    case LEGACY_WAKE_REPLY:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_LEGACY_WAKE_REPLY_MS);
-      break;
-
     default:
       g_assert_not_reached ();
     }
 }
 
-/* Identification is a bounded search over wire protocols, then electrical CS
- * polarity. No manufacturer/model name participates. Each positive result is
- * repeated before selecting a backend; unknown replies never authorize writes
- * of firmware. The ROM probe is deferred until application protocols failed. */
+/* Reference SPI factory rounds 0/1: FT9368, special family, then (round 1)
+ * legacy firmware status and geometry. Capability-gated alternate connections
+ * and repeated identity validation are Linux integration safeguards. Later
+ * reference rounds that guess a firmware family are deliberately excluded. */
 enum {
-  IDENTIFY_LEGACY_HIGH, IDENTIFY_LEGACY_SAVE, IDENTIFY_LEGACY_LOW,
-  IDENTIFY_LEGACY_CHECK, IDENTIFY_FW9369, IDENTIFY_FW9369_CHECK,
-  IDENTIFY_93XX, IDENTIFY_93XX_CHECK, IDENTIFY_93XX_VARIANT,
-  IDENTIFY_93XX_VARIANT_CHECK, IDENTIFY_9368_WAKE, IDENTIFY_9368_DELAY,
-  IDENTIFY_9368, IDENTIFY_9368_CHECK, IDENTIFY_NEXT_POLARITY,
+  IDENTIFY_RUNTIME_HIGH, IDENTIFY_RUNTIME_SAVE,
+  IDENTIFY_RUNTIME_LOW, IDENTIFY_RUNTIME_CHECK,
+  IDENTIFY_FACTORY_BEGIN, IDENTIFY_9368_WAKE, IDENTIFY_9368_DELAY,
+  IDENTIFY_9368, IDENTIFY_9368_CHECK,
+  IDENTIFY_NEGOTIATE, IDENTIFY_NEGOTIATE_CHECK, IDENTIFY_NEXT_CONNECTION,
   IDENTIFY_LEGACY_WAKE_BEGIN, IDENTIFY_LEGACY_WAKE_PAIR,
-  IDENTIFY_LEGACY_WAKE_PAIR_DONE, IDENTIFY_AWAKE_HIGH, IDENTIFY_AWAKE_SAVE,
-  IDENTIFY_AWAKE_LOW, IDENTIFY_AWAKE_CHECK,
   IDENTIFY_LEGACY_WAKE_MCU, IDENTIFY_LEGACY_WAKE_CHECK_MCU,
   IDENTIFY_LEGACY_WAKE_SETTLE, IDENTIFY_LEGACY_WAKE_HIGH,
   IDENTIFY_LEGACY_WAKE_SAVE, IDENTIFY_LEGACY_WAKE_LOW,
   IDENTIFY_LEGACY_WAKE_CHECK, IDENTIFY_LEGACY_WAKE_NEXT,
-  IDENTIFY_NEGOTIATE, IDENTIFY_NEGOTIATE_CHECK, IDENTIFY_NEGOTIATE_NEXT,
   IDENTIFY_ROM, IDENTIFY_DONE, IDENTIFY_CLEANUP, IDENTIFY_NSTATES,
 };
 
@@ -411,8 +417,9 @@ typedef struct
   guint32         original_mode;
   gboolean        alternate;
   gboolean        rom_alternate;
-  gboolean        negotiation_alternate;
   gboolean        wake_alternate;
+  guint           factory_round;
+  guint           ft9368_attempts;
   guint           wake_attempts;
   gboolean        unknown_application[2];
   Fte3600Identity candidate;
@@ -504,7 +511,6 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
   g_autoptr(GError) error = NULL;
   guint8 packet[64];
   gsize length;
-  guint16 id;
   Fte3600Identity identity;
   Fte3600Ft9368Info info;
   FpiSsm *child;
@@ -513,110 +519,60 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
     return;
   switch (state)
     {
-    case IDENTIFY_LEGACY_HIGH:
+    case IDENTIFY_RUNTIME_HIGH:
+      if (!self->transport_ops || !self->transport_ops->probe_runtime_first)
+        {
+          fpi_ssm_jump_to_state (ssm, IDENTIFY_FACTORY_BEGIN);
+          return;
+        }
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_HIGH, 1, TRUE);
       return;
 
-    case IDENTIFY_LEGACY_SAVE:
+    case IDENTIFY_RUNTIME_SAVE:
       self->identity_high = fpi_fte3600_read_result_byte (self);
       fpi_ssm_next_state (ssm);
       return;
 
-    case IDENTIFY_LEGACY_LOW:
+    case IDENTIFY_RUNTIME_LOW:
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_LOW, 1, TRUE);
       return;
 
-    case IDENTIFY_LEGACY_CHECK:
-      identity = fpi_fte3600_identify_runtime (self->identity_high, fpi_fte3600_read_result_byte (self));
-      if (identity.sensor == FTE3600_SENSOR_UNKNOWN && identity.response != 0 && identity.response != 0xffff)
-        data->unknown_application[data->alternate] = TRUE;
-      if (!fte3600_confirm_identity (ssm, identity, IDENTIFY_LEGACY_HIGH))
-        fte3600_next_protocol (ssm, IDENTIFY_FW9369);
-      return;
-
-    case IDENTIFY_FW9369:
-      length = fpi_fte3600_fw9369_build_word_read (packet, sizeof packet,
-                                                   FTE3600_FW9369_WORD_CHIP_ID, &error);
-      break;
-
-    case IDENTIFY_FW9369_CHECK:
-      id = ((guint16) self->discovery_rx[6] << 8) | self->discovery_rx[7];
-      if (id == FTE3600_FW9369_CHIP_ID &&
-          fte3600_confirm_identity (ssm, fpi_fte3600_identify_special (id), IDENTIFY_FW9369))
+    case IDENTIFY_RUNTIME_CHECK:
+      identity = fpi_fte3600_identify_runtime (self->identity_high,
+                                               fpi_fte3600_read_result_byte (self));
+      if (fte3600_confirm_identity (ssm, identity, IDENTIFY_RUNTIME_HIGH))
         return;
-      fte3600_next_protocol (ssm, IDENTIFY_93XX);
+      if (identity.response != 0 && identity.response != 0xffff)
+        {
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                 "Unrecognized running application geometry %04x", identity.response));
+          return;
+        }
+      /* A lost confirmation must fail, rather than reset a running device.
+       * With no application evidence, retain the complete factory path. */
+      fte3600_next_protocol (ssm, IDENTIFY_FACTORY_BEGIN);
       return;
 
-    case IDENTIFY_93XX:
-      length = fpi_fte3600_ft93xx_read16 (packet, sizeof packet, FT93XX_REG_CHIP_ID, &error);
-      break;
-
-    case IDENTIFY_93XX_CHECK:
-      id = ((guint16) self->discovery_rx[6] << 8) | self->discovery_rx[7];
-      if ((id == 0x9365 || id == 0x9391 || id == 0x9392) &&
-          !fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, &error))
-        {
-          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-          return;
-        }
-      if (fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, NULL) &&
-          fpi_fte3600_identify_special (id).evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
-        {
-          if (!data->confirming)
-            {
-              data->candidate = fpi_fte3600_identify_special (id);
-              data->confirming = TRUE;
-              fpi_ssm_jump_to_state (ssm, IDENTIFY_93XX);
-            }
-          else
-            {
-              fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                                     data->candidate.response == id ? FP_DEVICE_ERROR_NOT_SUPPORTED : FP_DEVICE_ERROR_PROTO,
-                                     "Unsupported or unstable FocalTech silicon ID %04x", id));
-            }
-          return;
-        }
-      if (!fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, NULL) ||
-          (id != 0x9365 && id != 0x9391 && id != 0x9392))
-        {
-          fte3600_next_protocol (ssm, IDENTIFY_9368_WAKE);
-          return;
-        }
-      /* 9391/1816=0fff is the unimplemented 9395 variant. Always check it
-      * before accepting 9391, including on the confirming observation. */
-      if (id == 0x9391)
-        {
-          fpi_ssm_next_state (ssm);
-          return;
-        }
-      fte3600_confirm_identity (ssm, fpi_fte3600_identify_special (id), IDENTIFY_93XX);
-      return;
-
-    case IDENTIFY_93XX_VARIANT:
-      length = fpi_fte3600_ft93xx_read16 (packet, sizeof packet, FT93XX_REG_VARIANT, &error);
-      break;
-
-    case IDENTIFY_93XX_VARIANT_CHECK:
-      if (!fpi_fte3600_ft93xx_read16_result (self->discovery_rx, FT93XX_REGISTER_READ_SIZE, &id, NULL) || id == 0x0fff)
-        fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                               FP_DEVICE_ERROR_NOT_SUPPORTED, "Unsupported FT9391/FT9395 variant response"));
-      else
-        fte3600_confirm_identity (ssm, fpi_fte3600_identify_special (0x9391), IDENTIFY_93XX);
+    case IDENTIFY_FACTORY_BEGIN:
+      data->ft9368_attempts = 0;
+      fpi_ssm_next_state (ssm);
       return;
 
     case IDENTIFY_9368_WAKE:
       if (self->max_transfer < FTE3600_FT9368_HEADER + FTE3600_FT9368_INFO_SIZE)
         {
-          fte3600_next_protocol (ssm, IDENTIFY_NEXT_POLARITY);
+          fte3600_next_protocol (ssm, IDENTIFY_NEGOTIATE);
           return;
         }
-      /* This is the vendor's bounded application wake probe, never an erase,
-       * reset or flash download. A response still needs full ID validation. */
+      /* 26d9c: the factory reads full application information after wake.
+       * It does not enter flash programming on this path. */
+      data->ft9368_attempts++;
       length = fpi_fte3600_ft9368_read (packet, sizeof packet, FTE3600_FT9368_WAKE, 0);
       break;
 
     case IDENTIFY_9368_DELAY:
-      fpi_ssm_next_state_delayed (ssm, 10);
+      fpi_ssm_next_state_delayed (ssm, FTE3600_FACTORY_FT9368_WAKE_MS);
       return;
 
     case IDENTIFY_9368:
@@ -633,33 +589,68 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
                                  FP_DEVICE_ERROR_PROTO, "FT9368 returned incompatible application metadata"));
           return;
         }
-      fte3600_next_protocol (ssm, IDENTIFY_NEXT_POLARITY);
+      /* In factory rounds 0/1, a negative first ReadChipID is followed by
+       * another complete wake/read at 240ce. A lost positive confirmation is
+       * still an error, not permission to start a different protocol. */
+      fte3600_next_protocol (ssm, data->ft9368_attempts < FTE3600_FACTORY_FT9368_ATTEMPTS ?
+                             IDENTIFY_9368_WAKE : IDENTIFY_NEGOTIATE);
       return;
 
-    case IDENTIFY_NEXT_POLARITY:
+    case IDENTIFY_NEGOTIATE:
+      fpi_ssm_start_subsm (ssm, fpi_fte3600_special_probe_new (self, &data->special_result));
+      return;
+
+    case IDENTIFY_NEGOTIATE_CHECK:
+      if (data->special_result.sensor != FTE3600_SENSOR_UNKNOWN)
+        {
+          self->identity = data->special_result;
+          fpi_ssm_mark_completed (ssm);
+          return;
+        }
+      if (data->special_result.evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
+        {
+          /* A repeated silicon identity cannot be reinterpreted as a legacy
+           * application after reset, even if its geometry registers reply. */
+          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                                 FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                 "Unsupported FocalTech silicon ID %04x",
+                                 data->special_result.response));
+          return;
+        }
+      fpi_ssm_next_state (ssm);
+      return;
+
+    case IDENTIFY_NEXT_CONNECTION:
       if (!data->alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
         {
           data->alternate = TRUE;
           if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
-            fpi_ssm_jump_to_state (ssm, IDENTIFY_LEGACY_HIGH);
+            fpi_ssm_jump_to_state (ssm, IDENTIFY_FACTORY_BEGIN);
           else
             fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+          return;
         }
-      else if (fpi_fte3600_set_cs_polarity (self, data->original_mode & SPI_CS_HIGH, &error))
+      if (!fpi_fte3600_set_cs_polarity (self, data->original_mode & SPI_CS_HIGH, &error))
         {
-          fpi_ssm_next_state (ssm);
+          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+          return;
+        }
+      if (++data->factory_round < FTE3600_FACTORY_APPLICATION_ROUNDS)
+        {
+          /* Reference round zero skips legacy detection and repeats the
+           * application factory. Do not collapse these into a fast path. */
+          data->alternate = FALSE;
+          fpi_ssm_jump_to_state (ssm, IDENTIFY_FACTORY_BEGIN);
         }
       else
         {
-          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+          fpi_ssm_next_state (ssm);
         }
       return;
 
     case IDENTIFY_LEGACY_WAKE_BEGIN:
-      /* Inactive legacy registers can also contain stale bus bytes. Retry
-       * only after the other family probes could identify/reject a chip;
-       * retain unknown_application so a failed wake cannot authorize ROM
-       * recovery. No identity is assumed: awake IDs must repeat unchanged. */
+      /* MultiCheckFWExist runs in reference round one. Geometry is read only
+       * after its positive MCU status and the factory's 350 ms settle. */
       data->wake_attempts = 0;
       fpi_ssm_next_state (ssm);
       return;
@@ -671,47 +662,8 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
                                                   "FTE3600 legacy application wake"));
       return;
 
-    case IDENTIFY_LEGACY_WAKE_PAIR_DONE:
-      /* Preserve the observed A1 fast path. Blank first responses instead
-       * enter the bounded MCU/settle path; retries do not repeat this shortcut. */
-      fpi_ssm_jump_to_state (ssm, data->wake_attempts == 1 ?
-                             IDENTIFY_AWAKE_HIGH : IDENTIFY_LEGACY_WAKE_MCU);
-      return;
-
-    case IDENTIFY_AWAKE_HIGH:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_HIGH, 1, TRUE);
-      return;
-
-    case IDENTIFY_AWAKE_SAVE:
-      self->identity_high = fpi_fte3600_read_result_byte (self);
-      fpi_ssm_next_state (ssm);
-      return;
-
-    case IDENTIFY_AWAKE_LOW:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_LOW, 1, TRUE);
-      return;
-
-    case IDENTIFY_AWAKE_CHECK:
-      identity = fpi_fte3600_identify_runtime (self->identity_high, fpi_fte3600_read_result_byte (self));
-      fp_dbg ("Legacy quick-wake 14/15 response: %04x (runtime geometry)", identity.response);
-      if (fte3600_confirm_identity (ssm, identity, IDENTIFY_AWAKE_HIGH))
-        return;
-      if (identity.sensor == FTE3600_SENSOR_UNKNOWN && identity.response != 0 && identity.response != 0xffff)
-        {
-          data->unknown_application[data->wake_alternate] = TRUE;
-          fte3600_next_protocol (ssm, IDENTIFY_LEGACY_WAKE_NEXT);
-        }
-      else
-        {
-          /* next_protocol rejects a blank reply after a positive candidate:
-           * such a change must not restart identification or authorize ROM. */
-          fte3600_next_protocol (ssm, IDENTIFY_LEGACY_WAKE_MCU);
-        }
-      return;
-
     case IDENTIFY_LEGACY_WAKE_MCU:
-      /* Windows Detect checks status directly after the pair. Linux retains
-       * the A1 reply delay and, on attempt one, the positive-geometry shortcut. */
+      /* CheckFWExist reads status immediately after the second 70. */
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
@@ -762,41 +714,6 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
           data->wake_alternate = TRUE;
           if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
             fpi_ssm_jump_to_state (ssm, IDENTIFY_LEGACY_WAKE_BEGIN);
-          else
-            fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-        }
-      else if (fpi_fte3600_set_cs_polarity (self, data->original_mode & SPI_CS_HIGH, &error))
-        {
-          fpi_ssm_next_state (ssm);
-        }
-      else
-        {
-          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-        }
-      return;
-
-    case IDENTIFY_NEGOTIATE:
-      fpi_ssm_start_subsm (ssm, fpi_fte3600_special_probe_new (self, &data->special_result));
-      return;
-
-    case IDENTIFY_NEGOTIATE_CHECK:
-      if (data->special_result.sensor != FTE3600_SENSOR_UNKNOWN)
-        {
-          self->identity = data->special_result;
-          fpi_ssm_mark_completed (ssm);
-          return;
-        }
-      if (data->special_result.evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
-        data->unknown_application[data->negotiation_alternate] = TRUE;
-      fpi_ssm_next_state (ssm);
-      return;
-
-    case IDENTIFY_NEGOTIATE_NEXT:
-      if (!data->negotiation_alternate && (self->transport_capabilities & FTE3600_TRANSPORT_CAP_CS_POLARITY))
-        {
-          data->negotiation_alternate = TRUE;
-          if (fpi_fte3600_set_cs_polarity (self, !(data->original_mode & SPI_CS_HIGH), &error))
-            fpi_ssm_jump_to_state (ssm, IDENTIFY_NEGOTIATE);
           else
             fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
         }

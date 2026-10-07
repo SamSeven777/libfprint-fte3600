@@ -23,13 +23,10 @@ void
 fpi_fte3600_secure_clear (gpointer data,
                           gsize    size)
 {
-  volatile guint8 *bytes = data;
-
-  if (data == NULL)
+  if (data == NULL || size == 0)
     return;
 
-  while (size-- > 0)
-    *bytes++ = 0;
+  explicit_bzero (data, size);
 }
 
 void
@@ -68,16 +65,12 @@ fpi_fte3600_transport_check (FpDevice *device, GError **error)
 }
 
 static gboolean
-set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
+write_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
 {
   struct gpio_v2_line_values value = { .mask = 1, .bits = !!asserted };
 
   if (self->transport_ops)
-    return fpi_fte3600_transport_check (FP_DEVICE (self), error) &&
-           self->transport_ops->set_reset (self, asserted, error) &&
-           fpi_fte3600_transport_check (FP_DEVICE (self), error);
-  if (!fpi_fte3600_resources_check (&self->resources, error))
-    return FALSE;
+    return self->transport_ops->set_reset (self, asserted, error);
   if (ioctl (self->reset_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &value) < 0)
     {
       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
@@ -85,7 +78,49 @@ set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
                    g_strerror (errno));
       return FALSE;
     }
-  return fpi_fte3600_resources_check (&self->resources, error);
+  return TRUE;
+}
+
+static gboolean
+set_reset_value (FpiDeviceFte3600 *self, gboolean asserted, GError **error)
+{
+  if (self->transport_ops)
+    return fpi_fte3600_transport_check (FP_DEVICE (self), error) &&
+           write_reset_value (self, asserted, error) &&
+           fpi_fte3600_transport_check (FP_DEVICE (self), error);
+  /* GPIO lease validity is independent of a failed SPI-mode rollback. */
+  return fpi_fte3600_resources_check (&self->resources, error) &&
+         write_reset_value (self, asserted, error) &&
+         fpi_fte3600_resources_check (&self->resources, error);
+}
+
+static gboolean
+release_reset_for_sync (FpDevice *device, GError **error)
+{
+  /* The SPI worker has validated the message and session. Its next operation
+   * is the prepared SPI ioctl, followed by the normal completion checks. */
+  return write_reset_value (FPI_DEVICE_FTE3600 (device), FALSE, error);
+}
+
+void
+fpi_fte3600_release_reset_and_sync (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+  FpiSpiTransfer *transfer;
+
+  self->idle_verified = FALSE;
+  transfer = fpi_spi_transfer_new_with_buffer_size (FP_DEVICE (self), self->spi_fd,
+                                                    self->max_transfer);
+  fpi_spi_transfer_write (transfer, FTE3600_BOOT_SYNC_SIZE);
+  fpi_fte3600_build_command (transfer->buffer_wr, FTE3600_BOOT_SYNC_SIZE,
+                             FTE3600_COMMAND_BOOT_SYNC, NULL);
+  fpi_spi_transfer_read (transfer, FTE3600_BOOT_SYNC_SIZE);
+  fpi_spi_transfer_set_full_duplex (transfer, TRUE);
+  fpi_spi_transfer_set_sensitive (transfer, TRUE);
+  fpi_spi_transfer_set_prepare (transfer, release_reset_for_sync);
+  /* Finish the pulse/handshake once reset is asserted. The next SSM state
+   * observes cancellation; no main-context work runs between release/sync. */
+  fpi_fte3600_submit_transfer (ssm, transfer, FALSE);
 }
 
 void
@@ -245,6 +280,7 @@ fpi_fte3600_submit_transfer (FpiSsm *ssm, FpiSpiTransfer *transfer,
   FpDevice *dev = fpi_ssm_get_device (ssm);
 
   transfer->ssm = ssm;
+
   fpi_spi_transfer_submit (
     transfer, cancellable ? fpi_device_get_cancellable (dev) : NULL,
     fpi_ssm_spi_transfer_cb, NULL);
@@ -553,7 +589,9 @@ fpi_fte3600_transport_open (FpiDeviceFte3600 *self, GError **error)
   self->spi_mode = mode;
   self->spi_configured = TRUE;
   self->spi_configuration_invalid = FALSE;
-  speed = MIN (MIN (self->original_speed, self->resources.acpi_speed_hz), FTE3600_SPI_SPEED_HZ);
+  speed = self->resources.acpi_speed_hz;
+  if (self->original_speed)
+    speed = MIN (self->original_speed, speed);
   if (!speed)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,

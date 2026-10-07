@@ -478,7 +478,7 @@ main (int argc, char **argv)
     }
   stage = "PROBE";
   g_print ("PROBE START: existing CS unchanged, mode 0; Windows-derived identity probes.\n"
-           "Wake/ROM negotiation may change sensor state. No firmware upload in this stage.\n");
+           "Checking running application first; empty replies use factory discovery. No firmware upload in this stage.\n");
   timeout_source = g_timeout_add_seconds (timeout, cancel_operation, cancellable);
   g_async_initable_init_async (G_ASYNC_INITABLE (self), G_PRIORITY_DEFAULT,
                                cancellable, probe_finished, &probe);
@@ -559,9 +559,12 @@ out:
     g_print ("IDENTIFY PASS: observations repeated and transport restored; "
              "no firmware upload, initialization or capture attempted.\n");
   if (status == EXIT_SUCCESS && boot)
-    g_print ("BOOT PASS: %s firmware started; runtime geometry and versions verified; "
-             "host transport restored. Capture has not been tested.\n",
-             fpi_fte3600_sensor_get (boot_sensor)->name);
+    {
+      g_print ("BOOT PASS: %s firmware started; runtime geometry and versions verified; "
+               "%shost transport restored. Capture has not been tested.\n",
+               fpi_fte3600_sensor_get (boot_sensor)->name,
+               boot_sensor == FTE3600_SENSOR_FT9338 ? "MCU configuration verified; " : "");
+    }
   if (status == EXIT_SUCCESS && test_ft9338)
     g_print ("FT9338 TEST PASS: ROM selection, complete RAM readback, application startup and MCU configuration verified; "
              "host transport restored. Capture has not been tested.\n");

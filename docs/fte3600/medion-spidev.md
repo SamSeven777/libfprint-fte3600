@@ -56,7 +56,7 @@ available since Linux 5.10. The GPIO interface is used directly; libgpiod is not
 required.
 
 For Fedora, the compiler and library dependencies follow the existing
-[build guide](install.md#1-prerequisites--dependencies):
+[build guide](install.md):
 
 ```sh
 sudo dnf install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
@@ -106,6 +106,29 @@ Share the text output, including the ROM/OTP selection and
 The test requests SPI and reset GPIO, without
 requesting the IRQ line or acquiring an image. It uses its own protocol engine,
 not the general driver's discovery or initialization state machines.
+
+If this action stops at OTP `00`, the explicit FT9338 experiment in issue #1
+uses the same downloaded file and does not require OTP classification:
+
+```sh
+sudo python3 scripts/medion-spidev.py --boot ft9338 \
+  --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
+```
+
+This manual path also performs the vendor MCU configuration before reporting
+`BOOT PASS`. After either `FT9338 TEST PASS` or `BOOT PASS`, test capture in
+the same boot, without suspending or running another sensor tool between them:
+
+```sh
+sudo python3 scripts/medion-spidev.py --capture "$PWD/test.pgm"
+```
+
+The capture command rereads and confirms the live application identity on
+both probe and open. A responding FT9338 application goes directly to its
+backend, without C6 negotiation, ROM/OTP queries or hardware reset. It does
+not need another firmware file when that application is still running. This
+does not cache an earlier process's identity or override empty responses after
+power loss. Keep the PGM local and share the text result.
 
 Do not run `ninja install` or `setup-fte3600.sh` for this diagnostic path. The
 `--prefix=/usr` option does not install anything when building this target.
@@ -185,7 +208,7 @@ sizes, not proof that the SPI controller accepts the transaction. An existing
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
 | `--test-ft9338` | Whether Windows-style ROM/OTP identification selects FT9338 and its firmware startup and MCU configuration pass | Independent identification, reset, RAM upload with complete readback, application restart and MCU configuration; no IRQ request or capture |
 | `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries, bounded software wake and reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
-| `--boot ft9338` or `--boot ft9348` | Whether the manually selected firmware starts with its expected runtime parameters; not automatic identification | Validate the selected payload, reset, upload to RAM, verify transfer and application status; no capture or IRQ request |
+| `--boot ft9338` or `--boot ft9348` | Whether the manually selected firmware starts with its expected runtime parameters; not automatic identification | Validate the selected payload, reset, upload to RAM, verify transfer and application status; FT9338 also configures the MCU; no capture or IRQ request |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
 | `--init` | Whether that identified chip completes its existing initialization and cleanup | Probe plus chip initialization; eligible recovery may load matching firmware |
 | `--capture OUTPUT` | Whether initialization and a finger-triggered acquisition produce an image | Initialization, capture and cleanup; writes the requested local PGM |
@@ -207,7 +230,8 @@ probe, initialization and capture stages retain their IRQ setup. It reads
 the application registers `0x14` and `0x15` and can use the documented
 ROM-A8 or boot-B38 OTP identification paths. After stable empty application
 responses it first tries the bounded legacy software wake sequence: single-byte
-`70`, 5 ms, single-byte `70`, 2 ms. A responsive runtime can be identified without
+`70`, 5 ms, single-byte `70`, then immediate MCU status. After idle, the vendor
+350 ms settling wait precedes geometry reads. A runtime can be identified without
 toggling reset. The bounded MCU-status retry and settling delays follow the
 shared legacy discovery behavior. Only persistent empty responses reach the
 existing ROM experiment; conflicting responses or I/O failures stop the test.
@@ -315,11 +339,15 @@ Medion hardware success from these synthetic tests.
 
 The general stages remain available for follow-up after reviewing the
 identification or startup result.
-Each command reopens the transport and runs the general driver's discovery
-again; `--capture` then initializes the selected backend and waits for a finger.
+Each command reopens the transport and first checks the running application's
+geometry twice; `--capture` then initializes the selected backend and waits for
+a finger. Empty replies retain the general driver's full factory discovery,
+including the `1534` B38 path. Unknown nonempty or inconsistent application
+replies fail instead of resetting the device into another protocol.
 These commands do not continue the `--test-ft9338` or manual boot session;
-their result and firmware path are not passed into the general driver. Its
-normal discovery and recovery rules are unchanged:
+their result and firmware path are not passed into the general driver. A live
+application is confirmed again from hardware, without relying on that previous
+result. Normal ACPI-glue enumeration retains its factory discovery order:
 
 ```sh
 sudo python3 scripts/medion-spidev.py --probe
@@ -353,7 +381,7 @@ not guaranteed.
 The focused action can reset the device and enter ROM to obtain OTP evidence.
 General discovery includes the
 bounded wake and ROM negotiation paths documented in
-[dynamic discovery](dynamic-discovery.md) and [special probing](special-probe.md).
+[protocol discovery](protocols.md).
 It does not upload firmware. Initialization can use firmware only after the
 existing positive identity checks authorize the specific recovery path; an
 all-zero response never selects an FT9361 fallback.
@@ -457,17 +485,31 @@ that every failure branch matches Windows. In particular, the test requires
 the final register `30` readback to equal `bb`; the audited Windows routine
 logs a mismatch and returns success. A passing test establishes these
 startup and configuration observations, not image capture or authentication.
-The older `--boot` action remains a separate manual experiment; its `BOOT PASS`
-does not include the new test's MCU configuration stage.
+The `--boot ft9338` action remains a separate manual experiment with explicit
+chip selection. It now includes the same three MCU writes, waits and marker
+check before runtime validation.
 
 The standalone reset-and-sync operation avoids intervening diagnostic checks
-and log output. The shared asynchronous driver's state machine remains a
-separate implementation; its state transitions and transport checks do not
-guarantee the same reset-to-sync interval. Neither source review nor mock tests
+and log output. The shared asynchronous driver now prepares and validates the
+message before releasing reset in the SPI worker immediately ahead of its
+sync ioctl. The standalone transport callback also keeps configuration reads
+outside this release/sync pair. Neither source review nor mock tests
 measure GPIO/SPI timing on the Medion. Physical startup and capture still need
 an actual device run.
 
 ## Local validation, 2026-10-06
+
+The follow-up merges main through `395425c` and covers the issue #1 sequence:
+`--test-ft9338`, explicit `--boot ft9338` if needed, then a separate `--capture`.
+Both authentication configurations again passed all 35 selected suites with
+warnings as errors. Added cases verify manual-boot MCU configuration and its
+failure handling, capture/reopen with a running FT9338 application and OTP `00`
+without factory writes or a firmware file, rejection of changed runtime
+identity, B38 discovery through the standalone adapter, and worker reset/sync
+ordering with short-transfer, SPI and GPIO failures. The software fixtures do
+not substitute for an E3224 hardware result.
+
+### Original independent-engine validation
 
 The working-tree update based on `c71dfa4` was built with warnings as errors
 under WSL Ubuntu. Both policy configurations (`fte3600_personal_auth` and
