@@ -26,6 +26,14 @@
 #define RECOVERY_SETTLE_MS 5
 /* Host policy: bound consecutive recoveries without a usable finger event. */
 #define MAX_EVENT_RECOVERIES 3
+/* Windows default four-channel detector (10BEC, 141E4, 120CC). */
+#define FDT_DOWN_THRESHOLD 50
+#define FDT_UP_THRESHOLD 45
+#define FDT_BASE_MARGIN 30
+#define RELEASE_CHECK_SAMPLES 3
+#define RELEASE_CHECK_TOLERANCE 49
+#define IMAGE_SPIKE_THRESHOLD 300
+#define IMAGE_NEIGHBOR_THRESHOLD 100
 
 typedef struct
 {
@@ -455,7 +463,8 @@ fdt_mode (FpiSsm *ssm, Fw9369Data *data, gboolean calibrating)
   update_word (ssm, 0x00c1, 0x003f, 0x0021);
   update_word (ssm, 0x00c2, 0x00c0, 0x00c0);
   sfr_write (ssm, FTE3600_FW9369_SFR_BANK_UNLOCK, 0);
-  update_word (ssm, FTE3600_FW9369_WORD_FDT_THRESHOLDS, 0xffff, 0x2d32);
+  update_word (ssm, FTE3600_FW9369_WORD_FDT_THRESHOLDS, 0xffff,
+               (FDT_UP_THRESHOLD << 8) | FDT_DOWN_THRESHOLD);
   update_word (ssm, FTE3600_FW9369_WORD_FDT_COUNT, 0x0007, 3);
   update_word (ssm, FTE3600_FW9369_WORD_FDT_ENABLE, 0xffff, 0x00ff);
   update_word (ssm, FTE3600_FW9369_WORD_EVENT_MASK,
@@ -861,7 +870,7 @@ init_run (FpiSsm *ssm, FpDevice *dev)
           break;
         }
       for (guint i = 0; i < G_N_ELEMENTS (data->fdt_base); i++)
-        data->fdt_base[i] -= 30;
+        data->fdt_base[i] -= FDT_BASE_MARGIN;
       start_dac_search (data);
       fpi_ssm_next_state (ssm);
       break;
@@ -962,15 +971,119 @@ typedef struct
 {
   gboolean wait_release;
   guint    recoveries;
+  guint    release_retries;
+  guint    release_samples;
+  guint    release_sum[FTE3600_FW9369_FDT_CHANNELS];
+  guint16  next_fdt_base[FTE3600_FW9369_FDT_CHANNELS];
 } Capture;
 
 enum {
   CAPTURE_ARM, CAPTURE_RESTART_FDT, CAPTURE_WAIT, CAPTURE_COMMUNICATION,
-  CAPTURE_EVENTS, CAPTURE_ACK, CAPTURE_CHECK,
+  CAPTURE_EVENTS, CAPTURE_DIAGNOSTIC, CAPTURE_DIAGNOSTIC_DONE, CAPTURE_ACK, CAPTURE_CHECK,
   CAPTURE_RECOVER, CAPTURE_RECOVER_DONE,
+  CAPTURE_RELEASE_SAMPLE, CAPTURE_RELEASE_CHECK,
+  CAPTURE_BASE_BEFORE, CAPTURE_BASE_BEFORE_CHECK, CAPTURE_BASE_IMAGE,
+  CAPTURE_BASE_AFTER, CAPTURE_BASE_COMMIT,
   CAPTURE_SCAN, CAPTURE_IMAGE, CAPTURE_IDLE, CAPTURE_REARM_RELEASE,
   CAPTURE_REARM_CHECK, CAPTURE_REARM_CLEANUP, CAPTURE_DONE, CAPTURE_STATES,
 };
+
+static void
+log_fdt (Fw9369Data *data, const char *reason)
+{
+  fp_dbg ("FW9369 %s: events %04x, FDT DAC %u, image DAC %u; "
+          "raw [%u %u %u %u], base [%u %u %u %u], delta [%d %d %d %d]",
+          reason, data->events, data->fdt_dac, data->image_dac,
+          data->fdt[0], data->fdt[1], data->fdt[2], data->fdt[3],
+          data->fdt_base[0], data->fdt_base[1], data->fdt_base[2], data->fdt_base[3],
+          (gint) data->fdt_base[0] - data->fdt[0],
+          (gint) data->fdt_base[1] - data->fdt[1],
+          (gint) data->fdt_base[2] - data->fdt[2],
+          (gint) data->fdt_base[3] - data->fdt[3]);
+}
+
+static gboolean
+release_sample_valid (Fw9369Data *data)
+{
+  guint near_base = 0;
+
+  /* 141E4: three manual UP samples; each must have at least three
+   * channels within +/-49 of the existing baseline. The default UP
+   * classifier requires all four channels (129CC, cfg_init 10BEC). */
+  for (guint i = 0; i < FTE3600_FW9369_FDT_CHANNELS; i++)
+    {
+      gint delta = (gint) data->fdt_base[i] - data->fdt[i];
+
+      if (delta >= FDT_UP_THRESHOLD)
+        return FALSE;
+      near_base += ABS (delta) <= RELEASE_CHECK_TOLERANCE;
+    }
+  return near_base >= 3;
+}
+
+static gboolean
+baseline_sample_clear (Fw9369Data *data, const guint16 *base)
+{
+  /* Windows brackets the scan with manual DOWN checks (12334). For an
+   * asynchronous background update, also retain the existing four-channel
+   * UP criterion: one covered channel must not be accepted merely because
+   * fewer than four channels satisfy DOWN. No new threshold or I/O. */
+  for (guint i = 0; i < FTE3600_FW9369_FDT_CHANNELS; i++)
+    {
+      gint delta = (gint) base[i] - data->fdt[i];
+
+      if (delta < -FDT_DOWN_THRESHOLD || delta >= FDT_UP_THRESHOLD)
+        return FALSE;
+    }
+  return TRUE;
+}
+
+static void
+retry_release (FpiSsm *ssm, Fw9369Data *data, Capture *capture)
+{
+  log_fdt (data, "release recheck rejected");
+  fpi_fte3600_secure_clear (data->raw, sizeof data->raw);
+  if (++capture->release_retries >= MAX_SPURIOUS_EVENTS)
+    fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                           FP_DEVICE_ERROR_PROTO, "FW9369 could not confirm finger release"));
+  else
+    fpi_ssm_jump_to_state (ssm, CAPTURE_ARM);
+}
+
+static guint
+update_image_baseline (Fw9369Data *data)
+{
+  guint8 accept[(FTE3600_FW9369_PIXELS + 7) / 8] = { 0 };
+  guint updated = 0;
+
+  /* Normal runtime update (16294): follow upward background drift, retaining
+   * the old baseline for negative excursions and isolated large spikes.
+   * Compare against an unchanged baseline throughout this pass. */
+  for (guint i = 0; i < FTE3600_FW9369_PIXELS; i++)
+    {
+      guint x = i % FTE3600_FW9369_WIDTH;
+      guint y = i / FTE3600_FW9369_WIDTH;
+      gint delta = (gint) data->raw[i] - data->baseline[i];
+
+      if (delta <= 0)
+        continue;
+      if (delta > IMAGE_SPIKE_THRESHOLD && x > 0 && x + 1 < FTE3600_FW9369_WIDTH &&
+          y > 0 && y + 1 < FTE3600_FW9369_HEIGHT &&
+          (gint) data->raw[i - 1] - data->baseline[i - 1] < IMAGE_NEIGHBOR_THRESHOLD &&
+          (gint) data->raw[i + 1] - data->baseline[i + 1] < IMAGE_NEIGHBOR_THRESHOLD &&
+          (gint) data->raw[i - FTE3600_FW9369_WIDTH] - data->baseline[i - FTE3600_FW9369_WIDTH] < IMAGE_NEIGHBOR_THRESHOLD &&
+          (gint) data->raw[i + FTE3600_FW9369_WIDTH] - data->baseline[i + FTE3600_FW9369_WIDTH] < IMAGE_NEIGHBOR_THRESHOLD)
+        continue;
+      accept[i / 8] |= 1u << (i % 8);
+    }
+  for (guint i = 0; i < FTE3600_FW9369_PIXELS; i++)
+    if (accept[i / 8] & (1u << (i % 8)))
+      {
+        data->baseline[i] = data->raw[i];
+        updated++;
+      }
+  return updated;
+}
 
 static void
 capture_run (FpiSsm *ssm, FpDevice *dev)
@@ -1051,6 +1164,25 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
       fpi_ssm_start_subsm (ssm, new_communication (self));
       break;
 
+    case CAPTURE_DIAGNOSTIC:
+      if (!(data->events & FTE3600_FW9369_EVENT_INVALID))
+        {
+          fpi_ssm_jump_to_state (ssm, CAPTURE_ACK);
+          break;
+        }
+      /* Read the latched detector samples before acknowledgement or any
+       * mode change. Four aggregate channels, never fingerprint pixels. */
+      data->calibrated = FALSE;
+      script = new_script (self, "FW9369 invalid detector snapshot", FALSE);
+      add_step (script, OP_FDT_READ, 0, 0, 0, 0, 0, NULL);
+      fpi_ssm_start_subsm (ssm, script);
+      break;
+
+    case CAPTURE_DIAGNOSTIC_DONE:
+      log_fdt (data, "INVALID latched detector");
+      fpi_ssm_next_state (ssm);
+      break;
+
     case CAPTURE_ACK:
       script = new_script (self, "FW9369 interrupt acknowledge", FALSE);
       word_write (script, FTE3600_FW9369_WORD_EVENT_CLEAR, data->events);
@@ -1101,8 +1233,10 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
         }
       if (wait_release)
         {
-          fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
-          fpi_ssm_jump_to_state (ssm, CAPTURE_IDLE);
+          data->release_armed = FALSE;
+          capture->release_samples = 0;
+          memset (capture->release_sum, 0, sizeof capture->release_sum);
+          fpi_ssm_jump_to_state (ssm, CAPTURE_RELEASE_SAMPLE);
         }
       else
         {
@@ -1127,6 +1261,69 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
        * unambiguous UP; capture must wait for a new DOWN before scanning. */
       fpi_ssm_jump_to_state (ssm, CAPTURE_ARM);
       break;
+
+    case CAPTURE_RELEASE_SAMPLE:
+      fpi_ssm_start_subsm (ssm, new_fdt_sample (self, FALSE));
+      break;
+
+    case CAPTURE_RELEASE_CHECK:
+      if (!release_sample_valid (data))
+        {
+          retry_release (ssm, data, capture);
+          break;
+        }
+      for (guint i = 0; i < FTE3600_FW9369_FDT_CHANNELS; i++)
+        capture->release_sum[i] += data->fdt[i];
+      if (++capture->release_samples < RELEASE_CHECK_SAMPLES)
+        {
+          fpi_ssm_jump_to_state (ssm, CAPTURE_RELEASE_SAMPLE);
+          break;
+        }
+      /* 120CC -> 11A54: max(old base + 30, mean of three) - 30.
+       * Stage the result: cancellation or a returning finger must not
+       * publish a partially updated pair of detection/image baselines. */
+      for (guint i = 0; i < FTE3600_FW9369_FDT_CHANNELS; i++)
+        capture->next_fdt_base[i] = MAX ((guint) data->fdt_base[i] + FDT_BASE_MARGIN,
+                                        capture->release_sum[i] / RELEASE_CHECK_SAMPLES) - FDT_BASE_MARGIN;
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case CAPTURE_BASE_BEFORE:
+    case CAPTURE_BASE_AFTER:
+      fpi_ssm_start_subsm (ssm, new_fdt_sample (self, FALSE));
+      break;
+
+    case CAPTURE_BASE_BEFORE_CHECK:
+      if (!baseline_sample_clear (data, capture->next_fdt_base))
+        retry_release (ssm, data, capture);
+      else
+        fpi_ssm_next_state (ssm);
+      break;
+
+    case CAPTURE_BASE_IMAGE:
+      /* Windows' normal UP path brackets its single background scan with
+       * manual finger checks (10547..105B6). No DAC search or GPIO reset. */
+      fpi_ssm_start_subsm (ssm, new_image_scan (self));
+      break;
+
+    case CAPTURE_BASE_COMMIT:
+    {
+      guint updated;
+
+      if (!baseline_sample_clear (data, capture->next_fdt_base))
+        {
+          retry_release (ssm, data, capture);
+          break;
+        }
+      memcpy (data->fdt_base, capture->next_fdt_base, sizeof data->fdt_base);
+      updated = update_image_baseline (data);
+      fp_dbg ("FW9369 release baseline update: %u image pixels", updated);
+      log_fdt (data, "release baseline committed");
+      fpi_fte3600_secure_clear (data->raw, sizeof data->raw);
+      fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
+      fpi_ssm_jump_to_state (ssm, CAPTURE_IDLE);
+      break;
+    }
 
     case CAPTURE_SCAN:
       fpi_ssm_start_subsm (ssm, new_image_scan (self));
@@ -1204,6 +1401,13 @@ capture_run (FpiSsm *ssm, FpDevice *dev)
     }
 }
 
+static void
+capture_free (Capture *capture)
+{
+  fpi_fte3600_secure_clear (capture, sizeof *capture);
+  g_free (capture);
+}
+
 static FpiSsm *
 new_capture (FpiDeviceFte3600 *self, gboolean wait_release)
 {
@@ -1213,7 +1417,7 @@ new_capture (FpiDeviceFte3600 *self, gboolean wait_release)
   Capture *capture = g_new0 (Capture, 1);
 
   capture->wait_release = wait_release;
-  fpi_ssm_set_data (ssm, capture, g_free);
+  fpi_ssm_set_data (ssm, capture, (GDestroyNotify) capture_free);
   return ssm;
 }
 

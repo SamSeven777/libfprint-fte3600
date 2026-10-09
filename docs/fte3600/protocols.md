@@ -159,6 +159,54 @@ Three recoveries without completing that capture/release wait are allowed;
 this bound is Linux host policy. Calibration, transport, identity or cancellation
 failures propagate normally, with the existing resource-generation checks.
 
+### Baseline maintenance after release
+
+The inspected Windows DLL also has a normal runtime maintenance path; recovery
+through `init_chip` is not its only way to maintain the sensor's background.
+The UP path in `101EC` calls `141E4` to confirm release. When its pending-update
+flag is set (`1052D`), it calls `120CC`, performs a manual DOWN check (`12334`),
+updates the image background (`16294` with argument zero), then checks again.
+The default configuration at `10BEC` selects four FDT channels and one
+background image per normal update. These operations do not load or change
+enrolled fingerprint templates.
+
+- Release confirmation uses three manual samples. Each must satisfy the
+  four-channel UP classifier (raw + 45 > base on all four channels), with
+  at least three channels within +/-49 of the existing baseline (`141E4`,
+  `129CC`). A noise/recontact result returns to release detection.
+- The next FDT baseline is `max(old_base, mean_of_three - 30)` per channel
+  (`120CC` -> `11A54`). The threshold register remains `1880 = 2D32`:
+  DOWN 50, UP 45. This path neither changes the DAC nor runs a new DAC search.
+- Manual DOWN classification (`12334`) rejects a raw value greater than
+  base + 50 as INVALID and identifies DOWN when all four channels are below
+  base - 50. The background scan is bracketed by these checks.
+- The normal image update follows upward background changes, retaining the
+  previous value for negative excursions. Interior positive excursions above
+  300 are rejected when all four direct neighbors increase by less than 100
+  (`16294`). This is distinct from full initialization/recalibration.
+
+Linux now performs this maintenance in its post-capture release wait, including
+after a placement rejected by the matcher. It preserves the existing prearmed
+UP latch while matching. FDT candidates and the background frame are staged
+until both manual checks pass. The checks additionally require all four
+channels to continue satisfying UP, using the existing 45 threshold: a partial
+recontact must not pass just because it does not meet the four-channel DOWN
+criterion. Detected recontact, cancellation or transfer failure cannot publish
+half of a baseline update. The next DOWN arm writes the
+committed FDT baseline. Image neighbor checks use the actual 64 x 80 bounds and
+an unchanged input snapshot. These atomic host updates, extra UP qualification,
+image boundary handling, and a bound of 64 rejected release checks are Linux implementation choices,
+not a claim of instruction-for-instruction Windows equivalence. No extra
+settling delay, GPIO reset, C1 sleep, or factory discovery is added per capture.
+
+On INVALID, Linux reads the four latched FDT values before acknowledgement or
+mode changes and logs their difference from the saved baseline, plus both DACs.
+This added diagnostic transaction does not trigger a manual scan and does not
+log fingerprint images or templates. A failed snapshot still invalidates the
+old calibration. The existing bounded INVALID/RESET/ESD reinitialization remains;
+this change does not implement every Windows `wrong_base_check` branch or make
+recalibration with a covered sensor reliable.
+
 The image FIFO read starts `06 F9 9A 05`. A frame contains a six-byte header and
 10,240 bytes of big-endian 16-bit samples (10,246 bytes total). The host collects
 an empty-sensor baseline and forms nonnegative baseline-minus-sample differences

@@ -43,6 +43,16 @@ static struct
   guint         fail_transaction;
   guint         fdt_samples;
   guint         fdt_writes;
+  guint16       last_fdt_base[4];
+  gint          fdt_shift;
+  gint          image_shift;
+  gboolean      image_spike;
+  guint16       fdt_sequence[16][4];
+  guint         fdt_sequence_count;
+  guint         fdt_sequence_index;
+  guint         fail_fdt_sample;
+  guint         cancel_fdt_sample;
+  guint         invalid_snapshots;
   guint         drains;
   guint         wake_commands;
   guint         sleep_commands;
@@ -384,7 +394,9 @@ emulate_transfer (FpiSpiTransfer *transfer)
       g_assert_true (transfer->sensitive);
       for (guint i = 0; i < 5120; i++)
         put16 (rx + 6 + i * 2, mock.low_image ? 0 :
-               mock.finger ? (i % 2 ? 1848 : 2148) : 2048);
+               (mock.finger ? (i % 2 ? 1848 : 2148) : 2048) + mock.image_shift);
+      if (!mock.finger && mock.image_spike)
+        put16 (rx + 6 + 650 * 2, 3000);
       mock.images++;
       if (mock.cancel_image)
         g_cancellable_cancel (mock.cancellable);
@@ -407,10 +419,19 @@ emulate_transfer (FpiSpiTransfer *transfer)
           g_assert_cmpuint (length, ==, 14);
           g_assert_cmpuint (address, ==, mock.smic ? 0xe8 : 0xb8);
           g_assert_true (transfer->sensitive);
+          if (mock.words[0x1a82] & 0x10)
+            mock.invalid_snapshots++;
           for (guint i = 0; i < 4; i++)
             put16 (rx + 6 + i * 2, mock.low_fdt ? 0 :
-                   512 + (mock.unstable && mock.fdt_samples % 2 ? 40 : 0));
+                   mock.fdt_sequence_index < mock.fdt_sequence_count ?
+                   mock.fdt_sequence[mock.fdt_sequence_index][i] :
+                   (mock.finger ? 300 : 512) + mock.fdt_shift +
+                   (mock.unstable && mock.fdt_samples % 2 ? 40 : 0));
+          if (mock.fdt_sequence_index < mock.fdt_sequence_count)
+            mock.fdt_sequence_index++;
           mock.fdt_samples++;
+          if (mock.cancel_fdt_sample == mock.fdt_samples)
+            g_cancellable_cancel (mock.cancellable);
         }
       else
         {
@@ -439,7 +460,7 @@ emulate_transfer (FpiSpiTransfer *transfer)
       g_assert_cmpuint (address, ==, mock.smic ? 0xe0 : 0xb0);
       g_assert_cmpuint (mock.sfr[0x9a], ==, 0x5a);
       for (guint i = 0; i < 4; i++)
-        g_assert_cmpuint (be16 (tx + 6 + 2 * i), ==, 482);
+        mock.last_fdt_base[i] = be16 (tx + 6 + 2 * i);
       for (guint i = 14; i < 22; i++)
         g_assert_cmpuint (tx[i], ==, 0);
       mock.fdt_writes++;
@@ -653,6 +674,9 @@ complete_transfer (gpointer user_data)
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected release-arm failure");
   if (!error && mock.irqs && mock.fail_fdt_restart && transfer->buffer_wr[0] == 0xc2)
     error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected FDT restart failure");
+  if (!error && mock.fail_fdt_sample == mock.fdt_samples + 1 &&
+      transfer->buffer_wr[0] == 0x04 && transfer->length_wr == 14)
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Injected baseline sample failure");
   if (!error)
     emulate_transfer (transfer);
   pending->callback (transfer, transfer->device, pending->user_data, error);
@@ -870,6 +894,8 @@ test_capture (gconstpointer process)
         g_assert_cmpuint (self->capture_rx[j], ==, 0);
     }
   g_assert_cmpuint (mock.fdt_writes, ==, 2);
+  for (guint i = 0; i < 4; i++)
+    g_assert_cmpuint (mock.last_fdt_base[i], ==, 482);
   g_assert_cmpuint (mock.sleep_commands, ==, 0);
   g_assert_cmpuint (mock.sfr[0x9a], ==, 0);
   teardown (self);
@@ -1122,7 +1148,8 @@ test_fdt_recovery (gconstpointer scenario_ptr)
   g_assert_cmpuint (mock.fdt_writes, ==, fdt_writes + 1);
   g_assert_cmpuint (mock.drains, ==, drains + 1);
   g_assert_cmpuint (mock.fdt_commands, ==,
-                    fdt_commands + (kind == 2 || kind == 4 ? 1 : 2));
+                    fdt_commands + (kind == 2 || kind == 4 ? 1 : 2) +
+                    (release && kind < 4 ? 5 : 0));
   g_assert_true (self->idle_verified);
   g_assert_false (self->armed);
   g_assert_false (mock.fdt_running);
@@ -1139,7 +1166,7 @@ test_fdt_recovery (gconstpointer scenario_ptr)
       g_assert_no_error (mock.error);
       g_assert_cmpuint (mock.irqs, ==, 2);
       g_assert_cmpuint (mock.irq_index, ==, mock.irq_count);
-      g_assert_cmpuint (mock.images, ==, images + !release);
+      g_assert_cmpuint (mock.images, ==, images + 1);
       if (release)
         g_assert_null (self->captured_image);
       else
@@ -1379,7 +1406,7 @@ test_wait_release (gconstpointer scenario_ptr)
     default: g_assert_not_reached ();
     }
   run_ssm (self->backend->create_wait_release (self));
-  if (scenario == 3)
+  if (scenario == 0 || scenario == 3)
     g_assert_cmpuint (mock.images, >, images);
   else
     g_assert_cmpuint (mock.images, ==, images);
@@ -1529,8 +1556,10 @@ test_event_recovery (gconstpointer scenario_ptr)
   g_assert_cmpuint (mock.irq_index, ==, 2);
   g_assert_cmpuint (mock.reset_edges, ==, 0);
   g_assert_cmpuint (mock.mode_reads, ==, modes + 2);
-  g_assert_cmpuint (mock.fdt_samples, ==, samples * 2);
-  g_assert_cmpuint (mock.images, ==, images * 2 + !release);
+  g_assert_cmpuint (mock.fdt_samples, ==, samples * 2 + (release ? 5 : 0) +
+                    !!(events[scenario >> 2] & 0x10));
+  g_assert_cmpuint (mock.invalid_snapshots, ==, !!(events[scenario >> 2] & 0x10));
+  g_assert_cmpuint (mock.images, ==, images * 2 + 1);
   g_assert_cmpint (mock.recovery_start_time - mock.recovery_ack_time, >=, 5000);
   g_assert_true (self->idle_verified);
   if (release)
@@ -1650,6 +1679,191 @@ test_enroll_event_recovery (void)
   teardown (self);
 }
 
+static void
+test_runtime_baseline (gconstpointer process)
+{
+  FpiDeviceFte3600 *self = setup (GPOINTER_TO_UINT (process));
+  guint modes;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  modes = mock.mode_reads;
+  mock.enrolling = TRUE;
+  fpi_device_set_nr_enroll_stages (FP_DEVICE (self), 8);
+  for (guint stage = 0; stage < 8; stage++)
+    {
+      guint samples, images;
+
+      /* Include rejected placements: every capture/release cycle needs
+       * maintenance, independently of the matcher's enrollment progress. */
+      self->enroll_stages_passed = stage / 2;
+      run_ssm (self->backend->create_capture (self));
+      g_assert_no_error (mock.error);
+      g_assert_nonnull (self->captured_image);
+      for (guint i = 0; i < 4; i++)
+        g_assert_cmpuint (mock.last_fdt_base[i], ==, 482 + stage * 10);
+      g_clear_object (&self->captured_image);
+      samples = mock.fdt_samples;
+      images = mock.images;
+      mock.fdt_shift += 10;
+      mock.image_shift += 80;
+      mock.words[0x1a82] = 4; /* UP latched while the matcher is busy. */
+      run_ssm (self->backend->create_wait_release (self));
+      g_assert_no_error (mock.error);
+      g_assert_cmpuint (mock.fdt_samples, ==, samples + 5);
+      g_assert_cmpuint (mock.images, ==, images + 1);
+      g_assert_cmpuint (mock.mode_reads, ==, modes);
+      g_assert_cmpuint (self->enroll_stages_passed, ==, stage / 2);
+      g_assert_true (self->idle_verified);
+      g_assert_null (self->captured_image);
+    }
+  /* Without image baseline maintenance, +640 background drift makes this
+   * frame wholly brighter than the initial background and unusable. */
+  mock.enrolling = FALSE;
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_nonnull (self->captured_image);
+  g_assert_cmpuint (mock.last_fdt_base[0], ==, 562);
+  g_assert_cmpuint (mock.reset_edges, ==, 0);
+  g_assert_cmpuint (mock.sleep_commands, ==, 0);
+  teardown (self);
+}
+
+static void
+test_baseline_recheck (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (scenario & 1);
+  guint images, samples;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  images = mock.images;
+  samples = mock.fdt_samples;
+  /* An UP event alone must not authorize a new baseline. Reject a still
+   * covered sensor, noisy release, or a finger returning around the scan. */
+  mock.fdt_sequence_count = scenario < 2 ? 1 : (scenario % 2 ? 5 : 4);
+  for (guint sample = 0; sample < mock.fdt_sequence_count; sample++)
+    for (guint i = 0; i < 4; i++)
+      mock.fdt_sequence[sample][i] = 512;
+  for (guint i = 0; i < (scenario >= 4 ? 1 : 4); i++)
+    mock.fdt_sequence[mock.fdt_sequence_count - 1][i] = scenario == 1 ? 540 : 300;
+  mock.release_events[0] = mock.release_events[1] = 4;
+  mock.release_count = 2;
+  run_ssm (self->backend->create_wait_release (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (mock.release_index, ==, 2);
+  g_assert_cmpuint (mock.fdt_samples, ==, samples + mock.fdt_sequence_count + 5);
+  g_assert_cmpuint (mock.images, ==, images + (scenario >= 3 && scenario % 2 ? 2 : 1));
+  g_assert_true (self->idle_verified);
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (mock.last_fdt_base[0], ==, 482);
+  teardown (self);
+}
+
+static void
+test_baseline_abort (gconstpointer scenario_ptr)
+{
+  guint scenario = GPOINTER_TO_UINT (scenario_ptr);
+  gboolean cancel = scenario & 1;
+  guint sample = scenario / 2 + 1;
+  FpiDeviceFte3600 *self = setup (cancel);
+  g_autofree guint8 *reference = NULL;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  reference = g_memdup2 (self->captured_image->data, 5120);
+  g_clear_object (&self->captured_image);
+  mock.fdt_shift = 10;
+  mock.image_shift = 400;
+  mock.release_events[0] = 4;
+  mock.release_count = 1;
+  if (cancel)
+    mock.cancel_fdt_sample = mock.fdt_samples + sample;
+  else
+    mock.fail_fdt_sample = mock.fdt_samples + sample;
+  run_ssm (self->backend->create_wait_release (self));
+  g_assert_error (mock.error, G_IO_ERROR, (cancel ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+  g_assert_true (self->idle_verified);
+  g_assert_false (self->armed);
+  g_assert_null (self->captured_image);
+  g_assert_cmpuint (mock.sfr[0x9a], ==, 0);
+  for (guint i = 0; i < self->capture_frame_size; i++)
+    g_assert_cmpuint (self->capture_rx[i], ==, 0);
+
+  /* A failed maintenance pass cannot replace either baseline, including
+   * cancellation on the final check after the background frame was read. */
+  mock.fail_fdt_sample = mock.cancel_fdt_sample = 0;
+  mock.fdt_shift = mock.image_shift = 0;
+  g_cancellable_reset (mock.cancellable);
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (mock.last_fdt_base[0], ==, 482);
+  g_assert_cmpmem (self->captured_image->data, 5120, reference, 5120);
+  teardown (self);
+}
+
+static void
+test_baseline_image_noise (gconstpointer scenario_ptr)
+{
+  FpiDeviceFte3600 *self = setup (FALSE);
+  g_autofree guint8 *reference = NULL;
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  reference = g_memdup2 (self->captured_image->data, 5120);
+  g_clear_object (&self->captured_image);
+  mock.image_spike = GPOINTER_TO_UINT (scenario_ptr) == 0;
+  if (!mock.image_spike)
+    {
+      mock.image_shift = -80;
+      mock.fdt_shift = -10;
+    }
+  mock.release_events[0] = 4;
+  mock.release_count = 1;
+  run_ssm (self->backend->create_wait_release (self));
+  g_assert_no_error (mock.error);
+  mock.image_spike = FALSE;
+  mock.image_shift = mock.fdt_shift = 0;
+  run_ssm (self->backend->create_capture (self));
+  g_assert_no_error (mock.error);
+  g_assert_cmpuint (mock.last_fdt_base[0], ==, 482);
+  g_assert_cmpmem (self->captured_image->data, 5120, reference, 5120);
+  teardown (self);
+}
+
+static void
+test_invalid_snapshot_error (gconstpointer scenario_ptr)
+{
+  gboolean cancel = GPOINTER_TO_UINT (scenario_ptr);
+  FpiDeviceFte3600 *self = setup (cancel);
+
+  run_ssm (self->backend->create_init (self));
+  g_assert_no_error (mock.error);
+  mock.irq_count = 1;
+  mock.irq_events[0] = 0x11;
+  if (cancel)
+    mock.cancel_fdt_sample = mock.fdt_samples + 1;
+  else
+    mock.fail_fdt_sample = mock.fdt_samples + 1;
+  run_ssm (self->backend->create_capture (self));
+  g_assert_error (mock.error, G_IO_ERROR, (cancel ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+  g_assert_true (self->idle_verified);
+  g_assert_cmpuint (mock.recovery_setups, ==, 0);
+  g_cancellable_reset (mock.cancellable);
+  mock.fail_fdt_sample = mock.cancel_fdt_sample = 0;
+  /* Even a failed diagnostic must invalidate calibration after INVALID. */
+  run_ssm (self->backend->create_capture (self));
+  g_assert_error (mock.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_assert_nonnull (strstr (mock.error->message, "no validated baseline"));
+  teardown (self);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1658,6 +1872,28 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fw9369-backend/smic-capture", GUINT_TO_POINTER (1), test_capture);
   g_test_add_func ("/fw9369-backend/cleanup-error", test_cleanup_error);
   g_test_add_func ("/fw9369-backend/enroll-event-recovery", test_enroll_event_recovery);
+  g_test_add_data_func ("/fw9369-backend/runtime-baseline/db", GUINT_TO_POINTER (0), test_runtime_baseline);
+  g_test_add_data_func ("/fw9369-backend/runtime-baseline/smic", GUINT_TO_POINTER (1), test_runtime_baseline);
+  for (guint i = 0; i < 2; i++)
+    {
+      g_autofree gchar *noise = g_strdup_printf ("/fw9369-backend/baseline-image-noise/%u", i);
+      g_autofree gchar *snapshot = g_strdup_printf ("/fw9369-backend/invalid-snapshot-error/%u", i);
+
+      g_test_add_data_func (noise, GUINT_TO_POINTER (i), test_baseline_image_noise);
+      g_test_add_data_func (snapshot, GUINT_TO_POINTER (i), test_invalid_snapshot_error);
+    }
+  for (guint i = 0; i < 6; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/baseline-recheck/%u", i);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_baseline_recheck);
+    }
+  for (guint i = 0; i < 10; i++)
+    {
+      g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/baseline-abort/%u", i);
+
+      g_test_add_data_func (name, GUINT_TO_POINTER (i), test_baseline_abort);
+    }
   for (guint i = 0; i < 16; i++)
     {
       g_autofree gchar *name = g_strdup_printf ("/fw9369-backend/event-recovery/%u", i);

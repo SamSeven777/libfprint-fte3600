@@ -56,6 +56,19 @@ engine results logged (five matching and two nonmatching fingers). The reported
 dual-mode totals were 6/8 genuine attempts accepted and 0/3 other-finger attempts
 accepted. These counts do not establish FAR/FRR or an improvement over BRISK.
 
+The [2026-10-09 follow-up on `395425c`](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6078245824)
+reports only 2-4 successful captures per session, counting matcher placement
+rejections, followed by `IDLE | INVALID` on each touch. The reporter explicitly
+retracted the earlier hands-off/spontaneous-event interpretation. Reinitializing
+with or without a factory GPIO reset did not restore detection within the
+session; a new session after a pause temporarily did. The cause is unconfirmed.
+
+The subsequent working-tree change adds the missing normal release-time
+baseline maintenance described in [Wire Protocols](protocols.md#baseline-maintenance-after-release),
+plus latched FDT diagnostics before INVALID recovery. Synthetic drift and
+failure tests cover the new path; a new GPD Pocket 3 test is still required.
+This must not be described as a hardware-verified fix for the reported fault.
+
 ### One-Netbook A1 (FT9361)
 - **Environment**: Linux Kernel 6.x / 7.x.
 - **Hardware Profile**: A8 protocol with external firmware `ft9361.bin`.

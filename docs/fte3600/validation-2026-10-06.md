@@ -136,3 +136,9 @@ exercise calibration with the sensor uncovered; temporal baseline stability
 does not prove absence of a stationary finger. The cause of the reported
 periodic INVALID events remains unconfirmed, and this change does not claim
 that the independent Linux calibration algorithm is identical to Windows.
+
+The later [October 9 hardware follow-up](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6078245824)
+supersedes the spontaneous/periodic-event interpretation: failures occurred on
+contact after 2-4 captures, and both init-only and GPIO-reset-plus-init recovery
+were ineffective. See [current device status](status.md) and the
+[release maintenance validation](validation-2026-10-09.md).
