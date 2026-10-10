@@ -24,6 +24,7 @@
 #define FTE3600_ARM_DELAY_MS 10
 #define FTE3600_INIT_MCU_POLL_MS 2
 #define FTE3600_INIT_MCU_MAX_ATTEMPTS 20
+#define FTE3600_FIRMWARE_MAX_ATTEMPTS 5
 
 /* Reference SPI factory, EvtDevicePrepareHardware: rounds 0 and 1 precede
  * legacy ROM recovery. Later forced-family firmware guesses are not used.

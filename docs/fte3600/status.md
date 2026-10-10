@@ -10,10 +10,10 @@ This page tracks implementation status, driver capabilities, and reported device
 
 | Sensor Profile | Geometry | Protocol Support | Firmware Requirement | Matcher Support | Hardware Status |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| **FT9338** | 88 × 88 | Supported (Legacy A8) | `ft9338.bin` | BRISK | Implemented & Unit Tested |
+| **FT9338** | 88 × 88 | Supported (B38 / Boot-A recovery) | `ft9338.bin` | BRISK | Implemented & Unit Tested |
 | **FT9348** | 96 × 96 | Supported (A8 Family) | `ft9348.bin` | BRISK | Implemented & Unit Tested |
 | **FT9361** | 64 × 80 | Supported (A8 Family) | `ft9361.bin` | BRISK / 2D-IPA | **Verified on Hardware** (One-Netbook A1) |
-| **FT9536** | 64 × 128 | Supported (Legacy A8) | `ft9536.bin` | BRISK | Implemented & Unit Tested |
+| **FT9536** | 64 × 128 | Supported (B38 / Boot-A recovery) | `ft9536.bin` | BRISK | Implemented & Unit Tested |
 | **FT9365** | 64 × 80 | Supported (FT9365) | None (ROM mode) | BRISK | Implemented & Unit Tested |
 | **FT9368** | 64 × 80 | Supported (FT9368) | App + Pramboot | BRISK | Implemented & Unit Tested |
 | **FW9369** (ID 9362) | 64 × 80 | Supported (Special C6) | None (ROM mode) | BRISK / optional 2D-IPA | BRISK and optional IPA tested on GPD Pocket 3; see revision-specific results below |

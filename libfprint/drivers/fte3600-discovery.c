@@ -185,6 +185,9 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
 
     case DISCOVER_IDENTIFY_38_DONE:
     case DISCOVER_IDENTIFY_B38_DONE:
+      /* The child disabled OTP and left reset released. Preserve that state
+       * on successful handoff; do not run a second cleanup pulse. */
+      self->discovery_touched = FALSE;
       fpi_ssm_mark_completed (ssm);
       return;
 
@@ -297,7 +300,7 @@ fte3600_discover_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case DISCOVER_CLEANUP_PREPARE:
-      if (!self->discovery_touched)
+      if (!self->discovery_touched || !fpi_ssm_get_error (ssm))
         fpi_ssm_jump_to_state (ssm, DISCOVER_DONE);
       else
         fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
@@ -627,7 +630,7 @@ fte3600_identify_handler (FpiSsm *ssm, FpDevice *dev)
 
     case IDENTIFY_LEGACY_WAKE_MCU:
       /* CheckFWExist reads status immediately after the second 70. */
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
     case IDENTIFY_LEGACY_WAKE_CHECK_MCU:

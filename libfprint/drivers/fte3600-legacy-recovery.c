@@ -41,8 +41,7 @@ enum {
   REC_START_LOW1, REC_START_DEASSERT1, REC_START_GAP,
   REC_START_RELEASE2, REC_START_HIGH2, REC_START_ASSERT2,
   REC_START_LOW2, REC_START_DEASSERT2, REC_START_WAIT,
-  REC_READ_MCU, REC_CHECK_MCU, REC_READ_WIDTH, REC_CHECK_WIDTH,
-  REC_READ_HEIGHT, REC_CHECK_HEIGHT, REC_CLEANUP_RELEASE, REC_DONE, REC_NSTATES,
+  REC_READ_MCU, REC_CHECK_MCU, REC_MCU_EXHAUSTED, REC_CLEANUP_RELEASE, REC_DONE, REC_NSTATES,
 };
 
 static void
@@ -219,8 +218,8 @@ identify_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case ID_CLEANUP_RELEASE:
-      if (!data->touched)
-        fpi_ssm_jump_to_state (ssm, ID_DONE);
+      if (!data->touched || !fpi_ssm_get_error (ssm))
+        fpi_ssm_jump_to_state (ssm, ID_COMMIT);
       else
         fpi_fte3600_set_hardware_reset (ssm, self, FALSE);
       return;
@@ -429,43 +428,23 @@ recovery_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case REC_READ_MCU:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, FALSE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, FALSE);
       return;
 
     case REC_CHECK_MCU:
       if (fpi_fte3600_mcu_is_idle (self))
-        fpi_ssm_next_state (ssm);
+        {
+          self->idle_verified = TRUE;
+          fpi_ssm_jump_to_state (ssm, REC_CLEANUP_RELEASE);
+        }
       else if (++data->attempts < FTE3600_BOOT38_POLL_ATTEMPTS)
         fpi_ssm_jump_to_state_delayed (ssm, REC_READ_MCU, FTE3600_BOOT38_POLL_MS);
       else
-        boot38_fail (ssm, "FT9338-family application did not reach idle after RAM recovery");
+        fpi_ssm_jump_to_state_delayed (ssm, REC_MCU_EXHAUSTED, FTE3600_BOOT38_POLL_MS);
       return;
 
-    case REC_READ_WIDTH:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_HIGH, 1, FALSE);
-      return;
-
-    case REC_CHECK_WIDTH:
-      if (!self->small_rx_valid || fpi_fte3600_read_result_byte (self) != self->sensor->width)
-        boot38_fail (ssm, "FT9338-family application width does not match its ROM identity");
-      else
-        fpi_ssm_next_state (ssm);
-      return;
-
-    case REC_READ_HEIGHT:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_LOW, 1, FALSE);
-      return;
-
-    case REC_CHECK_HEIGHT:
-      if (!self->small_rx_valid || fpi_fte3600_read_result_byte (self) != self->sensor->height)
-        {
-          boot38_fail (ssm, "FT9338-family application height does not match its ROM identity");
-        }
-      else
-        {
-          self->idle_verified = TRUE;
-          fpi_ssm_next_state (ssm);
-        }
+    case REC_MCU_EXHAUSTED:
+      boot38_fail (ssm, "FT9338-family application did not reach idle after RAM recovery");
       return;
 
     case REC_CLEANUP_RELEASE:

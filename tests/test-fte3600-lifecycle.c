@@ -53,6 +53,7 @@ WRAPPED (fpi_fte3600_resources_check);
 WRAPPED (fpi_fte3600_resources_buffer_size);
 WRAPPED (fpi_fte3600_transport_open);
 WRAPPED (fpi_fte3600_transport_close);
+WRAPPED (fpi_fte3600_firmware_load);
 WRAPPED (g_file_get_contents);
 WRAPPED (g_unix_fd_source_new);
 WRAPPED (fpi_ssm_next_state_delayed);
@@ -66,6 +67,7 @@ __typeof__ (fstat64) __real_fstat64;
 __typeof__ (read) __real_read;
 __typeof__ (fpi_fte3600_transport_open) __real_fpi_fte3600_transport_open;
 __typeof__ (fpi_fte3600_transport_close) __real_fpi_fte3600_transport_close;
+__typeof__ (fpi_fte3600_firmware_load) __real_fpi_fte3600_firmware_load;
 __typeof__ (g_file_get_contents) __real_g_file_get_contents;
 __typeof__ (fpi_ssm_next_state_delayed) __real_fpi_ssm_next_state_delayed;
 __typeof__ (fpi_ssm_jump_to_state_delayed) __real_fpi_ssm_jump_to_state_delayed;
@@ -322,6 +324,147 @@ static struct
   GCancellable        *cancellable;
 } sensor;
 
+/* Generated payloads and independent wire expectations, never vendor firmware. */
+static struct
+{
+  gboolean enabled, enrollment, synthetic_firmware, configured, marker_mismatch;
+  gboolean remove_upload, cancel_poll, wake_after_pair;
+  gboolean poll_wait_due, final_read_failure, version_read_failure;
+  guint false_events, mode, continuation_arms, stop_writes, config22, config23;
+  guint loads, uploads, polls, poll_failures, upload_failures, early_metadata;
+  guint resets_at_upload;
+  guint wake_commands, first_opcode;
+  guint poll_waits;
+  gint configured_after_poll_ms;
+  gint poll_errno;
+  guint8 payload[14184];
+  gsize size;
+} vendor;
+
+GBytes *
+__wrap_fpi_fte3600_firmware_load (const Fte3600Firmware *firmware,
+                                  const gchar *path, GError **error)
+{
+  if (!vendor.synthetic_firmware)
+    return __real_fpi_fte3600_firmware_load (firmware, path, error);
+  g_assert_cmpstr (path, ==, sensor.model->firmware_path);
+  g_assert_cmpuint (firmware->size, ==, sensor.model == &models[2] ? 14184 : 10396);
+  vendor.loads++;
+  vendor.size = firmware->size;
+  for (gsize i = 0; i < vendor.size; i++)
+    vendor.payload[i] = (i * 17 + 9) & 0xff;
+  return g_bytes_new (vendor.payload, vendor.size);
+}
+
+/* Return TRUE only for transactions intercepted by this fault fixture. */
+static gboolean
+vendor_transfer (const guint8 *tx, guint8 *rx, guint length, gint *result)
+{
+  if (!vendor.enabled)
+    return FALSE;
+  if (!vendor.first_opcode)
+    vendor.first_opcode = tx[0];
+  if (tx[0] == 0x70 && vendor.wake_after_pair && ++vendor.wake_commands == 2)
+    sensor.cold_start = FALSE;
+  if (tx[0] == 0x05 && length > 16)
+    {
+      g_assert_true (vendor.synthetic_firmware);
+      g_assert_cmpuint (length, ==, vendor.size + 7);
+      g_assert_cmpuint (tx[1], ==, 0xfa);
+      g_assert_cmpuint (tx[2] | tx[3], ==, 0);
+      g_assert_cmpuint (((guint) tx[4] << 8) | tx[5], ==, vendor.size);
+      g_assert_cmpmem (tx + 6, vendor.size, vendor.payload, vendor.size);
+      vendor.uploads++;
+      vendor.resets_at_upload = sensor.resets;
+      vendor.configured = FALSE;
+      if (vendor.remove_upload)
+        sensor.epoch++;
+      if (vendor.uploads <= vendor.upload_failures)
+        {
+          *result = -1;
+          errno = EIO;
+        }
+      return TRUE;
+    }
+  if (tx[0] == 0x04 && length == vendor.size + 8 && vendor.uploads && tx[2] == 0 && tx[3] == 0)
+    {
+      g_assert_cmpuint (((guint) tx[4] << 8) | tx[5], ==, length);
+      memset (rx, 0, length);
+      memcpy (rx + 6, vendor.payload, vendor.size);
+      return TRUE;
+    }
+  if (tx[0] == 0x11)
+    {
+      if (tx[2] == 0x76)
+        {
+          vendor.mode = tx[3];
+          if (sensor.images && vendor.enrollment)
+            {
+              g_assert_cmpuint (tx[3], ==, sensor.model == &models[2] ? 2 : 1);
+              vendor.continuation_arms++;
+            }
+        }
+      if ((tx[2] == 0x1e || tx[2] == 0x1f) && tx[3] == 0 && !sensor.images)
+        vendor.stop_writes++;
+      if (tx[2] == 0x01)
+        {
+          vendor.configured = TRUE;
+          if (vendor.polls)
+            g_assert_cmpint (g_atomic_int_get (&sensor.protocol_clock_ms), ==,
+                             vendor.configured_after_poll_ms);
+        }
+      vendor.config22 += tx[2] == 0x22;
+      vendor.config23 += tx[2] == 0x23;
+    }
+  if (tx[0] == 0x10)
+    {
+      if ((tx[2] == 0x20 && vendor.configured && vendor.final_read_failure) ||
+          (tx[2] == 0x1a && !vendor.uploads && vendor.version_read_failure))
+        {
+          *result = -1;
+          errno = EIO;
+          return TRUE;
+        }
+      if (vendor.uploads && !vendor.configured)
+        {
+          if (tx[2] == 0x14 || tx[2] == 0x15 || tx[2] == 0x1a || tx[2] == 0x3c ||
+              (tx[2] == 0x30 && sensor.model == &models[2]))
+            vendor.early_metadata++;
+          if (tx[2] == 0x20)
+            {
+              vendor.polls++;
+              vendor.configured_after_poll_ms = g_atomic_int_get (&sensor.protocol_clock_ms);
+              if (vendor.cancel_poll)
+                g_cancellable_cancel (sensor.cancellable);
+              if (vendor.polls <= vendor.poll_failures)
+                {
+                  /* An error with plausible bytes must still be retried. */
+                  memset (rx, 0, length);
+                  rx[4] = 0xa5;
+                  rx[5] = 0x5a;
+                  *result = -1;
+                  errno = vendor.poll_errno ? vendor.poll_errno : EIO;
+                  vendor.poll_wait_due = !vendor.cancel_poll;
+                  return TRUE;
+                }
+            }
+        }
+      if (tx[2] == 0x30 && vendor.marker_mismatch)
+        {
+          memset (rx, 0, length);
+          rx[4] = 0x42;
+          return TRUE;
+        }
+      if (tx[2] == 0x1d && sensor.finger_ready && vendor.false_events)
+        {
+          vendor.false_events--;
+          memset (rx, 0, length);
+          return TRUE;
+        }
+    }
+  return FALSE;
+}
+
 /* Advance only the protocol clock, while preserving the real asynchronous
  * state-machine dispatch and SPI worker/cancellation boundaries. General SSM
  * timer tests cover wall-clock scheduling; this suite checks the requested
@@ -344,6 +487,12 @@ void
 __wrap_fpi_ssm_jump_to_state_delayed (FpiSsm *ssm, int state, int delay)
 {
   g_assert_cmpint (delay, >=, 0);
+  if (vendor.poll_wait_due)
+    {
+      g_assert_cmpint (delay, ==, 2);
+      vendor.poll_wait_due = FALSE;
+      vendor.poll_waits++;
+    }
   g_atomic_int_add (&sensor.protocol_clock_ms, delay);
   __real_fpi_ssm_jump_to_state_delayed (ssm, state, 0);
 }
@@ -1111,6 +1260,11 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
   result = transfer->len;
   g_mutex_lock (&sensor.lock);
   sensor.spi_transactions++;
+  if (vendor_transfer (tx, rx, transfer->len, &result))
+    {
+      g_mutex_unlock (&sensor.lock);
+      return result;
+    }
   record_factory_transaction (tx, transfer->len);
   if (tx[0] == 0x5a)
     sensor.special_wake = TRUE;
@@ -1498,6 +1652,7 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
   FpDevice *device;
 
   memset (&sensor, 0, sizeof (sensor));
+  memset (&vendor, 0, sizeof (vendor));
   g_mutex_init (&sensor.lock);
   sensor.reset_events = g_array_new (FALSE, FALSE, sizeof (ResetEvent));
   sensor.soft_reset_times = g_array_new (FALSE, FALSE, sizeof (gint64));
@@ -2167,8 +2322,6 @@ test_ft9348_rom_and_firmware (gconstpointer data)
       if (scenario != 1)
         g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                                "*firmware loading failed:*");
-      g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
-                             "*Sensor reset after open failure also failed:*");
       g_assert_false (fp_device_open_sync (device, NULL, &error));
       if (scenario == 1)
         g_assert_error (error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE);
@@ -2318,6 +2471,8 @@ test_legacy_reject_unready_application (gconstpointer data)
 
   g_autoptr(GError) error = NULL;
 
+  sensor.hardware_recovery = TRUE;
+
   if (failure == 0)
     {
       sensor.registers[FT9361_REG_FW_VERSION] ^= 1;
@@ -2339,7 +2494,9 @@ test_legacy_reject_unready_application (gconstpointer data)
   if (failure == 2)
     g_test_assert_expected_messages ();
   g_assert_cmpuint (sensor.mode_writes, ==, 0);
-  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, failure == 2 ? 2 : 0);
+  /* All three cases now attempt ROM identification. Invalid OTP still stops
+   * the upload; the entry pulse and failure cleanup each assert once. */
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 2);
   if (failure != 2)
     g_assert_cmpuint (sensor.probe_packets, ==, 0);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
@@ -2450,8 +2607,10 @@ test_rom_discovery (gconstpointer data)
   g_assert_false (sensor.otp_enabled);
   g_assert_false (sensor.reset_asserted);
   g_assert_cmpuint (sensor.discovery_wakes, ==, 12);
-  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 4 ? 2 : 1);
-  g_assert_cmpuint (sensor.hardware_deasserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 4 ? 2 : 1);
+  /* Successful OTP no longer resets the device as cleanup. This fixture's
+   * retained application is started by the backend's double pulse instead. */
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 0 || scenario == 4 ? 2 : 1);
+  g_assert_cmpuint (sensor.hardware_deasserts - sensor.special_resets, ==, scenario >= 7 ? 0 : scenario == 0 || scenario == 4 ? 2 : 1);
   g_assert_cmpuint (sensor.firmware_opens, ==, 0);
   finish_device (device);
 }
@@ -2477,8 +2636,9 @@ test_firmware_identity_gate (gconstpointer data)
   if (scenario == 3)
     g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
                            "*firmware loading failed:*");
-  g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
-                         "*Sensor reset after open failure also failed:*");
+  if (scenario < 2)
+    g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
+                           "*Sensor reset after open failure also failed:*");
   g_assert_false (fp_device_open_sync (device, NULL, &error));
   if (scenario < 2)
     g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
@@ -2703,6 +2863,7 @@ test_enroll_verify_images (gconstpointer fixture)
                    FTE3600_TEMPLATE_OK);
 
   open_device (device);
+  vendor.enabled = vendor.enrollment = model == 0 || model == 2;
   sensor.frames = frames;
   sensor.n_frames = FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES;
   enrolled = fp_device_enroll_sync (device, print, NULL,
@@ -2711,6 +2872,9 @@ test_enroll_verify_images (gconstpointer fixture)
   g_assert_nonnull (enrolled);
   g_assert_cmpuint (stages, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   g_assert_cmpuint (sensor.next_frame, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
+  if (vendor.enabled)
+    g_assert_cmpuint (vendor.continuation_arms, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES - 1);
+  vendor.enabled = FALSE;
 
   /* The real asynchronous enrollment worker must produce the same canonical
   * template as the public extractor applied once to each captured image. */
@@ -3069,8 +3233,106 @@ test_b38_header (gconstpointer data)
   device = new_device_for_model_checked (2, 32768, &error);
   g_assert_no_error (error);
   g_assert_nonnull (strstr (fp_device_get_name (device), "FT9338"));
+  /* The B38 entry pulse is sufficient; child/parent success cleanup must
+   * not assert reset again after OTP was disabled. */
+  g_assert_cmpuint (sensor.hardware_asserts - sensor.special_resets, ==, 1);
   finish_device (device);
   b38_header_fixture = 0;
+}
+
+static void
+test_vendor_legacy (gconstpointer data)
+{
+  guint model = GPOINTER_TO_UINT (data) / 16;
+  guint scenario = GPOINTER_TO_UINT (data) % 16;
+  FpDevice *device = new_device_for_model (model);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpImage) image = NULL;
+
+  if (scenario == 0)
+    {
+      open_device (device);
+      vendor.enabled = TRUE;
+      vendor.false_events = 1;
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+      g_assert_cmpuint (vendor.false_events, ==, 0);
+      g_assert_cmpuint (vendor.mode, ==, model == 2 ? 2 : 1);
+      /* Already-idle arms do not need mode-1 stop writes or their delay. */
+      g_assert_cmpuint (vendor.stop_writes, ==, 0);
+    }
+  else if (scenario == 11)
+    {
+      sensor.cold_start = TRUE;
+      vendor.enabled = vendor.wake_after_pair = TRUE;
+      open_device (device);
+      g_assert_cmpuint (vendor.first_opcode, ==, 0x70);
+      g_assert_cmpuint (vendor.wake_commands, ==, 2);
+      g_assert_cmpuint (vendor.uploads, ==, 0);
+    }
+  else if (scenario == 3)
+    {
+      vendor.enabled = vendor.marker_mismatch = TRUE;
+      g_test_expect_message ("libfprint-fte3600", G_LOG_LEVEL_WARNING,
+                             "*configuration marker is 42*continuing as Windows does*");
+      open_device (device);
+      g_test_assert_expected_messages ();
+      g_assert_cmpuint (vendor.config22, ==, model == 0);
+      g_assert_cmpuint (vendor.config23, ==, model == 0);
+      g_assert_cmpuint (vendor.loads, ==, 0);
+    }
+  else
+    {
+      vendor.enabled = vendor.synthetic_firmware = TRUE;
+      sensor.hardware_recovery = TRUE;
+      if (model == 2)
+        {
+          sensor.otp = 0x10;
+          sensor.rom_family = 0x1534;
+        }
+      sensor.registers[scenario == 2 ? FT9361_REG_AGC_VERSION : FT9361_REG_FW_VERSION] ^= 1;
+      vendor.poll_failures = scenario == 5 ? 100 : scenario == 4 || scenario == 10 ? 1 : 0;
+      vendor.poll_errno = scenario == 10 ? ETIMEDOUT : EIO;
+      vendor.upload_failures = scenario == 9 ? 5 : scenario == 6 ? 1 : 0;
+      vendor.remove_upload = scenario == 7;
+      vendor.cancel_poll = scenario == 8;
+      vendor.final_read_failure = scenario == 12;
+      vendor.version_read_failure = scenario == 13;
+      gboolean success = fp_device_open_sync (device, sensor.cancellable, &error);
+
+      if (scenario == 5 || scenario == 7 || scenario == 8 || scenario == 9)
+        {
+          g_assert_false (success);
+          if (scenario == 5)
+            g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+          else
+            g_assert_error (error, G_IO_ERROR, (scenario == 7 ? G_IO_ERROR_BROKEN_PIPE :
+                             scenario == 8 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED));
+          g_assert_cmpuint (vendor.uploads, ==, scenario == 5 || scenario == 9 ? 5 : 1);
+        }
+      else
+        {
+          g_assert_true (success);
+          g_assert_no_error (error);
+          g_assert_cmpuint (vendor.uploads, ==, scenario == 6 ? 2 : 1);
+          g_assert_true (vendor.configured);
+          g_assert_cmpuint (sensor.resets - vendor.resets_at_upload, ==, model == 2 ? 0 : 2);
+        }
+      g_assert_cmpuint (vendor.loads, ==, vendor.uploads);
+      g_assert_cmpuint (vendor.early_metadata, ==, 0);
+      if (scenario == 5)
+        {
+          g_assert_cmpuint (vendor.polls, ==, 100);
+          g_assert_cmpuint (vendor.poll_waits, ==, 100);
+        }
+      else if (scenario == 4 || scenario == 10)
+        g_assert_cmpuint (vendor.polls, ==, 2);
+      g_assert_false (sensor.reset_asserted);
+    }
+  vendor.enabled = FALSE;
+  g_cancellable_reset (sensor.cancellable);
+  finish_device (device);
 }
 
 int
@@ -3275,5 +3537,11 @@ main (int argc, char **argv)
     }
   g_test_add_data_func ("/fte3600/b38-header/zero", GUINT_TO_POINTER (1), test_b38_header);
   g_test_add_data_func ("/fte3600/b38-header/ef", GUINT_TO_POINTER (2), test_b38_header);
+  for (guint model = 0; model <= 2; model += 2)
+    for (guint scenario = 0; scenario <= 13; scenario++)
+      {
+        g_autofree gchar *path = g_strdup_printf ("/fte3600/vendor/%s/%u", models[model].name, scenario);
+        g_test_add_data_func (path, GUINT_TO_POINTER (model * 16 + scenario), test_vendor_legacy);
+      }
   return g_test_run ();
 }

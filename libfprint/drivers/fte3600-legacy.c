@@ -29,6 +29,7 @@ static const Fte3600LegacyConfig ft9338 = {
   .agc_version = FTE3600_FT9338_AGC_VERSION,
   .mode_register = FTE3600_REG_MODE,
   .config_delay_ms = FTE3600_38_CONFIG_DELAY_MS,
+  .quick_mode = TRUE,
 };
 static const Fte3600LegacyConfig ft9536 = {
   .firmware_version = FTE3600_FT9536_FW_VERSION,
@@ -43,7 +44,6 @@ static const Fte3600LegacyConfig ft95a8 = {
   .config_delay_ms = FTE3600_A8_CONFIG_DELAY_MS,
   .cold_recovery = TRUE,
   .config_once = TRUE,
-  .quick_mode = TRUE,
 };
 
 enum fte3600_init_state {
@@ -59,6 +59,7 @@ enum fte3600_init_state {
   FTE3600_INIT_RESET_SETTLE,
   FTE3600_INIT_READ_MCU_STATUS,
   FTE3600_INIT_CHECK_MCU_STATUS,
+  FTE3600_INIT_MCU_EXHAUSTED,
   FTE3600_INIT_IDENTIFY_BOOT,
   FTE3600_INIT_LOAD_FIRMWARE,
   FTE3600_INIT_FW_RESET_PREPARE,
@@ -112,14 +113,10 @@ enum fte3600_arm_state {
   FTE3600_ARM_READ_MCU_STATUS,
   FTE3600_ARM_CHECK_MCU_STATUS,
   FTE3600_ARM_RECOVERY_RESET,
-  FTE3600_ARM_READ_MODE,
-  FTE3600_ARM_CHECK_MODE,
-  FTE3600_ARM_STOP_START,
-  FTE3600_ARM_STOP_ENABLE,
-  FTE3600_ARM_STOP_DELAY,
   FTE3600_ARM_WRITE_MODE,
   FTE3600_ARM_WRITE_ENABLE,
   FTE3600_ARM_WRITE_START,
+  FTE3600_ARM_WRITE_QUICK_TRIGGER,
   FTE3600_ARM_DELAY,
   FTE3600_ARM_DRAIN_FINGER_STATUS,
   FTE3600_ARM_READ_ARMED_MCU_STATUS,
@@ -135,12 +132,8 @@ enum fte3600_capture_state {
   FTE3600_CAPTURE_CHECK_MCU_STATUS,
   FTE3600_CAPTURE_READ_FINGER_STATUS,
   FTE3600_CAPTURE_CHECK_FINGER_STATUS,
-  FTE3600_CAPTURE_QUICK_READ_MCU_STATUS,
-  FTE3600_CAPTURE_QUICK_CHECK_MCU_STATUS,
-  FTE3600_CAPTURE_QUICK_WRITE_MODE,
-  FTE3600_CAPTURE_QUICK_WRITE_TRIGGER,
-  FTE3600_CAPTURE_QUICK_READ_ARMED_MCU_STATUS,
-  FTE3600_CAPTURE_QUICK_CHECK_ARMED_MCU_STATUS,
+  FTE3600_CAPTURE_REARM,
+  FTE3600_CAPTURE_REARM_DONE,
   FTE3600_CAPTURE_READ_IMAGE,
   FTE3600_CAPTURE_PROCESS_IMAGE,
   FTE3600_CAPTURE_CLEANUP_DISPATCH,
@@ -165,6 +158,25 @@ enum fte3600_reset_state {
   FTE3600_RESET_CHECK_MCU_STATUS,
   FTE3600_RESET_NSTATES,
 };
+
+static FpiSsm *fte3600_return_idle_new (FpiDeviceFte3600 *self, gboolean verify_idle);
+
+typedef struct
+{
+  guint attempts;
+  guint entry;
+} LegacyInit;
+
+static void
+fte3600_init_recover (FpiSsm *ssm)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
+
+  self->init_firmware_upload_attempted = TRUE;
+  self->init_hardware_reset_attempted = TRUE;
+  fpi_ssm_jump_to_state (ssm, self->sensor->protocol == FTE3600_PROTOCOL_FT9338 ?
+                         FTE3600_INIT_38_IDENTIFY : FTE3600_INIT_IDENTIFY_BOOT);
+}
 
 static void
 fte3600_submit_command (FpiSsm *ssm, Fte3600Command command, gboolean cancellable)
@@ -272,17 +284,27 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
   switch (state)
     {
     case FTE3600_INIT_DISPATCH:
-      fpi_ssm_jump_to_state (ssm, self->sensor->protocol == FTE3600_PROTOCOL_FT9338 ?
-                             FTE3600_INIT_38_READ_MCU : FTE3600_INIT_RESET_1);
+      {
+        FpiSsm *parent = fpi_ssm_get_data (ssm);
+        LegacyInit *init = fpi_ssm_get_data (parent);
+
+        fpi_ssm_jump_to_state (ssm, init->entry);
+      }
       return;
 
     case FTE3600_INIT_38_READ_MCU:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
     case FTE3600_INIT_38_CHECK_MCU:
       if (fpi_fte3600_mcu_is_idle (self))
-        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_RESET_1);
+        {
+          if (self->fast_open)
+            fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
+                                           FTE3600_LEGACY_WAKE_GEOMETRY_MS);
+          else
+            fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+        }
       else
         fpi_ssm_next_state (ssm);
       return;
@@ -296,17 +318,20 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_38_RECOVER:
+      self->init_firmware_upload_attempted = TRUE;
       fpi_ssm_start_subsm (ssm, fpi_fte3600_legacy38_recovery_new (self));
       return;
 
     case FTE3600_INIT_38_READY:
-      fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+      /* DownloadSensorFirmware returns directly to InitMcuConfig. Geometry
+       * and old version reads must not gate the cold configuration writes. */
+      fpi_ssm_jump_to_state (ssm, FTE3600_INIT_WRITE_CONFIG_01);
       return;
 
     case FTE3600_INIT_RESET_1:
       if (!config->cold_recovery)
         {
-          fpi_ssm_start_subsm (ssm, self->backend->create_reset (self));
+          fpi_ssm_start_subsm (ssm, fte3600_return_idle_new (self, FALSE));
           return;
         }
       fte3600_submit_command (ssm, FTE3600_COMMAND_SOFT_RESET, TRUE);
@@ -319,11 +344,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_INIT_RESET_DELAY:
       if (!config->cold_recovery)
         {
-          if (self->fast_open)
-            fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
-                                           FTE3600_LEGACY_WAKE_GEOMETRY_MS);
-          else
-            fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_38_READ_MCU);
         }
       else
         {
@@ -336,7 +357,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_READ_MCU_STATUS:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
     case FTE3600_INIT_CHECK_MCU_STATUS:
@@ -370,25 +391,32 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
               return;
             }
 
-          if (!self->init_firmware_upload_attempted)
-            {
-              self->init_firmware_upload_attempted = TRUE;
-              fpi_ssm_jump_to_state (ssm, FTE3600_INIT_IDENTIFY_BOOT);
-              return;
-            }
-
-          fpi_ssm_mark_failed (
-            ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO,
-              "FTE3600 legacy MCU did not return to idle after cold-boot firmware recovery (%02x %02x)",
-              self->small_rx[4], self->small_rx[5]));
+          /* The vendor loop also waits after its twentieth failed read. */
+          fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_MCU_EXHAUSTED,
+                                         FTE3600_INIT_MCU_POLL_MS);
           return;
         }
-      if (self->fast_open)
+      if (self->init_firmware_upload_attempted)
+        fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_CONFIG_MARKER);
+      else if (self->fast_open)
         fpi_ssm_jump_to_state_delayed (ssm, FTE3600_INIT_READ_ID_HIGH,
                                        FTE3600_LEGACY_WAKE_GEOMETRY_MS);
       else
         fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_ID_HIGH);
+      return;
+
+    case FTE3600_INIT_MCU_EXHAUSTED:
+      if (!self->init_firmware_upload_attempted)
+        {
+          self->init_firmware_upload_attempted = TRUE;
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_IDENTIFY_BOOT);
+        }
+      else
+        fpi_ssm_mark_failed (
+          ssm, fpi_device_error_new_msg (
+            FP_DEVICE_ERROR_PROTO,
+            "FTE3600 legacy MCU did not return to idle after cold-boot firmware recovery (%02x %02x)",
+            self->small_rx[4], self->small_rx[5]));
       return;
 
     case FTE3600_INIT_IDENTIFY_BOOT:
@@ -431,7 +459,7 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
             return;
           }
 
-        fp_info ("FTE3600 legacy MCU not idle (%02x %02x); starting cold-boot firmware upload (%zu bytes)",
+        fp_info ("FTE3600 legacy loading matching firmware (MCU %02x %02x; %zu bytes)",
                  self->small_rx[4], self->small_rx[5],
                  g_bytes_get_size (self->firmware_bytes));
         fpi_ssm_jump_to_state (ssm, FTE3600_INIT_FW_RESET_PREPARE);
@@ -515,6 +543,11 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_READ_ID_HIGH:
+      if (self->init_firmware_upload_attempted)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_READ_CONFIG_MARKER);
+          return;
+        }
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_SENSOR_ID_HIGH, 1, TRUE);
       return;
 
@@ -549,41 +582,39 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_READ_FW_VERSION:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_FW_VERSION, 1, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_FW_VERSION, 1, TRUE);
       return;
 
     case FTE3600_INIT_CHECK_FW_VERSION:
       value = fpi_fte3600_read_result_byte (self);
-      if (value != config->firmware_version)
+      if (!self->small_rx_valid || value != config->firmware_version)
         {
-          fpi_ssm_mark_failed (ssm,
-                               fpi_device_error_new_msg (
-                                 FP_DEVICE_ERROR_PROTO,
-                                 "Unexpected FTE3600 firmware version %02x",
-                                 value));
+          fte3600_init_recover (ssm);
           return;
         }
       fpi_ssm_next_state (ssm);
       return;
 
     case FTE3600_INIT_READ_AGC_VERSION:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_AGC_VERSION, 1, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_AGC_VERSION, 1, TRUE);
       return;
 
     case FTE3600_INIT_CHECK_AGC_VERSION:
       value = fpi_fte3600_read_result_byte (self);
-      if (value != config->agc_version)
+      if (!self->small_rx_valid || value != config->agc_version)
         {
-          fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                                 FP_DEVICE_ERROR_PROTO,
-                                 "Unexpected FTE3600 AGC version %02x",
-                                 value));
+          fte3600_init_recover (ssm);
           return;
         }
       fpi_ssm_next_state (ssm);
       return;
 
     case FTE3600_INIT_READ_CONFIG_MARKER:
+      if (!config->config_once)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_WRITE_CONFIG_01);
+          return;
+        }
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_CONFIG_MARKER, 1, TRUE);
       return;
 
@@ -626,12 +657,10 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       value = fpi_fte3600_read_result_byte (self);
       if (value != FTE3600_CONFIGURED_MARKER)
         {
-          fpi_ssm_mark_failed (
-            ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO,
-              "FTE3600 legacy MCU configuration verification failed (%02x)",
-              value));
-          return;
+          /* Both vendor helpers log this value and continue. Transfer errors
+           * still propagate; the A8 22/23 writes must not be skipped here. */
+          fp_warn ("%s configuration marker is %02x, expected bb; continuing as Windows does",
+                   self->sensor->name, value);
         }
       if (config->config_once)
         fpi_ssm_next_state (ssm);
@@ -648,21 +677,13 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_FINAL_READ_MCU_STATUS:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
+      fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
     case FTE3600_INIT_FINAL_CHECK_MCU_STATUS:
-      if (!fpi_fte3600_mcu_is_idle (self))
-        {
-          fpi_ssm_mark_failed (
-            ssm, fpi_device_error_new_msg (
-              FP_DEVICE_ERROR_PROTO,
-              "FTE3600 legacy MCU left idle during initialization "
-              "(%02x %02x)",
-              self->small_rx[4], self->small_rx[5]));
-          return;
-        }
-      self->idle_verified = TRUE;
+      /* Keep an accurate Linux lifecycle flag, not an additional vendor
+       * configuration gate. Arming handles a busy MCU through return-idle. */
+      self->idle_verified = fpi_fte3600_mcu_is_idle (self);
       fpi_ssm_next_state (ssm);
       return;
 
@@ -680,7 +701,7 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
   const Fte3600LegacyConfig *config = self->backend->configuration;
-  guint8 mode;
+  guint mode = GPOINTER_TO_UINT (fpi_ssm_get_data (ssm));
 
   if (fpi_fte3600_fail_if_cancelled (ssm, dev))
     return;
@@ -694,11 +715,11 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_ARM_CHECK_MCU_STATUS:
       if (fpi_fte3600_mcu_is_idle (self))
         {
-          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_READ_MODE);
+          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_WRITE_MODE);
         }
       else
         {
-          fp_dbg ("FTE3600 legacy unexpectedly busy before mode-1 rearm; recovering");
+          fp_dbg ("FTE3600 legacy unexpectedly busy before capture rearm; recovering");
           fpi_ssm_next_state (ssm);
         }
       return;
@@ -707,38 +728,6 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
       /* Return-idle performs the mode-dependent stop and confirms MCU idle.
        * A failed recovery propagates instead of writing arm into a busy MCU. */
       fpi_ssm_start_subsm (ssm, self->backend->create_reset (self));
-      return;
-
-    case FTE3600_ARM_READ_MODE:
-      fpi_fte3600_submit_reg_read (ssm, config->mode_register, 1, TRUE);
-      return;
-
-    case FTE3600_ARM_CHECK_MODE:
-      mode = fpi_fte3600_read_result_byte (self);
-      if (mode == FTE3600_MODE_QUICK_CAPTURE || mode == FTE3600_MODE_3 || mode == FTE3600_MODE_4)
-        {
-          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_WRITE_MODE);
-          return;
-        }
-
-      /* Vendor mode-1 rearm stops both capture controls first.  Unknown
-       * values deliberately take the same conservative path. */
-      if (mode != FTE3600_MODE_WAIT_FINGER)
-        fp_dbg ("Stopping FTE3600 capture controls from unknown mode %02x",
-                mode);
-      fpi_ssm_next_state (ssm);
-      return;
-
-    case FTE3600_ARM_STOP_START:
-      fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_START, FTE3600_CAPTURE_DISABLE, TRUE);
-      return;
-
-    case FTE3600_ARM_STOP_ENABLE:
-      fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_ENABLE, FTE3600_CAPTURE_DISABLE, TRUE);
-      return;
-
-    case FTE3600_ARM_STOP_DELAY:
-      fpi_ssm_next_state_delayed (ssm, FTE3600_ARM_DELAY_MS);
       return;
 
     case FTE3600_ARM_WRITE_MODE:
@@ -752,10 +741,15 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
           }
       }
       self->arm_attempts++;
-      fpi_fte3600_submit_reg_write (ssm, config->mode_register, FTE3600_MODE_WAIT_FINGER, TRUE);
+      fpi_fte3600_submit_reg_write (ssm, config->mode_register, mode, TRUE);
       return;
 
     case FTE3600_ARM_WRITE_ENABLE:
+      if (mode == FTE3600_MODE_QUICK_CAPTURE)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_WRITE_QUICK_TRIGGER);
+          return;
+        }
       fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_ENABLE, FTE3600_CAPTURE_ENABLE, TRUE);
       return;
 
@@ -763,7 +757,19 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
       fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_START, FTE3600_CAPTURE_ENABLE, TRUE);
       return;
 
+    case FTE3600_ARM_WRITE_QUICK_TRIGGER:
+      if (mode == FTE3600_MODE_QUICK_CAPTURE)
+        fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_QUICK_TRIGGER, FTE3600_QUICK_TRIGGER, TRUE);
+      else
+        fpi_ssm_next_state (ssm);
+      return;
+
     case FTE3600_ARM_DELAY:
+      if (mode == FTE3600_MODE_QUICK_CAPTURE)
+        {
+          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_READ_ARMED_MCU_STATUS);
+          return;
+        }
       fpi_ssm_next_state_delayed (ssm, FTE3600_ARM_DELAY_MS);
       return;
 
@@ -785,7 +791,7 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
                 ssm, g_error_new_literal (
                   G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
                   "FTE3600 legacy failed to enter armed mode after bounded "
-                  "mode-1 retries"));
+                  "capture-mode retries"));
               return;
             }
           fp_dbg ("Discarded an FTE3600 event which raced with arming");
@@ -808,13 +814,15 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
 }
 
 static FpiSsm *
-fte3600_new_arm_ssm (FpiDeviceFte3600 *self)
+fte3600_new_arm_ssm (FpiDeviceFte3600 *self, guint mode)
 {
   self->arm_attempts = 0;
   self->arm_deadline =
     g_get_monotonic_time () + FTE3600_ARM_TIMEOUT_MS * 1000;
-  return fpi_ssm_new (FP_DEVICE (self), fte3600_arm_handler,
-                      FTE3600_ARM_NSTATES);
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), fte3600_arm_handler, FTE3600_ARM_NSTATES);
+
+  fpi_ssm_set_data (ssm, GUINT_TO_POINTER (mode), NULL);
+  return ssm;
 }
 
 static void
@@ -835,7 +843,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
       if (self->armed)
         fpi_ssm_next_state (ssm);
       else
-        fpi_ssm_start_subsm (ssm, fte3600_new_arm_ssm (self));
+        fpi_ssm_start_subsm (ssm, fte3600_new_arm_ssm (self, FTE3600_MODE_WAIT_FINGER));
       return;
 
     case FTE3600_CAPTURE_WAIT_FINGER_IRQ:
@@ -892,60 +900,18 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
               return;
             }
           fp_dbg ("Ignoring non-finger status %02x", finger_status);
-          if (config->quick_mode)
-            {
-              fpi_ssm_next_state (ssm);
-            }
-          else
-            {
-              self->armed = FALSE;
-              fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_PREPARE_ARM);
-            }
-        }
-      return;
-
-    case FTE3600_CAPTURE_QUICK_READ_MCU_STATUS:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
-      return;
-
-    case FTE3600_CAPTURE_QUICK_CHECK_MCU_STATUS:
-      if (fpi_fte3600_mcu_is_idle (self))
-        {
           fpi_ssm_next_state (ssm);
         }
-      else
-        {
-          fp_warn ("FTE3600 legacy became busy before quick-mode rearm; recovering");
-          self->armed = FALSE;
-          fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_PREPARE_ARM);
-        }
       return;
 
-    case FTE3600_CAPTURE_QUICK_WRITE_MODE:
-      fpi_fte3600_submit_reg_write (ssm, config->mode_register, FTE3600_MODE_QUICK_CAPTURE, TRUE);
+    case FTE3600_CAPTURE_REARM:
+      self->armed = FALSE;
+      fpi_ssm_start_subsm (ssm, fte3600_new_arm_ssm (
+                            self, config->quick_mode ? FTE3600_MODE_QUICK_CAPTURE : FTE3600_MODE_WAIT_FINGER));
       return;
 
-    case FTE3600_CAPTURE_QUICK_WRITE_TRIGGER:
-      fpi_fte3600_submit_reg_write (ssm, FTE3600_REG_QUICK_TRIGGER, FTE3600_QUICK_TRIGGER, TRUE);
-      return;
-
-    case FTE3600_CAPTURE_QUICK_READ_ARMED_MCU_STATUS:
-      fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
-      return;
-
-    case FTE3600_CAPTURE_QUICK_CHECK_ARMED_MCU_STATUS:
-      if (!fpi_fte3600_mcu_is_idle (self))
-        {
-          self->armed = TRUE;
-          fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_WAIT_FINGER_IRQ);
-        }
-      else
-        {
-          fp_warn ("FTE3600 legacy quick-mode rearm stayed idle; recovering in "
-                   "regular mode");
-          self->armed = FALSE;
-          fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_PREPARE_ARM);
-        }
+    case FTE3600_CAPTURE_REARM_DONE:
+      fpi_ssm_jump_to_state (ssm, FTE3600_CAPTURE_WAIT_FINGER_IRQ);
       return;
 
     case FTE3600_CAPTURE_READ_IMAGE:
@@ -978,7 +944,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
               self->capture_rx[6], self->capture_rx[7]);
       fpi_fte3600_secure_clear (self->capture_rx, self->capture_frame_size);
       /* Register 0x1d is a latched event result, not a live contact signal.
-       * Cleanup rearms mode 1 before the matcher only when another enrollment
+       * Cleanup rearms the chip-specific mode only when another enrollment
        * stage is expected. A terminal capture returns to idle before its
        * action completes; stale GPIO events are drained before the next arm. */
       fpi_ssm_next_state (ssm);
@@ -1009,7 +975,8 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
 
     case FTE3600_CAPTURE_CLEANUP_REARM:
       self->armed = FALSE;
-      fpi_ssm_start_subsm (ssm, fte3600_new_arm_ssm (self));
+      fpi_ssm_start_subsm (ssm, fte3600_new_arm_ssm (
+                            self, config->quick_mode ? FTE3600_MODE_QUICK_CAPTURE : FTE3600_MODE_WAIT_FINGER));
       return;
 
     case FTE3600_CAPTURE_CLEANUP_REARM_DONE:
@@ -1092,10 +1059,20 @@ fte3600_reset_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_RESET_READ_MCU_STATUS:
+      if (!GPOINTER_TO_INT (fpi_ssm_get_data (ssm)))
+        {
+          fpi_ssm_mark_completed (ssm);
+          return;
+        }
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, FALSE);
       return;
 
     case FTE3600_RESET_CHECK_MCU_STATUS:
+      if (!GPOINTER_TO_INT (fpi_ssm_get_data (ssm)))
+        {
+          fpi_ssm_mark_completed (ssm);
+          return;
+        }
       if (!fpi_fte3600_mcu_is_idle (self))
         {
           fpi_ssm_mark_failed (
@@ -1115,10 +1092,74 @@ fte3600_reset_handler (FpiSsm *ssm, FpDevice *dev)
     }
 }
 
+static void
+fte3600_init_attempt_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
+  FpiSsm *parent = fpi_ssm_get_data (ssm);
+  LegacyInit *init = fpi_ssm_get_data (parent);
+  guint state = fpi_ssm_get_cur_state (ssm);
+  gboolean downloading = state == FTE3600_INIT_38_RECOVER ||
+                         (state >= FTE3600_INIT_LOAD_FIRMWARE && state <= FTE3600_INIT_HARD_RESET_BOOT) ||
+                         (state >= FTE3600_INIT_RESET_1 && state <= FTE3600_INIT_MCU_EXHAUSTED);
+
+  if (!error)
+    {
+      fpi_ssm_mark_completed (parent);
+      return;
+    }
+
+  /* DistributeSensorFirmware retries the complete download, never resumes a
+   * partial payload or restarts the application after a failed RAM check. */
+  if (downloading && self->init_firmware_upload_attempted &&
+      fpi_fte3600_identity_allows_firmware (&self->rom_identity) &&
+      self->rom_identity.sensor == self->sensor->sensor &&
+      init->attempts < FTE3600_FIRMWARE_MAX_ATTEMPTS &&
+      (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_FAILED) ||
+       g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+       g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO)))
+    {
+      fp_dbg ("Retrying %s firmware download after attempt %u: %s",
+              self->sensor->name, init->attempts, error->message);
+      g_clear_error (&error);
+      if (fpi_fte3600_fail_if_cancelled (parent, dev))
+        return;
+      if (!fpi_fte3600_transport_check (dev, &error))
+        {
+          fpi_ssm_mark_failed (parent, error);
+          return;
+        }
+      self->session_failed = FALSE;
+      init->entry = self->sensor->protocol == FTE3600_PROTOCOL_FT9338 ?
+                    FTE3600_INIT_38_RECOVER : FTE3600_INIT_LOAD_FIRMWARE;
+      fpi_ssm_jump_to_state (parent, 0);
+      return;
+    }
+  if (downloading && self->init_firmware_upload_attempted)
+    self->session_failed = TRUE;
+  fpi_ssm_mark_failed (parent, error);
+}
+
+static void
+fte3600_init_attempt (FpiSsm *ssm, FpDevice *dev)
+{
+  LegacyInit *init = fpi_ssm_get_data (ssm);
+  FpiSsm *child = fpi_ssm_new (dev, fte3600_init_handler, FTE3600_INIT_NSTATES);
+
+  init->attempts++;
+  fpi_ssm_set_data (child, ssm, NULL);
+  fpi_ssm_start (child, fte3600_init_attempt_complete);
+}
+
 static FpiSsm *
 fte3600_legacy_create_init (FpiDeviceFte3600 *self)
 {
-  return fpi_ssm_new (FP_DEVICE (self), fte3600_init_handler, FTE3600_INIT_NSTATES);
+  FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), fte3600_init_attempt, 1);
+  LegacyInit *init = g_new0 (LegacyInit, 1);
+
+  init->entry = FTE3600_INIT_RESET_1;
+  fpi_ssm_set_data (ssm, init, g_free);
+  return ssm;
 }
 
 static FpiSsm *
@@ -1130,12 +1171,22 @@ fte3600_legacy_create_capture (FpiDeviceFte3600 *self)
 }
 
 static FpiSsm *
+fte3600_return_idle_new (FpiDeviceFte3600 *self, gboolean verify_idle)
+{
+  FpiSsm *ssm;
+
+  /* Continue bounded cleanup after the first error, retaining that error. */
+  ssm = fpi_ssm_new_full (FP_DEVICE (self), fte3600_reset_handler,
+                          FTE3600_RESET_NSTATES, FTE3600_RESET_DELAY,
+                          "FTE3600 legacy return idle");
+  fpi_ssm_set_data (ssm, GINT_TO_POINTER (verify_idle), NULL);
+  return ssm;
+}
+
+static FpiSsm *
 fte3600_legacy_create_reset (FpiDeviceFte3600 *self)
 {
-  /* Continue bounded cleanup after the first error, retaining that error. */
-  return fpi_ssm_new_full (FP_DEVICE (self), fte3600_reset_handler,
-                           FTE3600_RESET_NSTATES, FTE3600_RESET_DELAY,
-                           "FTE3600 legacy safe reset");
+  return fte3600_return_idle_new (self, TRUE);
 }
 
 static gboolean
