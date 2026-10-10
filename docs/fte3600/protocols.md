@@ -154,6 +154,24 @@ Linux lifecycle flag. A transient failure leaves idle unverified instead of
 rejecting configuration; arming checks MCU status before starting acquisition.
 Terminal libfprint actions return to idle rather than perpetually rearming.
 
+A post-arm idle reply may mean that acquisition finished before the SPI worker
+returned. As in `SwitchNextSensorWorkMode` (`289CE-289DB`), the legacy backend
+writes work mode zero (`76=00` for FT9338/FT9361) and leaves the IRQ queued.
+It neither retriggers capture nor waits for this next IRQ before handing the
+preceding enrollment image to the matcher. The next capture consumes the IRQ
+and validates MCU and finger status before reading the image. If that idle
+completion has no fresh IRQ, a one-second Linux timeout starts when the next
+image is requested; matcher processing time is excluded. The capture owns the
+timer and cancels it on IRQ, cleanup or destruction. Reset clears the pending
+arm state; stale events are drained before a new arm, not between a completed
+arm and its image read.
+
+Warm initialization for both FT9338 and FT9361 follows `LoadFW`'s ReturnIdle
+entry (`2C7F9`, `28668`): `70`, 5 ms, `70`, read work mode; mode 1 and unknown
+modes then write `1E=00`, `1F=00`, and wait 10 ms on SPI. Modes 2/3/4 skip those
+stop writes. The A8 cold-start tail remains separate: after hardware startup,
+`70`, 5 ms, `70`, 2 ms, then the existing MCU polling loop.
+
 ## FW9369 (Silicon ID 9362)
 
 SFR writes use `09 F6 reg value`; SFR reads use `08 F7 reg 00` and one response

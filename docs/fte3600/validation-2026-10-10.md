@@ -82,3 +82,63 @@ These results validate software control flow and mocked wire behavior against
 one inspected Windows build. This patch has not been run on a physical A1 or
 E3224. Earlier successful hardware runs do not constitute validation of these
 new changes, and the project does not claim complete Windows equivalence.
+
+## Follow-up: completion before IRQ wait installation
+
+The post-push audit of main `be663cf` and medion-spidev `b077888` reproduced
+an additional race: a mode-2 acquisition could complete before the post-arm
+MCU read. The old arm state treated idle as failure, drained the fresh IRQ,
+and retriggered capture. Three such completions produced a timeout with no
+image read. The old fixture only delivered IRQs after wait installation.
+
+The first uncommitted fix retained completions but a further DLL comparison
+found three remaining differences. The revised implementation addresses them:
+
+| Condition | Revised behavior | Vendor evidence |
+| --- | --- | --- |
+| MCU already idle after arm | Write mode zero, retaining the queued IRQ without another capture trigger | `287D4`, `289CE-289DB`, `285CC` |
+| Next enrollment frame has no IRQ | Deliver the already-read preceding frame before waiting for the next IRQ | `2E990-2EACC` rearms but does not await the next IRQ before completing the image request |
+| FT9361 warm initialization | Use mode-dependent ReturnIdle before the version decision; retain a separate A8 cold-start tail | `2C7F9`, `28668-287D3`, `3987A-398A6` |
+
+The pending completion stays in the kernel IRQ queue while the previous image
+is processed. The next capture validates the session, consumes the fresh IRQ,
+checks MCU/finger status and reads the image. If an idle post-arm outcome has
+no IRQ, a one-second host timeout starts only when its image is requested.
+It does not consume the matcher processing budget or gate the previous frame.
+The capture owns this timer and destroys it on IRQ, cleanup and teardown.
+Reset clears pending arm state, and a new arm drains stale events. A latched
+positive finger status alone still cannot produce an image.
+
+Warm initialization of both chips uses `70`, 5 ms, `70`, then reads the work
+mode. Modes 1/unknown stop `1E` then `1F` and wait 10 ms; modes 2/3/4 skip
+these writes. A8's post-upload hardware startup still uses its paired `70`,
+2 ms settle and bounded MCU polling, without the warm-entry stop sequence.
+The firmware payloads and dedicated Medion startup engines are unchanged.
+
+Twenty-seven lifecycle cases are added relative to the pushed revisions:
+fifteen IRQ/enrollment cases and twelve warm-entry traces. The latter assert
+actual command bytes and requested timing for both chips in modes 0/1/2/3/4/FF.
+The IRQ cases assert mode-zero writes before image reads, one trigger per
+acquisition, cancellation/generation/timeout cleanup, and session reuse.
+For both chips, the missing-next-IRQ test requires one reported enrollment
+stage before timing out. Another test withholds each next IRQ until the
+previous frame's progress callback, detecting any dependency on the next
+event before reporting the preceding image. Existing cold-start and upload
+tests continue to exercise the separate firmware/startup paths.
+
+These tests use generated data and simulated I/O. Hardware validation remains
+pending; no claim of complete Windows equivalence follows from these fixes.
+
+Revised follow-up validation:
+
+| Configuration | Result |
+| --- | --- |
+| main, BRISK-only release/LTO, warnings as errors; full suite | 30 groups passed, 33 skipped, 0 failed; lifecycle 214 cases passed |
+| medion-spidev, BRISK+IPA, warnings as errors; full suite | 37 groups passed, 33 skipped, 0 failed; lifecycle 227 cases passed |
+| main, BRISK+IPA, AddressSanitizer and UndefinedBehaviorSanitizer | Lifecycle passed, no sanitizer errors |
+| main, personal authentication disabled | Lifecycle passed |
+
+The skips have the same reasons as above. The final test-only adjustment
+allows cancellation or generation loss to interrupt a mode-zero write before
+completion; successful image reads still require that write. Both branches'
+IRQ/enrollment regression groups were rebuilt and rerun after that adjustment.

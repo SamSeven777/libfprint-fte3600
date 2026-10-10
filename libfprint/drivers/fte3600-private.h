@@ -69,8 +69,6 @@ struct _FpiDeviceFte3600
   GSource                       *irq_source;
   GSource                       *irq_guard_source;
   FpiSsm                        *irq_wait_ssm;
-  gint64                         arm_deadline;
-  guint                          arm_attempts;
   gint64                         capture_ready_deadline;
   guint                          false_irq_count;
 

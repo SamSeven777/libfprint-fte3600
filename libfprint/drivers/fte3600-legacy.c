@@ -48,6 +48,8 @@ static const Fte3600LegacyConfig ft95a8 = {
 
 enum fte3600_init_state {
   FTE3600_INIT_DISPATCH,
+  FTE3600_INIT_RETURN_IDLE,
+  FTE3600_INIT_RETURN_IDLE_DONE,
   FTE3600_INIT_38_READ_MCU,
   FTE3600_INIT_38_CHECK_MCU,
   FTE3600_INIT_38_IDENTIFY,
@@ -121,6 +123,7 @@ enum fte3600_arm_state {
   FTE3600_ARM_DRAIN_FINGER_STATUS,
   FTE3600_ARM_READ_ARMED_MCU_STATUS,
   FTE3600_ARM_CHECK_ARMED_MCU_STATUS,
+  FTE3600_ARM_WRITE_IDLE_MODE,
   FTE3600_ARM_DONE,
   FTE3600_ARM_NSTATES,
 };
@@ -166,6 +169,52 @@ typedef struct
   guint attempts;
   guint entry;
 } LegacyInit;
+
+typedef struct
+{
+  /* An idle post-arm reply may be a completed acquisition. Leave its IRQ
+   * queued until the next capture, including during enrollment processing. */
+  gboolean arm_completed;
+} LegacyState;
+
+typedef struct
+{
+  GSource *timeout;
+} LegacyCapture;
+
+static LegacyState *
+fte3600_legacy_state (FpiDeviceFte3600 *self)
+{
+  if (!self->backend_data)
+    self->backend_data = g_new0 (LegacyState, 1);
+  return self->backend_data;
+}
+
+static void
+fte3600_legacy_destroy (FpiDeviceFte3600 *self)
+{
+  g_clear_pointer (&self->backend_data, g_free);
+}
+
+static void
+fte3600_capture_free (LegacyCapture *capture)
+{
+  g_clear_pointer (&capture->timeout, g_source_destroy);
+  g_free (capture);
+}
+
+static void
+fte3600_capture_irq_timeout (FpDevice *dev, gpointer user_data)
+{
+  FpiSsm *ssm = user_data;
+  LegacyCapture *capture = fpi_ssm_get_data (ssm);
+
+  g_clear_pointer (&capture->timeout, g_source_destroy);
+  fpi_fte3600_clear_irq_source (FPI_DEVICE_FTE3600 (dev));
+  fpi_ssm_mark_failed (
+    ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                             "FTE3600 legacy stayed idle without a new capture IRQ"));
+}
 
 static void
 fte3600_init_recover (FpiSsm *ssm)
@@ -292,6 +341,17 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       }
       return;
 
+    case FTE3600_INIT_RETURN_IDLE:
+      /* LoadFW returns a running application to idle before checking its
+       * version. The A8 post-download reset tail is a separate path. */
+      fpi_ssm_start_subsm (ssm, fte3600_return_idle_new (self, FALSE));
+      return;
+
+    case FTE3600_INIT_RETURN_IDLE_DONE:
+      fpi_ssm_jump_to_state (ssm, config->cold_recovery ?
+                             FTE3600_INIT_READ_MCU_STATUS : FTE3600_INIT_38_READ_MCU);
+      return;
+
     case FTE3600_INIT_38_READ_MCU:
       fpi_fte3600_try_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
@@ -329,27 +389,12 @@ fte3600_init_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_INIT_RESET_1:
-      if (!config->cold_recovery)
-        {
-          fpi_ssm_start_subsm (ssm, fte3600_return_idle_new (self, FALSE));
-          return;
-        }
-      fte3600_submit_command (ssm, FTE3600_COMMAND_SOFT_RESET, TRUE);
-      return;
-
     case FTE3600_INIT_RESET_2:
       fte3600_submit_command (ssm, FTE3600_COMMAND_SOFT_RESET, TRUE);
       return;
 
     case FTE3600_INIT_RESET_DELAY:
-      if (!config->cold_recovery)
-        {
-          fpi_ssm_jump_to_state (ssm, FTE3600_INIT_38_READ_MCU);
-        }
-      else
-        {
-          fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
-        }
+      fpi_ssm_next_state_delayed (ssm, FTE3600_SOFT_RESET_INTERVAL_MS);
       return;
 
     case FTE3600_INIT_RESET_SETTLE:
@@ -734,13 +779,13 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
       {
         g_autoptr(GError) error = NULL;
 
+        fte3600_legacy_state (self)->arm_completed = FALSE;
         if (!fpi_fte3600_drain_irq_events (self, &error))
           {
             fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
             return;
           }
       }
-      self->arm_attempts++;
       fpi_fte3600_submit_reg_write (ssm, config->mode_register, mode, TRUE);
       return;
 
@@ -784,24 +829,20 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
     case FTE3600_ARM_CHECK_ARMED_MCU_STATUS:
       if (fpi_fte3600_mcu_is_idle (self))
         {
-          if (self->arm_attempts >= FTE3600_ARM_MAX_ATTEMPTS ||
-              g_get_monotonic_time () >= self->arm_deadline)
-            {
-              fpi_ssm_mark_failed (
-                ssm, g_error_new_literal (
-                  G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-                  "FTE3600 legacy failed to enter armed mode after bounded "
-                  "capture-mode retries"));
-              return;
-            }
-          fp_dbg ("Discarded an FTE3600 event which raced with arming");
-          fpi_ssm_jump_to_state_delayed (
-            ssm, FTE3600_ARM_READ_MCU_STATUS, FTE3600_POLL_DELAY_MS);
+          /* SwitchNextSensorWorkMode writes mode zero on this outcome.
+           * Preserve the queued IRQ; do not retrigger or await another frame
+           * before handing the preceding enrollment image to the matcher. */
+          fpi_ssm_next_state (ssm);
         }
       else
         {
-          fpi_ssm_next_state (ssm);
+          fpi_ssm_jump_to_state (ssm, FTE3600_ARM_DONE);
         }
+      return;
+
+    case FTE3600_ARM_WRITE_IDLE_MODE:
+      fte3600_legacy_state (self)->arm_completed = TRUE;
+      fpi_fte3600_submit_reg_write (ssm, config->mode_register, FTE3600_MODE_IDLE, TRUE);
       return;
 
     case FTE3600_ARM_DONE:
@@ -816,9 +857,6 @@ fte3600_arm_handler (FpiSsm *ssm, FpDevice *dev)
 static FpiSsm *
 fte3600_new_arm_ssm (FpiDeviceFte3600 *self, guint mode)
 {
-  self->arm_attempts = 0;
-  self->arm_deadline =
-    g_get_monotonic_time () + FTE3600_ARM_TIMEOUT_MS * 1000;
   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), fte3600_arm_handler, FTE3600_ARM_NSTATES);
 
   fpi_ssm_set_data (ssm, GUINT_TO_POINTER (mode), NULL);
@@ -830,6 +868,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (dev);
   const Fte3600LegacyConfig *config = self->backend->configuration;
+  LegacyCapture *capture = fpi_ssm_get_data (ssm);
   gint state = fpi_ssm_get_cur_state (ssm);
   guint8 finger_status;
 
@@ -847,11 +886,20 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_CAPTURE_WAIT_FINGER_IRQ:
+      if (fte3600_legacy_state (self)->arm_completed)
+        {
+          /* Bound a missing completion only when its image is requested.
+           * Time spent processing the previous image cannot expire this wait. */
+          capture->timeout = fpi_device_add_timeout (
+            dev, FTE3600_IDLE_IRQ_TIMEOUT_MS, fte3600_capture_irq_timeout, ssm, NULL);
+        }
       self->armed = TRUE;
       fpi_fte3600_wait_for_irq (ssm);
       return;
 
     case FTE3600_CAPTURE_POLL_MCU_STATUS:
+      g_clear_pointer (&capture->timeout, g_source_destroy);
+      fte3600_legacy_state (self)->arm_completed = FALSE;
       fpi_fte3600_submit_reg_read (ssm, FTE3600_REG_MCU_STATUS, 2, TRUE);
       return;
 
@@ -951,6 +999,7 @@ fte3600_capture_handler (FpiSsm *ssm, FpDevice *dev)
       return;
 
     case FTE3600_CAPTURE_CLEANUP_DISPATCH:
+      g_clear_pointer (&capture->timeout, g_source_destroy);
       if (fpi_ssm_get_error (ssm))
         {
           fpi_fte3600_secure_clear (self->capture_rx,
@@ -1020,6 +1069,8 @@ fte3600_reset_handler (FpiSsm *ssm, FpDevice *dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case FTE3600_RESET_1:
+      if (self->backend_data)
+        ((LegacyState *) self->backend_data)->arm_completed = FALSE;
       self->idle_verified = FALSE;
       G_GNUC_FALLTHROUGH;
 
@@ -1157,7 +1208,7 @@ fte3600_legacy_create_init (FpiDeviceFte3600 *self)
   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), fte3600_init_attempt, 1);
   LegacyInit *init = g_new0 (LegacyInit, 1);
 
-  init->entry = FTE3600_INIT_RESET_1;
+  init->entry = FTE3600_INIT_RETURN_IDLE;
   fpi_ssm_set_data (ssm, init, g_free);
   return ssm;
 }
@@ -1165,9 +1216,12 @@ fte3600_legacy_create_init (FpiDeviceFte3600 *self)
 static FpiSsm *
 fte3600_legacy_create_capture (FpiDeviceFte3600 *self)
 {
-  return fpi_ssm_new_full (FP_DEVICE (self), fte3600_capture_handler,
-                           FTE3600_CAPTURE_NSTATES,
-                           FTE3600_CAPTURE_CLEANUP_DISPATCH, "FTE3600 legacy capture");
+  FpiSsm *ssm = fpi_ssm_new_full (FP_DEVICE (self), fte3600_capture_handler,
+                                  FTE3600_CAPTURE_NSTATES,
+                                  FTE3600_CAPTURE_CLEANUP_DISPATCH, "FTE3600 legacy capture");
+
+  fpi_ssm_set_data (ssm, g_new0 (LegacyCapture, 1), (GDestroyNotify) fte3600_capture_free);
+  return ssm;
 }
 
 static FpiSsm *
@@ -1202,6 +1256,7 @@ fte3600_legacy_prepare_capture (FpiDeviceFte3600 *self, GError **error)
     .bytes_per_pixel = 1, \
     .frame_overhead = FTE3600_IMAGE_DATA_OFFSET, \
     .prepare_capture = fte3600_legacy_prepare_capture, \
+    .destroy = fte3600_legacy_destroy, \
     .create_init = fte3600_legacy_create_init, \
     .create_capture = fte3600_legacy_create_capture, \
     .create_reset = fte3600_legacy_create_reset, \
