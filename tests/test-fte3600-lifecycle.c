@@ -331,6 +331,66 @@ static struct
   GCancellable        *cancellable;
 } sensor;
 
+
+typedef enum {
+  EARLY_IRQ_NOW,
+  EARLY_IRQ_LATER,
+  EARLY_IRQ_MISSING,
+  EARLY_IRQ_CANCEL,
+  EARLY_IRQ_GENERATION,
+  EARLY_IRQ_ON_PROGRESS,
+} EarlyIrqKind;
+
+static struct
+{
+  guint mode;
+  guint triggers;
+  guint events;
+  guint idle_writes;
+  guint source;
+  EarlyIrqKind kind;
+  gboolean cancel_enroll;
+  gboolean after_first_image;
+} early_irq;
+
+static gboolean
+early_irq_deliver (gpointer unused)
+{
+  early_irq.source = 0;
+  if (early_irq.kind == EARLY_IRQ_CANCEL)
+    g_cancellable_cancel (sensor.cancellable);
+  else if (early_irq.kind == EARLY_IRQ_GENERATION)
+    sensor.epoch++;
+  else
+    {
+      early_irq.events++;
+      g_assert_cmpint (write (sensor.irq_pipe[1], "x", 1), ==, 1);
+    }
+  return G_SOURCE_REMOVE;
+}
+
+/* Complete independently of the driver's wait installation. An idle MCU and
+ * latched finger status without a fresh IRQ must not count as a new frame. */
+static void
+early_irq_complete (guint mode)
+{
+  if (early_irq.mode != mode || (early_irq.after_first_image && !sensor.images))
+    return;
+  early_irq.triggers++;
+  sensor.armed = FALSE;
+  sensor.finger_ready = TRUE;
+  if (early_irq.kind == EARLY_IRQ_NOW)
+    {
+      early_irq.events++;
+      g_assert_cmpint (write (sensor.irq_pipe[1], "x", 1), ==, 1);
+    }
+  else if (early_irq.kind != EARLY_IRQ_MISSING && early_irq.kind != EARLY_IRQ_ON_PROGRESS)
+    {
+      g_assert_cmpuint (early_irq.source, ==, 0);
+      early_irq.source = g_timeout_add (20, early_irq_deliver, NULL);
+    }
+}
+
 /* Generated payloads and independent wire expectations, never vendor firmware. */
 static struct
 {
@@ -347,6 +407,56 @@ static struct
   guint8 payload[14184];
   gsize size;
 } vendor;
+
+/* Independent warm-entry wire contract from LoadFW/ReturnIdle (2C754/28668).
+ * Cold A8 startup remains covered by the upload/reset/poll fixtures. */
+static struct
+{
+  gboolean enabled;
+  guint mode;
+  guint step;
+  gint last_ms;
+} warm_entry;
+
+static void
+check_warm_entry (const guint8 *tx, guint length)
+{
+  gint now = g_atomic_int_get (&sensor.protocol_clock_ms);
+  gboolean stop = warm_entry.mode < 2 || warm_entry.mode > 4;
+  guint step = warm_entry.step++;
+
+  if (step < 2)
+    {
+      g_assert_cmpuint (length, ==, 1);
+      g_assert_cmpuint (tx[0], ==, 0x70);
+      if (step == 1)
+        g_assert_cmpint (now - warm_entry.last_ms, ==, 5);
+    }
+  else if (step == 2)
+    {
+      const guint8 command[] = { 0x10, 0xef, 0x76, 0x00 };
+      g_assert_cmpuint (length, ==, 5);
+      g_assert_cmpmem (tx, sizeof command, command, sizeof command);
+      g_assert_cmpint (now, ==, warm_entry.last_ms);
+    }
+  else if (stop && step < 5)
+    {
+      const guint8 command[] = { 0x11, 0xee, step == 3 ? 0x1e : 0x1f, 0x00, 0x00 };
+      g_assert_cmpuint (length, ==, sizeof command);
+      g_assert_cmpmem (tx, length, command, sizeof command);
+      g_assert_cmpint (now, ==, warm_entry.last_ms);
+    }
+  else
+    {
+      const guint8 command[] = { 0x10, 0xef, 0x20, 0x00 };
+      g_assert_cmpuint (step, ==, stop ? 5 : 3);
+      g_assert_cmpuint (length, ==, 6);
+      g_assert_cmpmem (tx, sizeof command, command, sizeof command);
+      g_assert_cmpint (now - warm_entry.last_ms, ==, stop ? 10 : 0);
+      warm_entry.enabled = FALSE;
+    }
+  warm_entry.last_ms = now;
+}
 
 GBytes *
 __wrap_fpi_fte3600_firmware_load (const Fte3600Firmware *firmware,
@@ -367,6 +477,8 @@ __wrap_fpi_fte3600_firmware_load (const Fte3600Firmware *firmware,
 static gboolean
 vendor_transfer (const guint8 *tx, guint8 *rx, guint length, gint *result)
 {
+  if (warm_entry.enabled)
+    check_warm_entry (tx, length);
   if (!vendor.enabled)
     return FALSE;
   if (!vendor.first_opcode)
@@ -405,7 +517,7 @@ vendor_transfer (const guint8 *tx, guint8 *rx, guint length, gint *result)
       if (tx[2] == 0x76)
         {
           vendor.mode = tx[3];
-          if (sensor.images && vendor.enrollment)
+          if (sensor.images && vendor.enrollment && tx[3] != 0)
             {
               g_assert_cmpuint (tx[3], ==, sensor.model == &models[2] ? 2 : 1);
               vendor.continuation_arms++;
@@ -1437,6 +1549,12 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
 
     case 0x11:
       g_assert_cmpuint (transfer->len, ==, 5);
+      if (tx[2] == sensor.model->mode_register && tx[3] == 0 && early_irq.mode)
+        {
+          g_assert_cmpuint (sensor.registers[tx[2]], ==, early_irq.mode);
+          early_irq.idle_writes++;
+          g_assert_cmpuint (early_irq.idle_writes, ==, early_irq.triggers);
+        }
       sensor.registers[tx[2]] = tx[3];
       if (tx[2] == 0x30)
         {
@@ -1455,11 +1573,13 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
         {
           g_assert_cmpuint (sensor.registers[sensor.model->mode_register], ==, 1);
           sensor.armed = TRUE;
+          early_irq_complete (1);
         }
       if (tx[2] == FT9361_REG_QUICK_TRIGGER && tx[3] == 1)
         {
           g_assert_cmpuint (sensor.registers[sensor.model->mode_register], ==, 2);
           sensor.armed = TRUE;
+          early_irq_complete (2);
         }
       break;
 
@@ -1479,6 +1599,11 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
               rx[4] = 0xa5;
               rx[5] = 0x5a;
               sensor.wake_ready_time = protocol_time ();
+              break;
+            }
+          if (tx[2] == sensor.model->mode_register)
+            {
+              rx[4] = sensor.registers[tx[2]];
               break;
             }
           g_assert_true (tx[2] == FT9361_REG_SENSOR_ID_HIGH ||
@@ -1589,6 +1714,7 @@ __wrap_ioctl (int fd, unsigned long operation, ...)
           rx[7] = sensor.rom_family & 0xff;
           break;
         }
+      g_assert_cmpuint (early_irq.idle_writes, ==, early_irq.triggers);
       sensor.images++;
       g_assert_cmpuint (transfer->len, ==, (guint) sensor.model->width * sensor.model->height + 8);
       g_assert_cmpuint (tx[1], ==, 0xfb);
@@ -1761,6 +1887,7 @@ new_device_for_model_checked (guint model, guint32 buffer_size, GError **error)
 
   memset (&sensor, 0, sizeof (sensor));
   memset (&vendor, 0, sizeof (vendor));
+  memset (&early_irq, 0, sizeof (early_irq));
   g_mutex_init (&sensor.lock);
   sensor.reset_events = g_array_new (FALSE, FALSE, sizeof (ResetEvent));
   sensor.soft_reset_times = g_array_new (FALSE, FALSE, sizeof (gint64));
@@ -2902,6 +3029,10 @@ enroll_progress (FpDevice *device,
 
   g_assert_no_error (error);
   g_assert_cmpint (completed_stages, ==, ++*stages);
+  if (early_irq.kind == EARLY_IRQ_ON_PROGRESS && early_irq.events < early_irq.triggers)
+    early_irq_deliver (NULL);
+  if (early_irq.cancel_enroll)
+    g_cancellable_cancel (sensor.cancellable);
 }
 
 static void
@@ -2911,7 +3042,8 @@ test_enroll_verify_images (gconstpointer fixture)
     FTE3600_SENSOR_FT9361, FTE3600_SENSOR_FT9348,
     FTE3600_SENSOR_FT9338, FTE3600_SENSOR_FT9536,
   };
-  guint model = GPOINTER_TO_UINT (fixture);
+  guint model = GPOINTER_TO_UINT (fixture) % 4;
+  guint early = GPOINTER_TO_UINT (fixture) / 4;
   const Fte3600MatchProfile *profile = fpi_fte3600_match_profile_get (sensors[model]);
   FpDevice *device = new_device_for_model (model);
   gsize image_size = (gsize) profile->width * profile->height;
@@ -2974,16 +3106,55 @@ test_enroll_verify_images (gconstpointer fixture)
 
   open_device (device);
   vendor.enabled = vendor.enrollment = model == 0 || model == 2;
+  if (early)
+    {
+      early_irq.mode = model == 2 ? 2 : 1;
+      early_irq.kind = early == 4 ? EARLY_IRQ_MISSING :
+                       early == 5 ? EARLY_IRQ_ON_PROGRESS :
+                       early == 2 ? EARLY_IRQ_LATER : EARLY_IRQ_NOW;
+      early_irq.cancel_enroll = early == 3;
+      early_irq.after_first_image = early >= 4;
+    }
   sensor.frames = frames;
   sensor.n_frames = FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES;
-  enrolled = fp_device_enroll_sync (device, print, NULL,
+  enrolled = fp_device_enroll_sync (device, print, sensor.cancellable,
                                     enroll_progress, &stages, &error);
+  if (early == 3 || early == 4)
+    {
+      g_autoptr(FpImage) next = NULL;
+
+      g_assert_null (enrolled);
+      g_assert_error (error, G_IO_ERROR, (early == 3 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_TIMED_OUT));
+      g_assert_cmpuint (stages, ==, 1);
+      g_assert_cmpuint (early_irq.triggers, ==, 1);
+      g_assert_cmpuint (early_irq.events, ==, early == 3 ? 1 : 0);
+      g_assert_cmpuint (early_irq.idle_writes, ==, 1);
+      g_assert_cmpuint (sensor.images, ==, 1);
+      early_irq.mode = 0;
+      vendor.enabled = FALSE;
+      g_cancellable_reset (sensor.cancellable);
+      g_clear_error (&error);
+      next = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (next);
+      finish_device (device);
+      return;
+    }
   g_assert_no_error (error);
   g_assert_nonnull (enrolled);
   g_assert_cmpuint (stages, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   g_assert_cmpuint (sensor.next_frame, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES);
   if (vendor.enabled)
     g_assert_cmpuint (vendor.continuation_arms, ==, FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES - 1);
+  if (early)
+    {
+      g_assert_cmpuint (early_irq.triggers, ==,
+                       FTE3600_TEMPLATE_REQUIRED_SUBTEMPLATES - (model == 2 || early_irq.after_first_image));
+      g_assert_cmpuint (early_irq.events, ==, early_irq.triggers);
+      g_assert_cmpuint (early_irq.idle_writes, ==, early_irq.triggers);
+      g_assert_cmpuint (early_irq.source, ==, 0);
+      early_irq.mode = 0;
+    }
   vendor.enabled = FALSE;
 
   /* The real asynchronous enrollment worker must produce the same canonical
@@ -3557,6 +3728,89 @@ test_vendor_legacy (gconstpointer data)
   finish_device (device);
 }
 
+
+static void
+test_early_capture_irq (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  guint model = scenario >= 6 ? 0 : 2;
+  FpDevice *device = new_device_for_model (model);
+  FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpImage) image = NULL;
+
+  open_device (device);
+  early_irq.mode = model == 2 ? 2 : 1;
+  early_irq.kind = scenario < 5 ? scenario : EARLY_IRQ_NOW;
+  vendor.enabled = TRUE;
+  vendor.false_events = model == 2 ? (scenario == 5 ? 2 : 1) : 0;
+  image = fp_device_capture_sync (device, TRUE, sensor.cancellable, &error);
+  if (scenario == 2 || scenario == 3 || scenario == 4)
+    {
+      g_assert_null (image);
+      g_assert_error (error, G_IO_ERROR, (scenario == 2 ? G_IO_ERROR_TIMED_OUT :
+                      scenario == 3 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_BROKEN_PIPE));
+      g_assert_cmpuint (sensor.images, ==, 0);
+      g_assert_cmpuint (early_irq.events, ==, 0);
+    }
+  else
+    {
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+      g_assert_cmpuint (sensor.images, ==, 1);
+      g_assert_cmpuint (early_irq.events, ==, scenario == 5 ? 2 : 1);
+    }
+  g_assert_cmpuint (early_irq.triggers, ==, scenario == 5 ? 2 : 1);
+  /* Cancellation/session loss may preempt the post-arm mode write. */
+  if (scenario == 3 || scenario == 4)
+    g_assert_cmpuint (early_irq.idle_writes, <=, early_irq.triggers);
+  else
+    g_assert_cmpuint (early_irq.idle_writes, ==, early_irq.triggers);
+  g_assert_cmpuint (early_irq.source, ==, 0);
+  g_assert_null (self->irq_source);
+  g_assert_null (self->irq_guard_source);
+  g_assert_null (self->irq_wait_ssm);
+  early_irq.mode = 0;
+  vendor.enabled = FALSE;
+  g_cancellable_reset (sensor.cancellable);
+  g_clear_error (&error);
+  if (scenario == 4)
+    {
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE);
+    }
+  else
+    {
+      /* A retained early IRQ or an arm timeout must not leak into the next action. */
+      g_clear_object (&image);
+      image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+    }
+  finish_device (device);
+}
+
+static void
+test_warm_entry (gconstpointer data)
+{
+  static const guint modes[] = { 0, 1, 2, 3, 4, 0xff };
+  guint model = GPOINTER_TO_UINT (data) / G_N_ELEMENTS (modes) ? 2 : 0;
+  guint mode = modes[GPOINTER_TO_UINT (data) % G_N_ELEMENTS (modes)];
+  FpDevice *device = new_device_for_model (model);
+
+  sensor.registers[sensor.model->mode_register] = mode;
+  vendor.enabled = TRUE;
+  warm_entry.enabled = TRUE;
+  warm_entry.mode = mode;
+  warm_entry.step = 0;
+  open_device (device);
+  g_assert_false (warm_entry.enabled);
+  g_assert_cmpuint (warm_entry.step, ==, mode < 2 || mode > 4 ? 6 : 4);
+  g_assert_cmpuint (vendor.uploads, ==, 0);
+  vendor.enabled = FALSE;
+  finish_device (device);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3624,6 +3878,26 @@ main (int argc, char **argv)
   };
 
   g_test_init (&argc, &argv, NULL);
+  for (guint i = 0; i < 12; i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600/warm-entry/%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_warm_entry);
+    }
+  for (guint scenario = 0; scenario < 7; scenario++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/fte3600/early-irq/%u", scenario);
+      g_test_add_data_func (path, GUINT_TO_POINTER (scenario), test_early_capture_irq);
+    }
+#if FTE3600_ENABLE_PERSONAL_AUTH
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9361", GUINT_TO_POINTER (4), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9338", GUINT_TO_POINTER (6), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9338-delayed", GUINT_TO_POINTER (10), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9338-cancel", GUINT_TO_POINTER (14), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9361-missing", GUINT_TO_POINTER (16), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9338-missing", GUINT_TO_POINTER (18), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9361-progress", GUINT_TO_POINTER (20), test_enroll_verify_images);
+  g_test_add_data_func ("/fte3600/early-irq/enroll-FT9338-progress", GUINT_TO_POINTER (22), test_enroll_verify_images);
+#endif
   g_test_add_func ("/fte3600-lifecycle/transport/separate-irq", test_separate_irq_transport);
   g_test_add_data_func ("/fte3600-lifecycle/transport/medion-capture-after-boot",
                         GUINT_TO_POINTER (0), test_medion_capture_after_boot);

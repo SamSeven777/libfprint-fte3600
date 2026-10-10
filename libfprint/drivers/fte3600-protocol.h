@@ -103,6 +103,7 @@ typedef enum {
 #define FTE3600_FT9536_FW_VERSION 0x23u
 #define FTE3600_FT9536_AGC_VERSION 0x13u
 #define FTE3600_BOOT_A_MARKER 0xefu
+#define FTE3600_MODE_IDLE 0x00u
 #define FTE3600_MODE_WAIT_FINGER 0x01u
 #define FTE3600_MODE_QUICK_CAPTURE 0x02u
 /* Return-idle skips capture-stop writes in modes 2, 3, and 4. The latter two

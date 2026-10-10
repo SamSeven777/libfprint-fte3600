@@ -44,8 +44,7 @@
 /* Linux retry policy. These bounds prevent a stalled device or repeated
  * spurious IRQ from extending an action indefinitely; they are not silicon
  * specifications or build-time feature switches. */
-#define FTE3600_ARM_TIMEOUT_MS 1000
-#define FTE3600_ARM_MAX_ATTEMPTS 3
+#define FTE3600_IDLE_IRQ_TIMEOUT_MS 1000
 #define FTE3600_POLL_DELAY_MS 20
 #define FTE3600_CAPTURE_READY_TIMEOUT_MS 5000
 #define FTE3600_MAX_FALSE_IRQS 8
