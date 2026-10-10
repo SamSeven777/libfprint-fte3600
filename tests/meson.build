@@ -631,7 +631,7 @@ if 'fte3600' in drivers
         'fstat', 'fstat64', 'read', '__read_chk', 'flock',
         'fpi_fte3600_resources_resolve', 'fpi_fte3600_resources_check',
         'fpi_fte3600_resources_buffer_size', 'fpi_fte3600_transport_open',
-        'fpi_fte3600_transport_close',
+        'fpi_fte3600_transport_close', 'fpi_fte3600_firmware_load',
         'fpi_ssm_next_state_delayed', 'fpi_ssm_jump_to_state_delayed',
     ]
     fte3600_mock_link_args = []

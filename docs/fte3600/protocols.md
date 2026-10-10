@@ -114,11 +114,45 @@ This path is distinct from A8 recovery:
 5. Wait 2 ms and read RAM back using the corresponding `04 FB 00 00` frame.
    Compare the returned payload before starting the application.
 6. Perform the two startup reset pulses and wait 80 ms for FT9338 or 180 ms for
-   FT9536. Poll MCU idle at 2 ms intervals, at most 20 reads, then verify geometry.
+   FT9536. Poll MCU idle at most 20 times, waiting 2 ms after each failed or
+   busy read, including the twentieth. Then apply MCU configuration directly;
+   do not gate cold configuration on old application metadata.
 
 The matching firmware sizes are 14,184 bytes for FT9338 and 11,934 bytes for
 FT9536. There is no `12` upload / `13` jump-to-application sequence in this path.
 See `fte3600-legacy-recovery-protocol.*` and `fte3600-legacy-recovery-timing.h`.
+
+## Legacy Initialization and Continued Acquisition
+
+The FT9338 / FT9361 comparison uses `ftWbioUmdfDriverV2.dll` 2.0.3.102.
+See [the validation record](validation-2026-10-10.md) for binary identity,
+RVA references, regression coverage, and integration boundaries.
+
+- Warm initialization issues the paired `70` return-idle sequence before
+  deciding whether FT9338 needs recovery. FT9361 also starts with the pair.
+- A failed FW/AGC version check enters matching firmware recovery after ROM
+  identity validation. A version mismatch alone does not authorize a different
+  chip's firmware.
+- A download/startup failure can restart the complete download, up to five
+  attempts. Startup status reads retry transient I/O failures as well as busy
+  responses within the 20-read budget. Cancellation, disappearance, and an
+  invalidated generation stop the operation; configuration errors do not
+  restart the download.
+- Successful OTP identification disables OTP access and hands off without a
+  cleanup reset pulse. Failure cleanup remains bounded and releases reset.
+- Cold startup proceeds directly to configuration. FT9338 writes `01=01`,
+  `41=0F`, `30=BB`, waiting 1 ms after each. FT9361 retains its marker pre-read,
+  2 ms configuration waits, and `22=00`, `23=0E` writes. A successful non-`BB`
+  marker readback is logged and does not abort either sequence. A failed
+  configuration transaction remains an error.
+- Non-finger events and continued enrollment rearm FT9338 in mode 2 and
+  FT9361 in mode 1. An already-idle MCU goes straight to mode selection;
+  mode-1 stop commands belong to the busy return-idle path.
+
+The shared backend retains a best-effort final status read to maintain its
+Linux lifecycle flag. A transient failure leaves idle unverified instead of
+rejecting configuration; arming checks MCU status before starting acquisition.
+Terminal libfprint actions return to idle rather than perpetually rearming.
 
 ## FW9369 (Silicon ID 9362)
 

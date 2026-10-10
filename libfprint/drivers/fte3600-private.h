@@ -182,6 +182,13 @@ void fpi_fte3600_submit_reg_read (FpiSsm  *ssm,
                                   guint8   reg,
                                   gsize    result_len,
                                   gboolean cancellable);
+/* Transient read failures advance with small_rx_valid == FALSE. The caller
+ * must handle an unavailable result explicitly (bounded retry, firmware
+ * fallback, or unverified status), never consume bytes without validity. Cancellation and session errors still fail. */
+void fpi_fte3600_try_reg_read (FpiSsm  *ssm,
+                               guint8   reg,
+                               gsize    result_len,
+                               gboolean cancellable);
 guint8 fpi_fte3600_read_result_byte (FpiDeviceFte3600 *self);
 gboolean fpi_fte3600_mcu_is_idle (FpiDeviceFte3600 *self);
 void fpi_fte3600_release_reset_and_sync (FpiSsm *ssm);

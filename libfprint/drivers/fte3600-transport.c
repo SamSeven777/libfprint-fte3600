@@ -316,12 +316,21 @@ fte3600_reg_read_cb (FpiSpiTransfer *transfer,
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (device);
 
   self->small_rx_valid = error == NULL;
+  /* Only callers with a bounded fallback/poll loop opt in. A failed read
+   * never exposes stale bytes as a valid reply. Lifecycle errors propagate. */
+  if (GPOINTER_TO_INT (user_data) &&
+      (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_FAILED) ||
+       g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)))
+    {
+      fp_dbg ("Retryable register read: %s", error->message);
+      g_clear_error (&error);
+    }
   fpi_ssm_spi_transfer_cb (transfer, device, user_data, error);
 }
 
-void
-fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
-                             gboolean cancellable)
+static void
+submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
+                 gboolean cancellable, gboolean allow_unavailable)
 {
   FpDevice *device;
   FpiDeviceFte3600 *self;
@@ -362,7 +371,21 @@ fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
   transfer->ssm = ssm;
   fpi_spi_transfer_submit (
     transfer, cancellable ? fpi_device_get_cancellable (device) : NULL,
-    fte3600_reg_read_cb, NULL);
+    fte3600_reg_read_cb, GINT_TO_POINTER (allow_unavailable));
+}
+
+void
+fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
+                             gboolean cancellable)
+{
+  submit_reg_read (ssm, reg, result_len, cancellable, FALSE);
+}
+
+void
+fpi_fte3600_try_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len,
+                          gboolean cancellable)
+{
+  submit_reg_read (ssm, reg, result_len, cancellable, TRUE);
 }
 
 guint8

@@ -376,14 +376,11 @@ configure_38 (Boot *boot, GError **error)
 }
 
 static gboolean
-run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
+download_and_start (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
   gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
 
-  report (boot, "explicit %s RAM experiment", boot->sensor->name);
-  /* FT9338 is explicitly selected: enter the vendor download sequence without
-   * application-register probes against a sensor still running its boot ROM. */
-  if ((!is_38 && !check_geometry (boot, TRUE, error)) || !proceed (boot, error))
+  if (!proceed (boot, error))
     return FALSE;
   boot->touched = TRUE;
   report (boot, "boot entry: reset physical H10/L20/H followed by 55 aa");
@@ -393,8 +390,39 @@ run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
       !upload (boot, firmware, length, error) ||
       (is_38 && !verify_38_readback (boot, firmware, length, error)) ||
       !start_application (boot, error) ||
-      !wait_idle (boot, FTE3600_INIT_MCU_MAX_ATTEMPTS, error) ||
-      (is_38 && !configure_38 (boot, error)) ||
+      !wait_idle (boot, FTE3600_INIT_MCU_MAX_ATTEMPTS, error))
+    return FALSE;
+  return TRUE;
+}
+
+static gboolean
+run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
+{
+  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
+
+  report (boot, "explicit %s RAM experiment", boot->sensor->name);
+  /* The selected FT9338 path has no pre-download application probes. */
+  if (!is_38 && !check_geometry (boot, TRUE, error))
+    return FALSE;
+  for (guint attempt = 1; ; attempt++)
+    {
+      g_autoptr(GError) failure = NULL;
+
+      if (download_and_start (boot, firmware, length, &failure))
+        break;
+      if (!is_38 || attempt == FTE3600_FIRMWARE_MAX_ATTEMPTS ||
+          (!g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_FAILED) &&
+           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) &&
+           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_INVALID_DATA)))
+        {
+          g_propagate_error (error, g_steal_pointer (&failure));
+          return FALSE;
+        }
+      if (!proceed (boot, error))
+        return FALSE;
+      report (boot, "retry FT9338 RAM download after attempt %u: %s", attempt, failure->message);
+    }
+  if ((is_38 && !configure_38 (boot, error)) ||
       !check_geometry (boot, FALSE, error) ||
       !check_version (boot, FTE3600_REG_FW_VERSION,
                       is_38 ? FTE3600_FT9338_FW_VERSION : FTE3600_A8_FW_VERSION, error) ||

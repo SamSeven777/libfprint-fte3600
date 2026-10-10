@@ -24,6 +24,7 @@ typedef struct
   guint8                  agc_version;
   guint                   exchanges;
   guint                   uploads;
+  guint                   fail_uploads;
   guint                   readbacks;
   guint                   syncs;
   guint                   assertions;
@@ -83,6 +84,8 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
           g_assert_false (f->otp_enabled);
           f->uploads++;
           g_string_append (f->events, "UPLOAD;");
+          if (f->uploads <= f->fail_uploads)
+            return injected (f, G_IO_ERROR_FAILED, error);
           return TRUE;
         }
       else
@@ -93,7 +96,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
           g_assert_cmpmem (tx, sizeof header, header, sizeof header);
           for (gsize i = sizeof header; i < length; i++)
             g_assert_cmphex (tx[i], ==, 0);
-          g_assert_cmpuint (f->uploads, ==, 1);
+          g_assert_cmpuint (f->uploads, >, f->readbacks);
           memcpy (rx + 6, firmware, FIRMWARE_SIZE);
           if (f->corrupt_readback)
             rx[6 + FIRMWARE_SIZE - 1] ^= 1;
@@ -205,7 +208,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       g_assert_cmphex (tx[3], ==, 0);
       for (gsize i = 4; i < length; i++)
         g_assert_cmphex (tx[i], ==, 0);
-      g_assert_cmpuint (f->assertions, ==, 2);
+      g_assert_cmpuint (f->assertions, ==, 2 * f->readbacks);
       if (tx[2] == 0x20)
         {
           g_assert_cmpuint (length, ==, 6);
@@ -480,8 +483,8 @@ test_readback_failure (Fixture *f, gconstpointer value)
   f->cancel_readback = GPOINTER_TO_UINT (value);
   f->corrupt_readback = !f->cancel_readback;
   message = run_failure (f, f->cancel_readback ? G_IO_ERROR_CANCELLED : G_IO_ERROR_INVALID_DATA);
-  g_assert_cmpuint (f->uploads, ==, 1);
-  g_assert_cmpuint (f->readbacks, ==, 1);
+  g_assert_cmpuint (f->uploads, ==, f->cancel_readback ? 1 : 5);
+  g_assert_cmpuint (f->readbacks, ==, f->cancel_readback ? 1 : 5);
   g_assert_cmpuint (f->assertions + f->status_reads + f->config_writes, ==, 0);
   g_assert_cmpuint (f->releases, ==, 1);
 }
@@ -509,7 +512,7 @@ test_start_cleanup (Fixture *f, gconstpointer value)
   f->cancel_start = GPOINTER_TO_UINT (value);
   f->fail_assertion = !f->cancel_start;
   message = run_failure (f, f->cancel_start ? G_IO_ERROR_CANCELLED : G_IO_ERROR_FAILED);
-  g_assert_cmpuint (f->assertions, ==, 1);
+  g_assert_cmpuint (f->assertions, ==, f->cancel_start ? 1 : 5);
   g_assert_cmpuint (f->status_reads, ==, 0);
   g_assert_true (g_str_has_suffix (f->events->str, "H;W10;L;W20;H;H;"));
 }
@@ -557,14 +560,15 @@ test_polling (Fixture *f, gconstpointer value)
   guint mode = GPOINTER_TO_UINT (value);
 
   f->failed_polls = mode ? 0 : 1;
-  f->busy_polls = mode ? 20 : 2;
+  f->busy_polls = mode ? 100 : 2;
   if (mode)
     {
       g_autofree gchar *message = run_failure (f, G_IO_ERROR_TIMED_OUT);
 
-      g_assert_cmpuint (f->status_reads, ==, 20);
+      g_assert_cmpuint (f->status_reads, ==, 100);
       g_assert_cmpuint (f->config_writes, ==, 0);
-      g_assert_cmpuint (f->waits_2, ==, 22);
+      g_assert_cmpuint (f->uploads, ==, 5);
+      g_assert_cmpuint (f->waits_2, ==, 106);
     }
   else
     {
@@ -652,11 +656,29 @@ test_sync_failure (Fixture *f, gconstpointer unused)
 #define ADD(name, value, function) \
   g_test_add ("/medion/ft9338/" name, Fixture, GUINT_TO_POINTER (value), setup, function, teardown)
 
+static void
+test_download_retry (Fixture *f, gconstpointer unused)
+{
+  g_autoptr(GError) error = NULL;
+  Fte3600Identity identity = { 0 };
+
+  (void) unused;
+  f->fail_uploads = 1;
+  g_assert_true (fte3600_medion_test_ft9338 (&f->io, f->firmware, &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (f->uploads, ==, 2);
+  g_assert_cmpuint (f->readbacks, ==, 1);
+  g_assert_cmpuint (f->syncs, ==, 3);
+  g_assert_cmpuint (f->assertions, ==, 2);
+  g_assert_cmpuint (f->config_writes, ==, 3);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
   ADD ("exact-vendor-trace", 0, test_exact_trace);
+  ADD ("transient-upload-restarts-download", 0, test_download_retry);
   ADD ("1534-otp00-no-upload", 0x00, test_unsupported_otp);
   ADD ("otp-ft9536-no-upload", 0x24, test_unsupported_otp);
   ADD ("otp-unknown-no-upload", 0x34, test_unsupported_otp);

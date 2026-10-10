@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
  * Independently expressed FT9338 diagnostic from observed Windows behavior.
  * Evidence: ftWbioUmdfDriverV2.dll, package 2.0.3.102; factory dispatch 2819c,
- * boot-A 272b0, boot-B OTP 27650, RAM startup 365c0, MCU configuration 36a30.
+ * boot-A 27414, boot-B OTP 27650, RAM startup 365c0, MCU configuration 36a30.
  */
 #include "fte3600-medion-ft9338.h"
 #include "drivers/fte3600-protocol.h"
@@ -429,6 +429,30 @@ download_and_start (Test *test, const guint8 *firmware, GError **error)
 }
 
 static gboolean
+download_with_retries (Test *test, const guint8 *firmware, GError **error)
+{
+  for (guint attempt = 1; attempt <= FTE3600_FIRMWARE_MAX_ATTEMPTS; attempt++)
+    {
+      g_autoptr(GError) failure = NULL;
+
+      if (download_and_start (test, firmware, &failure))
+        return TRUE;
+      if (attempt == FTE3600_FIRMWARE_MAX_ATTEMPTS ||
+          (!g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_FAILED) &&
+           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) &&
+           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_INVALID_DATA)))
+        {
+          g_propagate_error (error, g_steal_pointer (&failure));
+          return FALSE;
+        }
+      if (!proceed (test, error))
+        return FALSE;
+      report (test, "retry FT9338 RAM download after attempt %u: %s", attempt, failure->message);
+    }
+  g_assert_not_reached ();
+}
+
+static gboolean
 configure_and_validate (Test *test, Fte3600Identity *result, GError **error)
 {
   guint8 marker;
@@ -516,7 +540,7 @@ fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
 
   if (!select_ft9338 (&test, &failure))
     g_prefix_error (&failure, "factory identification: ");
-  else if (!download_and_start (&test, payload, &failure))
+  else if (!download_with_retries (&test, payload, &failure))
     g_prefix_error (&failure, "FT9338 RAM startup: ");
   else if (!configure_and_validate (&test, &verified, &failure))
     g_prefix_error (&failure, "FT9338 MCU configuration/runtime validation: ");

@@ -498,7 +498,12 @@ Both FT9338 startup commands retry transient MCU status-read failures at 2 ms
 intervals within the same 20-read budget as busy replies (`3695c`-`36981`). The
 twentieth failed poll also waits 2 ms, as in Windows. Cancellation, a missing
 or closed device, and an invalidated session terminate immediately. Reads do
-not restart or re-upload the firmware. Manual FT9338 startup no longer probes
+not individually restart the firmware. If the whole startup attempt exhausts
+that budget, or a retryable download/readback error occurs, both commands
+restart the complete download, with at most five attempts (`2C4A4`). They do
+not repeat factory selection or OTP discovery, boot an unverified payload, or
+retry configuration/diagnostic failures. Cancellation and device/session loss
+also stop this outer loop. Manual FT9338 startup no longer probes
 application geometry before reset, repeats geometry after startup, or adds a
 final idle read after its version checks. FT9348 behavior is unchanged.
 

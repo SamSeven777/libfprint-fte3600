@@ -91,7 +91,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
         }
       else if (reg == 0x20)
         {
-          g_assert_cmpuint (f->uploads, ==, 1);
+          g_assert_cmpuint (f->uploads, >=, 1);
           f->status_reads++;
           f->poll_exchange = f->exchanges;
           f->cancelled |= f->cancel_poll;
@@ -130,8 +130,8 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       };
 
       g_assert_cmpint (f->sensor, ==, FTE3600_SENSOR_FT9338);
-      g_assert_cmpuint (f->uploads, ==, 1);
-      g_assert_cmpuint (f->readbacks, ==, 1);
+      g_assert_cmpuint (f->uploads, >=, 1);
+      g_assert_cmpuint (f->readbacks, >=, 1);
       g_assert_cmpuint (f->status_reads, >, 0);
       g_assert_cmpuint (f->config_writes, <, G_N_ELEMENTS (config));
       g_assert_cmpmem (tx, length, config[f->config_writes], sizeof config[0]);
@@ -143,6 +143,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       const guint8 sync[] = { 0x55, 0xaa };
 
       g_assert_cmpmem (tx, length, sync, sizeof sync);
+      f->prep_writes = 0;
       g_string_append (f->trace, "SYNC;");
     }
   else if (tx[0] == 0x09)
@@ -164,7 +165,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       const guint8 prefix38[] = { 0x05, 0xfa, 0, 0, 0x37, 0x68 };
       const guint8 prefix48[] = { 0x05, 0xfa, 0, 0, 0x28, 0x48 };
 
-      g_assert_cmpuint (f->uploads, ==, 0);
+      g_assert_cmpuint (f->uploads, <, 5);
       g_assert_cmpuint (length, ==, firmware_size + 7);
       g_assert_cmpmem (tx, 6, f->sensor == FTE3600_SENSOR_FT9338 ? prefix38 : prefix48, 6);
       g_assert_cmpmem (tx + 6, firmware_size, firmware, firmware_size);
@@ -179,8 +180,7 @@ mock_exchange (gpointer user_data, const guint8 *tx, guint8 *rx,
       const guint8 prefix[] = { 0x04, 0xfb, 0, 0, 0x37, 0x70 };
 
       g_assert_cmpint (f->sensor, ==, FTE3600_SENSOR_FT9338);
-      g_assert_cmpuint (f->uploads, ==, 1);
-      g_assert_cmpuint (f->readbacks, ==, 0);
+      g_assert_cmpuint (f->uploads, >, f->readbacks);
       g_assert_cmpuint (length, ==, 14192);
       g_assert_cmpmem (tx, sizeof prefix, prefix, sizeof prefix);
       for (gsize i = 6; i < length; i++)
@@ -432,8 +432,8 @@ test_readback_last_byte (void)
   fixture_init (&f, FTE3600_SENSOR_FT9338);
   f.corrupt_last_byte = TRUE;
   error = run_failure (&f);
-  g_assert_cmpuint (f.readbacks, ==, 1);
-  g_assert_cmpuint (f.asserts, ==, 1); /* Never boot the unverified RAM image. */
+  g_assert_cmpuint (f.readbacks, ==, 5);
+  g_assert_cmpuint (f.asserts, ==, 5); /* Never boot the unverified RAM image. */
   g_assert_cmpuint (f.status_reads, ==, 0);
   g_assert_true (g_str_has_suffix (f.trace->str, "READBACK;R0;"));
   fixture_clear (&f);
@@ -457,9 +457,9 @@ test_application_rejected (void)
       else
         f.agc_version = 0x31;
       error = run_failure (&f);
-      g_assert_cmpuint (f.uploads, ==, 1);
-      g_assert_cmpuint (f.asserts, ==, 3); /* Failure cleanup must not reboot. */
-      g_assert_cmpuint (f.status_reads, <=, 20);
+      g_assert_cmpuint (f.uploads, ==, variant == 0 ? 5 : 1);
+      g_assert_cmpuint (f.asserts, ==, variant == 0 ? 15 : 3);
+      g_assert_cmpuint (f.status_reads, <=, variant == 0 ? 100 : 20);
       g_assert_true (g_str_has_suffix (f.trace->str, "R0;"));
       fixture_clear (&f);
     }
@@ -487,8 +487,8 @@ test_ft9338_polling (gconstpointer data)
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.failed_polls = variant == 0 ? 19 : variant == 1 ? 20 : variant == 2 ? 0 : 1;
-  f.busy_replies = variant == 2 ? 20 : 0;
+  f.failed_polls = variant == 0 ? 19 : variant == 1 ? 100 : variant == 2 ? 0 : 1;
+  f.busy_replies = variant == 2 ? 100 : 0;
   f.poll_error = variant == 3 ? G_IO_ERROR_TIMED_OUT :
                  variant == 4 ? G_IO_ERROR_BROKEN_PIPE :
                  variant == 5 ? G_IO_ERROR_NOT_FOUND :
@@ -506,12 +506,12 @@ test_ft9338_polling (gconstpointer data)
       g_assert_error (error, G_IO_ERROR,
                       (gint) (variant == 2 ? G_IO_ERROR_TIMED_OUT :
                               variant == 7 ? G_IO_ERROR_CANCELLED : f.poll_error));
-      g_assert_cmpuint (f.status_reads, ==, variant <= 2 ? 20 : 1);
-      g_assert_cmpuint (f.waits_2, ==, variant <= 2 ? 21 : 1);
+      g_assert_cmpuint (f.status_reads, ==, variant <= 2 ? 100 : 1);
+      g_assert_cmpuint (f.waits_2, ==, variant <= 2 ? 105 : 1);
       g_assert_cmpuint (f.config_writes, ==, 0);
     }
-  g_assert_cmpuint (f.uploads, ==, 1);
-  g_assert_cmpuint (f.asserts, ==, 3); /* Poll errors never restart the firmware. */
+  g_assert_cmpuint (f.uploads, ==, variant == 1 || variant == 2 ? 5 : 1);
+  g_assert_cmpuint (f.asserts, ==, 3 * f.uploads);
   fixture_clear (&f);
 }
 
@@ -570,19 +570,23 @@ test_transfer_failures (gconstpointer data)
 
       fixture_init (&f, GPOINTER_TO_INT (data));
       f.fail_exchange = at;
-      if (f.sensor == FTE3600_SENSOR_FT9338 && at == poll_exchange)
+      if (f.sensor == FTE3600_SENSOR_FT9338 && at <= poll_exchange)
         {
           run_success (&f);
-          g_assert_cmpuint (f.status_reads, ==, 2);
-          g_assert_cmpuint (f.exchanges, ==, transactions + 1);
+          if (at == poll_exchange)
+            {
+              g_assert_cmpuint (f.status_reads, ==, 2);
+              g_assert_cmpuint (f.exchanges, ==, transactions + 1);
+            }
+          g_assert_cmpuint (f.config_writes, ==, 3);
         }
       else
         {
           error = run_failure (&f);
           g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
-          g_assert_cmpuint (f.exchanges, ==, at); /* Only startup status may retry. */
+          g_assert_cmpuint (f.exchanges, ==, at); /* Configuration is outside the retry loop. */
         }
-      g_assert_cmpuint (f.uploads, <=, 1);
+      g_assert_cmpuint (f.uploads, <=, 2);
       fixture_clear (&f);
     }
 }
@@ -618,16 +622,14 @@ test_gpio_wait_failures (void)
   for (guint variant = 0; variant < 4; variant++)
     {
       Fixture f;
-      g_autoptr(GError) error = NULL;
 
       fixture_init (&f, FTE3600_SENSOR_FT9338);
       if (variant < 2)
         f.fail_reset = variant ? 2 : 1;
       else
         f.fail_wait = variant == 2 ? 1 : 2;
-      error = run_failure (&f);
-      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
-      g_assert_cmpuint (f.uploads, ==, 0);
+      run_success (&f);
+      g_assert_cmpuint (f.uploads, ==, 1);
       g_assert_true (g_str_has_suffix (f.trace->str, "R0;"));
       fixture_clear (&f);
     }
@@ -641,11 +643,11 @@ test_cleanup_failure (void)
   g_autoptr(GError) error = NULL;
 
   fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.fail_exchange = 1; /* Sync, after the first complete pulse. */
+  f.cancel_upload = TRUE;
   f.fail_reset = 4;    /* The final release-only cleanup also fails. */
   error = run_failure (&f);
-  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
-  g_assert_nonnull (strstr (error->message, "SPI"));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_nonnull (strstr (error->message, "cancel"));
   g_assert_nonnull (strstr (error->message, "GPIO"));
   g_assert_cmpuint (f.asserts, ==, 1);
   fixture_clear (&f);

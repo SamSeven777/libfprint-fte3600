@@ -141,6 +141,12 @@ fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize length, gboolean can
   fpi_ssm_next_state (ssm);
 }
 
+void
+fpi_fte3600_try_reg_read (FpiSsm *ssm, guint8 reg, gsize length, gboolean cancellable)
+{
+  fpi_fte3600_submit_reg_read (ssm, reg, length, cancellable);
+}
+
 GBytes *__wrap_fpi_fte3600_firmware_load (const Fte3600Firmware *firmware,
                                           const gchar           *path,
                                           GError               **error);
@@ -345,7 +351,8 @@ test_identify (gconstpointer scenario)
       g_assert_no_error (mock.error);
       g_assert_cmpuint (self->rom_identity.sensor, ==, self->sensor->sensor);
       g_assert_cmpuint (self->rom_identity.response, ==, boot_a ? 2 : 0x5858);
-      g_assert_cmpuint (mock.resets, ==, 6);
+      /* Only the entry pulse; successful OTP identification needs no reset. */
+      g_assert_cmpuint (mock.resets, ==, 3);
     }
   else
     {
@@ -418,7 +425,8 @@ test_recover (gconstpointer scenario)
       g_assert_cmpuint (mock.uploads, ==, 1);
       g_assert_cmpuint (mock.reads, ==, 1);
       g_assert_cmpuint (mock.assertions, ==, 3);
-      g_assert_cmpuint (mock.application_reads, ==, 3);
+      /* Geometry belongs after MCU configuration, not inside RAM startup. */
+      g_assert_cmpuint (mock.application_reads, ==, 1);
     }
   else
     {

@@ -691,6 +691,12 @@ fpi_fte3600_submit_transfer (FpiSsm *ssm, FpiSpiTransfer *transfer, gboolean can
 }
 
 void
+fpi_fte3600_try_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len, gboolean cancellable)
+{
+  fpi_fte3600_submit_reg_read (ssm, reg, result_len, cancellable);
+}
+
+void
 fpi_fte3600_submit_reg_read (FpiSsm *ssm, guint8 reg, gsize result_len, gboolean cancellable)
 {
   FpiDeviceFte3600 *self = FPI_DEVICE_FTE3600 (fpi_ssm_get_device (ssm));
