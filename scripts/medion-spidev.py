@@ -530,7 +530,7 @@ def execute(resources, tool, action, output=None, chip=None, firmware=None):
             print(f"[candidate] Explicit {chip.upper()} RAM boot requested; "
                   "the diagnostic must validate its firmware and application response.", flush=True)
         elif action == "test-ft9338":
-            print("[test] FT9338 ROM/OTP identification, firmware startup and MCU configuration; "
+            print("[test] Factory preparation, FT9338 identification, firmware startup and MCU configuration; "
                   "an unsupported identity stops before upload. No capture.", flush=True)
         print(f"[diagnostic] Starting {action}; protocol stages follow", flush=True)
         command(arguments, inherit=True)
@@ -556,7 +556,7 @@ def main(argv=None):
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--inspect", action="store_true", help="Read-only resource inventory (default)")
     actions.add_argument("--test-ft9338", action="store_true",
-                         help="Identify FT9338 through ROM/OTP, then test firmware startup and MCU configuration; no capture")
+                         help="Test FT9338 factory selection, firmware startup, MCU configuration and sensor-mode entry; no capture")
     actions.add_argument("--identify-legacy", action="store_true",
                          help="Check FT9338/FT9348 application and ROM identity without firmware upload or capture")
     actions.add_argument("--boot", choices=("ft9338", "ft9348"),

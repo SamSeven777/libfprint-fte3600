@@ -329,11 +329,6 @@ static void
 test_exact_boot (gconstpointer data)
 {
   Fixture f;
-  const gchar *expected38 =
-    "R0;W10;R1;W20;R0;SYNC;"
-    "Bc8=ff;Bca=ff;Bcb=ff;Bb9=bf;Bb9=ff;W20;UPLOAD;W2;READBACK;"
-    "R0;W10;R1;W20;R0;W10;R0;W10;R1;W20;R0;W80;"
-    "A20;C01=01;W1;C41=0f;W1;C30=bb;W1;A30;A14;A15;A1a;A3c;R0;";
   const gchar *expected48 =
     "A14;A15;A14;A15;R0;W10;R1;W20;R0;SYNC;UPLOAD;W2;"
     "R0;W10;R1;W20;R0;W10;R0;W10;R1;W20;R0;W160;SOFT;W5;SOFT;W2;"
@@ -341,18 +336,18 @@ test_exact_boot (gconstpointer data)
 
   fixture_init (&f, GPOINTER_TO_INT (data));
   run_success (&f);
-  g_assert_cmpstr (f.trace->str, ==, f.sensor == FTE3600_SENSOR_FT9338 ? expected38 : expected48);
+  g_assert_cmpstr (f.trace->str, ==, expected48);
   g_assert_cmpuint (f.uploads, ==, 1);
   g_assert_cmpuint (f.asserts, ==, 3);
-  g_assert_cmpuint (f.readbacks, ==, f.sensor == FTE3600_SENSOR_FT9338 ? 1 : 0);
-  g_assert_cmpuint (f.soft_resets, ==, f.sensor == FTE3600_SENSOR_FT9348 ? 2 : 0);
+  g_assert_cmpuint (f.readbacks, ==, 0);
+  g_assert_cmpuint (f.soft_resets, ==, 2);
   fixture_clear (&f);
 }
 
 static void
 test_allowed_runtime (void)
 {
-  const Fte3600Sensor sensors[] = { FTE3600_SENSOR_FT9338, FTE3600_SENSOR_FT9348 };
+  const Fte3600Sensor sensors[] = { FTE3600_SENSOR_FT9348 };
 
   for (guint i = 0; i < G_N_ELEMENTS (sensors); i++)
     for (guint variant = 0; variant < 2; variant++)
@@ -397,7 +392,7 @@ test_preflight (void)
       Fixture f;
       g_autoptr(GError) error = NULL;
 
-      fixture_init (&f, variant == 4 ? FTE3600_SENSOR_FT9348 : FTE3600_SENSOR_FT9338);
+      fixture_init (&f, FTE3600_SENSOR_FT9348);
       if (variant == 0)
         {
           f.sensor = FTE3600_SENSOR_FT9361;
@@ -423,49 +418,6 @@ test_preflight (void)
 }
 
 static void
-test_readback_last_byte (void)
-{
-  Fixture f;
-
-  g_autoptr(GError) error = NULL;
-
-  fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.corrupt_last_byte = TRUE;
-  error = run_failure (&f);
-  g_assert_cmpuint (f.readbacks, ==, 5);
-  g_assert_cmpuint (f.asserts, ==, 5); /* Never boot the unverified RAM image. */
-  g_assert_cmpuint (f.status_reads, ==, 0);
-  g_assert_true (g_str_has_suffix (f.trace->str, "READBACK;R0;"));
-  fixture_clear (&f);
-}
-
-static void
-test_application_rejected (void)
-{
-  for (guint variant = 0; variant < 4; variant++)
-    {
-      Fixture f;
-      g_autoptr(GError) error = NULL;
-
-      fixture_init (&f, FTE3600_SENSOR_FT9338);
-      if (variant == 0)
-        f.busy_replies = 100;
-      else if (variant == 1)
-        f.after[0] = f.after[1] = 0x6060;
-      else if (variant == 2)
-        f.fw_version = 0x30;
-      else
-        f.agc_version = 0x31;
-      error = run_failure (&f);
-      g_assert_cmpuint (f.uploads, ==, variant == 0 ? 5 : 1);
-      g_assert_cmpuint (f.asserts, ==, variant == 0 ? 15 : 3);
-      g_assert_cmpuint (f.status_reads, <=, variant == 0 ? 100 : 20);
-      g_assert_true (g_str_has_suffix (f.trace->str, "R0;"));
-      fixture_clear (&f);
-    }
-}
-
-static void
 test_bounded_poll (void)
 {
   Fixture f;
@@ -475,60 +427,6 @@ test_bounded_poll (void)
   run_success (&f);
   g_assert_cmpuint (f.status_reads, ==, 21); /* 20 startup reads, one final check. */
   g_assert_cmpuint (f.uploads, ==, 1);
-  fixture_clear (&f);
-}
-
-static void
-test_ft9338_polling (gconstpointer data)
-{
-  guint variant = GPOINTER_TO_UINT (data);
-  Fixture f;
-
-  g_autoptr(GError) error = NULL;
-
-  fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.failed_polls = variant == 0 ? 19 : variant == 1 ? 100 : variant == 2 ? 0 : 1;
-  f.busy_replies = variant == 2 ? 100 : 0;
-  f.poll_error = variant == 3 ? G_IO_ERROR_TIMED_OUT :
-                 variant == 4 ? G_IO_ERROR_BROKEN_PIPE :
-                 variant == 5 ? G_IO_ERROR_NOT_FOUND :
-                 variant == 6 ? G_IO_ERROR_CLOSED : G_IO_ERROR_FAILED;
-  f.cancel_poll = variant == 7;
-  if (variant == 0 || variant == 3)
-    {
-      run_success (&f);
-      g_assert_cmpuint (f.status_reads, ==, variant == 0 ? 20 : 2);
-      g_assert_cmpuint (f.waits_2, ==, f.status_reads); /* Upload plus failed polls. */
-    }
-  else
-    {
-      error = run_failure (&f);
-      g_assert_error (error, G_IO_ERROR,
-                      (gint) (variant == 2 ? G_IO_ERROR_TIMED_OUT :
-                              variant == 7 ? G_IO_ERROR_CANCELLED : f.poll_error));
-      g_assert_cmpuint (f.status_reads, ==, variant <= 2 ? 100 : 1);
-      g_assert_cmpuint (f.waits_2, ==, variant <= 2 ? 105 : 1);
-      g_assert_cmpuint (f.config_writes, ==, 0);
-    }
-  g_assert_cmpuint (f.uploads, ==, variant == 1 || variant == 2 ? 5 : 1);
-  g_assert_cmpuint (f.asserts, ==, 3 * f.uploads);
-  fixture_clear (&f);
-}
-
-static void
-test_ft9338_marker_warning (void)
-{
-  Fixture f;
-
-  fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.bad_config_marker = TRUE;
-  run_success (&f);
-  g_assert_nonnull (strstr (f.reports->str, "WARNING: MCU configuration marker is 00"));
-  g_assert_nonnull (strstr (f.reports->str, "continuing as Windows does"));
-  g_assert_cmpuint (f.config_writes, ==, 3);
-  g_assert_cmpuint (f.geometry_before, ==, 0);
-  g_assert_cmpuint (f.geometry_after, ==, 2);
-  g_assert_cmpuint (f.status_reads, ==, 1);
   fixture_clear (&f);
 }
 
@@ -556,12 +454,11 @@ static void
 test_transfer_failures (gconstpointer data)
 {
   Fixture baseline;
-  guint transactions, poll_exchange;
+  guint transactions;
 
   fixture_init (&baseline, GPOINTER_TO_INT (data));
   run_success (&baseline);
   transactions = baseline.exchanges;
-  poll_exchange = baseline.poll_exchange;
   fixture_clear (&baseline);
   for (guint at = 1; at <= transactions; at++)
     {
@@ -570,114 +467,24 @@ test_transfer_failures (gconstpointer data)
 
       fixture_init (&f, GPOINTER_TO_INT (data));
       f.fail_exchange = at;
-      if (f.sensor == FTE3600_SENSOR_FT9338 && at <= poll_exchange)
-        {
-          run_success (&f);
-          if (at == poll_exchange)
-            {
-              g_assert_cmpuint (f.status_reads, ==, 2);
-              g_assert_cmpuint (f.exchanges, ==, transactions + 1);
-            }
-          g_assert_cmpuint (f.config_writes, ==, 3);
-        }
-      else
-        {
-          error = run_failure (&f);
-          g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
-          g_assert_cmpuint (f.exchanges, ==, at); /* Configuration is outside the retry loop. */
-        }
-      g_assert_cmpuint (f.uploads, <=, 2);
-      fixture_clear (&f);
-    }
-}
-
-static void
-test_cancellation (void)
-{
-  for (guint variant = 0; variant < 5; variant++)
-    {
-      Fixture f;
-      g_autoptr(GError) error = NULL;
-
-      fixture_init (&f, FTE3600_SENSOR_FT9338);
-      f.cancelled = variant == 0;
-      f.cancel_reset = variant == 1 ? 2 : variant == 4 ? 10 : 0;
-      f.cancel_upload = variant == 2;
-      f.cancel_readback = variant == 3;
       error = run_failure (&f);
-      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
-      g_assert_cmpuint (f.asserts, ==, variant == 4 ? 3 : variant ? 1 : 0);
-      if (variant == 1)
-        {
-          g_assert_nonnull (strstr (f.trace->str, "R1;W20;R0;"));
-          g_assert_cmpuint (f.uploads, ==, 0);
-        }
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_assert_cmpuint (f.exchanges, ==, at);
+      g_assert_cmpuint (f.uploads, <=, 1);
       fixture_clear (&f);
     }
-}
-
-static void
-test_gpio_wait_failures (void)
-{
-  for (guint variant = 0; variant < 4; variant++)
-    {
-      Fixture f;
-
-      fixture_init (&f, FTE3600_SENSOR_FT9338);
-      if (variant < 2)
-        f.fail_reset = variant ? 2 : 1;
-      else
-        f.fail_wait = variant == 2 ? 1 : 2;
-      run_success (&f);
-      g_assert_cmpuint (f.uploads, ==, 1);
-      g_assert_true (g_str_has_suffix (f.trace->str, "R0;"));
-      fixture_clear (&f);
-    }
-}
-
-static void
-test_cleanup_failure (void)
-{
-  Fixture f;
-
-  g_autoptr(GError) error = NULL;
-
-  fixture_init (&f, FTE3600_SENSOR_FT9338);
-  f.cancel_upload = TRUE;
-  f.fail_reset = 4;    /* The final release-only cleanup also fails. */
-  error = run_failure (&f);
-  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
-  g_assert_nonnull (strstr (error->message, "cancel"));
-  g_assert_nonnull (strstr (error->message, "GPIO"));
-  g_assert_cmpuint (f.asserts, ==, 1);
-  fixture_clear (&f);
 }
 
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
-  g_test_add_data_func ("/medion-boot/ft9338-exact", GINT_TO_POINTER (FTE3600_SENSOR_FT9338), test_exact_boot);
   g_test_add_data_func ("/medion-boot/ft9348-exact", GINT_TO_POINTER (FTE3600_SENSOR_FT9348), test_exact_boot);
   g_test_add_func ("/medion-boot/allowed-runtime", test_allowed_runtime);
   g_test_add_func ("/medion-boot/ft9348-runtime-rejected", test_runtime_rejected);
   g_test_add_func ("/medion-boot/preflight", test_preflight);
-  g_test_add_func ("/medion-boot/readback-last-byte", test_readback_last_byte);
-  g_test_add_func ("/medion-boot/application-rejected", test_application_rejected);
   g_test_add_func ("/medion-boot/bounded-poll", test_bounded_poll);
-  g_test_add_func ("/medion-boot/ft9338-marker-warning", test_ft9338_marker_warning);
   g_test_add_func ("/medion-boot/ft9348-post-checks", test_ft9348_post_checks);
-  const gchar *poll_cases[] = { "last-attempt", "all-read-errors", "busy-timeout", "transient-timeout",
-                                "session-lost", "device-gone", "device-closed", "cancel-during-read" };
-  for (guint i = 0; i < G_N_ELEMENTS (poll_cases); i++)
-    {
-      g_autofree gchar *path = g_strdup_printf ("/medion-boot/ft9338-poll/%s", poll_cases[i]);
-      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_ft9338_polling);
-    }
-  g_test_add_data_func ("/medion-boot/ft9338-transfer-failures", GINT_TO_POINTER (FTE3600_SENSOR_FT9338), test_transfer_failures);
   g_test_add_data_func ("/medion-boot/ft9348-transfer-failures", GINT_TO_POINTER (FTE3600_SENSOR_FT9348), test_transfer_failures);
-  g_test_add_func ("/medion-boot/cancellation", test_cancellation);
-  g_test_add_func ("/medion-boot/gpio-wait-failures", test_gpio_wait_failures);
-  g_test_add_func ("/medion-boot/cleanup-failure", test_cleanup_failure);
   return g_test_run ();
 }

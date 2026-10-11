@@ -1,12 +1,16 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
  * Independently expressed FT9338 diagnostic from observed Windows behavior.
- * Evidence: ftWbioUmdfDriverV2.dll, package 2.0.3.102; factory dispatch 2819c,
+ * Evidence: ftWbioUmdfDriverV2.dll, package 2.0.3.102; SPI factory 23faf-24244,
+ * application wake 28344/28c54, legacy dispatch 2819c,
  * boot-A 27414, boot-B OTP 27650, RAM startup 365c0, MCU configuration 36a30.
  */
 #include "fte3600-medion-ft9338.h"
 #include "drivers/fte3600-protocol.h"
 #include "drivers/fte3600-legacy-recovery-protocol.h"
 #include "drivers/fte3600-legacy-recovery-timing.h"
+#include "drivers/fte3600-ft9368-protocol.h"
+#include "drivers/fte3600-fw9369-protocol.h"
+#include "drivers/fte3600-special-probe-timing.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -303,7 +307,7 @@ select_boot_b (Test *test, GError **error)
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                  "OTP %02x selects FT9536; this test only supports FT9338", otp);
   else
-    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                  "OTP %02x has no Windows boot38 chip mapping; no firmware uploaded",
                  otp);
   return FALSE;
@@ -388,6 +392,211 @@ wait_idle (Test *test, GError **error)
 }
 
 static gboolean
+special_command (Test *test, Fte3600Fw9369Command cmd, GError **error)
+{
+  gsize length = fpi_fte3600_fw9369_build_command (test->tx, FT9338_TRANSFER_SIZE,
+                                                   cmd, error);
+
+  return length && exchange (test, length, error);
+}
+
+static gboolean
+special_read (Test *test, guint8 reg, guint8 *value, GError **error)
+{
+  gsize length = fpi_fte3600_fw9369_build_sfr_read (test->tx, FT9338_TRANSFER_SIZE,
+                                                    reg, error);
+
+  if (!length || !exchange (test, length, error))
+    return FALSE;
+  *value = test->rx[FTE3600_FW9369_SFR_RESULT_OFFSET];
+  return TRUE;
+}
+
+static gboolean
+special_probe (Test *test, guint16 *id, GError **error)
+{
+  guint8 value;
+  gsize length;
+
+  /* SPI factory 2411c/241a7 -> fba0(0) -> 10f0c. */
+  if (!special_command (test, FTE3600_FW9369_CMD_WAKE, error) ||
+      !delay (test, FTE3600_SPECIAL_COMMAND_DELAY_MS, error) ||
+      !special_read (test, FTE3600_FW9369_SFR_STATE, &value, error))
+    return FALSE;
+  if (value != FTE3600_FW9369_STATE_IDLE &&
+      (!special_command (test, FTE3600_FW9369_CMD_IDLE_1, error) ||
+       !delay (test, FTE3600_SPECIAL_COMMAND_DELAY_MS, error)))
+    return FALSE;
+  if (!special_command (test, FTE3600_FW9369_CMD_WAKE_END, error))
+    return FALSE;
+
+  /* 10a74 and 10d70 each call fd94. Exhausted C6 acknowledgement does not
+   * suppress the subsequent ID read; an actual transport error still stops. */
+  for (guint pass = 0; pass < FTE3600_SPECIAL_MODE_CONFIG_PASSES; pass++)
+    {
+      for (guint attempt = 0; attempt < FTE3600_SPECIAL_MODE_ATTEMPTS; attempt++)
+        {
+          length = fpi_fte3600_fw9369_build_sfr_write (test->tx, FT9338_TRANSFER_SIZE,
+                                                       FTE3600_FW9369_SFR_SPI_MODE, 1, error);
+          if (!length || !exchange (test, length, error) ||
+              !delay (test, FTE3600_SPECIAL_MODE_DELAY_MS, error) ||
+              !special_read (test, FTE3600_FW9369_SFR_SPI_MODE, &value, error))
+            return FALSE;
+          if (value == 1)
+            break;
+        }
+      report (test, "factory C6 pass %u: readback %02x", pass + 1, value);
+    }
+  length = fpi_fte3600_fw9369_build_word_read (test->tx, FT9338_TRANSFER_SIZE,
+                                               FTE3600_FW9369_WORD_CHIP_ID, error);
+  if (!length || !exchange (test, length, error))
+    return FALSE;
+  *id = ((guint16) test->rx[FTE3600_FW9369_WORD_RESULT_OFFSET] << 8) |
+        test->rx[FTE3600_FW9369_WORD_RESULT_OFFSET + 1];
+  report (test, "factory word ID = %04x", *id);
+  return TRUE;
+}
+
+static gboolean
+soft_reset_pair (Test *test, GError **error)
+{
+  gsize length = fpi_fte3600_build_command (test->tx, FT9338_TRANSFER_SIZE,
+                                            FTE3600_COMMAND_SOFT_RESET, error);
+
+  /* Finish the bounded pair before observing a cancellation received during
+  * the first write or the 5 ms wait. Never replay a failed SPI transfer. */
+  return length && proceed (test, error) && exchange_unchecked (test, length, error) &&
+         delay (test, FTE3600_SOFT_RESET_INTERVAL_MS, error) &&
+         exchange_unchecked (test, length, error) && proceed (test, error);
+}
+
+static gboolean
+factory_prepare (Test *test, guint round, gboolean *running, GError **error)
+{
+  guint8 status[2], geometry[2];
+  guint16 id;
+  gsize length;
+
+  *running = FALSE;
+  if (!proceed (test, error))
+    return FALSE;
+  test->touched = TRUE;
+  /* 23faf-24244: round 2 adds a reset and a third FT9368 query. It is a
+   * real discovery retry, not one of rounds 3/4's forced FT9368 downloads. */
+  report (test, "factory application round %u/%u", round + 1,
+          FTE3600_FACTORY_FT9338_ROUNDS);
+  for (guint attempt = 0;
+       attempt < FTE3600_FACTORY_FT9368_ATTEMPTS + (round == 2); attempt++)
+    {
+      if (round == 2 && attempt == 1 &&
+          (!reset_pulse (test, error) ||
+           !delay (test, FTE3600_FACTORY_RETRY_RESET_MS, error)))
+        return FALSE;
+      length = fpi_fte3600_ft9368_read (test->tx, FT9338_TRANSFER_SIZE,
+                                        FTE3600_FT9368_WAKE, 0);
+      if (!exchange (test, length, error) ||
+          !delay (test, FTE3600_FACTORY_FT9368_WAKE_MS, error))
+        return FALSE;
+      length = fpi_fte3600_ft9368_read (test->tx, FT9338_TRANSFER_SIZE,
+                                        FTE3600_FT9368_INFO, FTE3600_FT9368_INFO_SIZE);
+      if (!exchange (test, length, error))
+        return FALSE;
+      /* 26d9c extracts the model at information bytes 19/20. Do not
+       * reinterpret a positive other-family result as a legacy device. */
+      id = ((guint16) test->rx[FTE3600_FT9368_HEADER + 19] << 8) |
+           test->rx[FTE3600_FT9368_HEADER + 20];
+      report (test, "factory FT9368 information ID = %04x", id);
+      if (id == 0x9368)
+        goto other_sensor;
+    }
+  for (guint attempt = 0; attempt < 2; attempt++)
+    {
+      if (!special_probe (test, &id, error))
+        return FALSE;
+      Fte3600Identity candidate = fpi_fte3600_identify_special (id);
+
+      if (candidate.sensor != FTE3600_SENSOR_UNKNOWN ||
+          candidate.evidence == FTE3600_IDENTITY_KNOWN_UNMAPPED_ID)
+        goto other_sensor;
+      if (attempt == 0 &&
+          (!reset_pulse (test, error) ||
+           !delay (test, FTE3600_SPECIAL_RESET_SETTLE_MS, error)))
+        return FALSE;
+    }
+  if (round != 1)
+    return TRUE;
+  /* 24221 -> 28344 -> 270e4: paired 70, then MCU status immediately.
+   * The 350 ms wait applies only after idle, never before boot sync. */
+  for (guint attempt = 0; attempt < FTE3600_LEGACY_WAKE_MAX_ATTEMPTS; attempt++)
+    {
+      if (!soft_reset_pair (test, error) ||
+          !app_read (test, FTE3600_REG_MCU_STATUS, status, sizeof status, error))
+        return FALSE;
+      report (test, "factory application wake %u/%u: MCU %02x %02x", attempt + 1,
+              FTE3600_LEGACY_WAKE_MAX_ATTEMPTS, status[0], status[1]);
+      if (status[0] == FTE3600_MCU_IDLE_HIGH && status[1] == FTE3600_MCU_IDLE_LOW)
+        {
+          if (!delay (test, FTE3600_LEGACY_WAKE_GEOMETRY_MS, error) ||
+              !app_read (test, FTE3600_REG_SENSOR_ID_HIGH, geometry, 1, error) ||
+              !app_read (test, FTE3600_REG_SENSOR_ID_LOW, geometry + 1, 1, error))
+            return FALSE;
+          id = ((guint16) geometry[0] << 8) | geometry[1];
+          if (id != 0x5858)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "Running application geometry %04x is not FT9338; no firmware uploaded", id);
+              return FALSE;
+            }
+          *running = TRUE;
+          return TRUE;
+        }
+      if (attempt + 1 < FTE3600_LEGACY_WAKE_MAX_ATTEMPTS &&
+          !delay (test, FTE3600_LEGACY_WAKE_RETRY_MS, error))
+        return FALSE;
+    }
+  report (test, "factory application checks exhausted; entering legacy ROM selection");
+  return TRUE;
+
+other_sensor:
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "Factory identified another sensor (%04x); FT9338 firmware will not be uploaded", id);
+  return FALSE;
+}
+
+static gboolean
+return_idle (Test *test, GError **error)
+{
+  guint8 mode;
+
+  /* 28668: this also runs after ROM selection, before any RAM download. */
+  if (!soft_reset_pair (test, error) ||
+      !app_read (test, FTE3600_REG_MODE, &mode, 1, error))
+    return FALSE;
+  if (mode != FTE3600_MODE_QUICK_CAPTURE && mode != FTE3600_MODE_3 && mode != FTE3600_MODE_4 &&
+      (!app_write (test, FTE3600_REG_START, FTE3600_CAPTURE_DISABLE, error) ||
+       !app_write (test, FTE3600_REG_ENABLE, FTE3600_CAPTURE_DISABLE, error) ||
+       !delay (test, FTE3600_ARM_DELAY_MS, error)))
+    return FALSE;
+  return TRUE;
+}
+
+static gboolean
+firmware_ready (Test *test, gboolean *ready, GError **error)
+{
+  guint8 version, agc;
+
+  *ready = FALSE;
+  /* 2c8bc checks only these two bytes. No extra MCU/geometry reads, and a
+   * version-read failure must reach the caller's download fallback. */
+  if (!app_read (test, FTE3600_REG_FW_VERSION, &version, 1, error) ||
+      !app_read (test, FTE3600_REG_AGC_VERSION, &agc, 1, error))
+    return FALSE;
+  report (test, "existing firmware = %02x, AGC = %02x", version, agc);
+  *ready = version == FTE3600_FT9338_FW_VERSION && agc == FTE3600_FT9338_AGC_VERSION;
+  return TRUE;
+}
+
+static gboolean
 download_and_start (Test *test, const guint8 *firmware, GError **error)
 {
   gsize length;
@@ -415,8 +624,27 @@ download_and_start (Test *test, const guint8 *firmware, GError **error)
   if (memcmp (test->rx + FTE3600_BOOT38_READBACK_OFFSET,
               firmware, FT9338_FIRMWARE_SIZE) != 0)
     {
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                           "FT9338 RAM readback mismatch; application not started");
+      gsize first = 0, mismatches = 0;
+      gboolean all_zero = TRUE, all_ff = TRUE;
+      const guint8 *readback = test->rx + FTE3600_BOOT38_READBACK_OFFSET;
+
+      for (gsize i = 0; i < FT9338_FIRMWARE_SIZE; i++)
+        {
+          all_zero &= readback[i] == 0;
+          all_ff &= readback[i] == 0xff;
+          if (readback[i] != firmware[i])
+            {
+              if (mismatches == 0)
+                first = i;
+              mismatches++;
+            }
+        }
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "FT9338 RAM readback mismatch: first offset %" G_GSIZE_FORMAT
+                   " expected %02x received %02x; %" G_GSIZE_FORMAT
+                   "/14184 differ; all-zero=%s all-ff=%s; application not started",
+                   first, firmware[first], readback[first], mismatches,
+                   all_zero ? "yes" : "no", all_ff ? "yes" : "no");
       return FALSE;
     }
 
@@ -453,12 +681,9 @@ download_with_retries (Test *test, const guint8 *firmware, GError **error)
 }
 
 static gboolean
-configure_and_validate (Test *test, Fte3600Identity *result, GError **error)
+configure_mcu (Test *test, GError **error)
 {
   guint8 marker;
-  guint8 geometry[2];
-  guint8 firmware_version;
-  guint8 agc_version;
 
   /* The FT9338 cold path calls MCU configuration directly after RAM startup.
    * No software 70 reset or old driver's warm initialization is inserted. */
@@ -477,6 +702,116 @@ configure_and_validate (Test *test, Fte3600Identity *result, GError **error)
   if (marker != FTE3600_CONFIGURED_MARKER)
     report (test, "WARNING: MCU configuration marker is %02x, expected bb; "
                   "continuing as Windows does", marker);
+  return TRUE;
+}
+
+static gboolean
+enter_sensor_mode (Test *test, GError **error)
+{
+  guint8 status[2], finger;
+
+  /* 2c754 finishes with 287d4(1). The saved argument is written to the mode
+   * register before enable/start; only the still-idle fallback writes zero.
+   * A busy MCU first goes through 28668, without an invented polling loop. */
+  report (test, "enter FT9338 sensor mode");
+  if (!app_read (test, FTE3600_REG_MCU_STATUS, status, sizeof status, error))
+    return FALSE;
+  if ((status[0] != FTE3600_MCU_IDLE_HIGH || status[1] != FTE3600_MCU_IDLE_LOW) &&
+      !return_idle (test, error))
+    return FALSE;
+  if (!app_write (test, FTE3600_REG_MODE, FTE3600_MODE_WAIT_FINGER, error) ||
+      !app_write (test, FTE3600_REG_ENABLE, FTE3600_CAPTURE_ENABLE, error) ||
+      !app_write (test, FTE3600_REG_START, FTE3600_CAPTURE_ENABLE, error) ||
+      !delay (test, FTE3600_ARM_DELAY_MS, error) ||
+      !app_read (test, FTE3600_REG_FINGER_STATUS, &finger, 1, error) ||
+      !app_read (test, FTE3600_REG_MCU_STATUS, status, sizeof status, error))
+    return FALSE;
+  report (test, "sensor mode: finger status %02x, MCU %02x %02x",
+          finger, status[0], status[1]);
+  /* 289ce writes mode=0 if the MCU stayed idle. Windows reports this
+   * condition but does not fail or replay initialization. */
+  if (status[0] == FTE3600_MCU_IDLE_HIGH && status[1] == FTE3600_MCU_IDLE_LOW)
+    {
+      report (test, "WARNING: MCU remained idle after sensor-mode entry");
+      return app_write (test, FTE3600_REG_MODE, FTE3600_MODE_IDLE, error);
+    }
+  return TRUE;
+}
+
+static gboolean
+retryable (const GError *error)
+{
+  return g_error_matches (error, G_IO_ERROR, G_IO_ERROR_FAILED) ||
+         g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+         g_error_matches (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+}
+
+static gboolean
+load_firmware (Test *test, const guint8 *firmware, GError **error)
+{
+  g_autoptr(GError) version_error = NULL;
+  gboolean ready = FALSE;
+
+  /* 2c754: ReturnIdle -> CheckFwVersion -> optional download -> InitMcuConfig
+   * -> SwitchNextSensorWorkMode(1), for cold and running FT9338 alike. */
+  if (!return_idle (test, error))
+    return FALSE;
+  if (!firmware_ready (test, &ready, &version_error))
+    {
+      if (!retryable (version_error))
+        {
+          g_propagate_error (error, g_steal_pointer (&version_error));
+          return FALSE;
+        }
+      report (test, "firmware version check failed; download required: %s",
+              version_error->message);
+    }
+  if (!ready && !download_with_retries (test, firmware, error))
+    return FALSE;
+  return configure_mcu (test, error);
+}
+
+static gboolean
+factory_initialize (Test *test, const guint8 *firmware, gboolean selected, GError **error)
+{
+  for (guint round = 0; round < FTE3600_FACTORY_FT9338_ROUNDS; round++)
+    {
+      g_autoptr(GError) failure = NULL;
+      gboolean running = FALSE;
+
+      if (!factory_prepare (test, round, &running, &failure))
+        g_prefix_error (&failure, "factory preparation: ");
+      else if (round == 0)
+        continue;
+      else if (!running && !selected && !select_ft9338 (test, &failure))
+        g_prefix_error (&failure, "factory identification: ");
+      else if (!load_firmware (test, firmware, &failure))
+        g_prefix_error (&failure, "FT9338 initialization: ");
+      else
+        /* Windows ignores this last helper's result. The diagnostic reports
+         * a real I/O failure, but must not turn it into another RAM download. */
+        return enter_sensor_mode (test, error);
+
+      /* Do not cross into another factory round with uncertain OTP state.
+      * Cancellation and session loss are terminal, not vendor retries. */
+      if (test->otp_enabled || !retryable (failure) ||
+          round + 1 == FTE3600_FACTORY_FT9338_ROUNDS)
+        {
+          g_propagate_error (error, g_steal_pointer (&failure));
+          return FALSE;
+        }
+      report (test, "factory round %u failed: %s; retrying vendor discovery",
+              round + 1, failure->message);
+    }
+  g_assert_not_reached ();
+}
+
+static gboolean
+validate_runtime (Test *test, Fte3600Identity *result, GError **error)
+{
+  guint8 geometry[2];
+  guint8 firmware_version;
+  guint8 agc_version;
 
   report (test, "read-only FT9338 runtime validation");
   if (!app_read (test, FTE3600_REG_SENSOR_ID_HIGH, geometry, 1, error) ||
@@ -503,9 +838,9 @@ configure_and_validate (Test *test, Fte3600Identity *result, GError **error)
   return TRUE;
 }
 
-gboolean
-fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
-                            GBytes *firmware, Fte3600Identity *result, GError **error)
+static gboolean
+run_ft9338 (const Fte3600MedionIdentifyIo *io, GBytes *firmware,
+            gboolean selected, Fte3600Identity *result, GError **error)
 {
   g_autoptr(GError) failure = NULL;
   g_autofree guint8 *tx = NULL;
@@ -538,12 +873,12 @@ fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
   test.tx = tx;
   test.rx = rx;
 
-  if (!select_ft9338 (&test, &failure))
-    g_prefix_error (&failure, "factory identification: ");
-  else if (!download_with_retries (&test, payload, &failure))
-    g_prefix_error (&failure, "FT9338 RAM startup: ");
-  else if (!configure_and_validate (&test, &verified, &failure))
-    g_prefix_error (&failure, "FT9338 MCU configuration/runtime validation: ");
+  if (selected)
+    report (&test, "manual FT9338 selection: skip ROM/OTP classification, retain factory preparation and initialization");
+  if (!factory_initialize (&test, payload, selected, &failure))
+    g_prefix_error (&failure, "FT9338 factory startup: ");
+  else if (!validate_runtime (&test, &verified, &failure))
+    g_prefix_error (&failure, "FT9338 runtime validation: ");
 
   if (test.otp_enabled)
     {
@@ -566,7 +901,21 @@ fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
       return FALSE;
     }
   *result = verified;
-  report (&test, "FT9338 RAM startup validated; MCU configuration sequence completed "
+  report (&test, "FT9338 startup validated; MCU configuration sequence completed "
                  "(see marker readback above); no image captured");
   return TRUE;
+}
+
+gboolean
+fte3600_medion_test_ft9338 (const Fte3600MedionIdentifyIo *io,
+                            GBytes *firmware, Fte3600Identity *result, GError **error)
+{
+  return run_ft9338 (io, firmware, FALSE, result, error);
+}
+
+gboolean
+fte3600_medion_start_ft9338 (const Fte3600MedionIdentifyIo *io,
+                             GBytes *firmware, Fte3600Identity *result, GError **error)
+{
+  return run_ft9338 (io, firmware, TRUE, result, error);
 }

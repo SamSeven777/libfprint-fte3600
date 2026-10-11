@@ -453,8 +453,8 @@ main (int argc, char **argv)
 
       stage = test_ft9338 ? "FT9338 TEST" : boot ? "BOOT" : "IDENTIFY";
       if (test_ft9338)
-        g_print ("FT9338 TEST START: Windows-derived ROM/OTP selection, RAM download and MCU initialization.\n"
-                 "OTP 00 stops the test before firmware upload. Keep the sensor uncovered.\n");
+        g_print ("FT9338 TEST START: Windows-derived factory preparation, identification and MCU initialization.\n"
+                 "Unmapped OTP is retried through vendor discovery, never used to select firmware. Keep the sensor uncovered.\n");
       else if (boot)
         g_print ("BOOT START: explicitly selected %s RAM firmware and startup protocol.\n"
                  "An empty application response is permitted; no automatic candidate fallback.\n",
@@ -567,8 +567,8 @@ out:
                "MCU configuration sequence completed (see marker readback above); " : "");
     }
   if (status == EXIT_SUCCESS && test_ft9338)
-    g_print ("FT9338 TEST PASS: ROM selection, complete RAM readback and application startup verified; "
-             "MCU configuration sequence completed (see marker readback above); "
+    g_print ("FT9338 TEST PASS: factory selection and runtime geometry/versions verified; "
+             "MCU configuration and sensor-mode sequence completed (see readbacks above); "
              "host transport restored. Capture has not been tested.\n");
   return status;
 }

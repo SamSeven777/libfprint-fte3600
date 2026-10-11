@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
- * Independently expressed, explicit FT9338/FT9348 volatile RAM startup.
+ * Explicit Medion RAM startup dispatch and the FT9348 experiment.
+ * FT9338 uses the shared factory/initialization engine in medion-ft9338.c.
  */
 #include "fte3600-medion-boot.h"
+#include "fte3600-medion-ft9338.h"
 #include "drivers/fte3600-protocol.h"
 #include "drivers/fte3600-legacy-recovery-protocol.h"
 #include "drivers/fte3600-legacy-recovery-timing.h"
@@ -190,11 +192,7 @@ check_geometry (Boot *boot, gboolean before_start, GError **error)
 
   if (!read_geometry (boot, &first, error))
     return FALSE;
-  /* Explicit FT9338 startup validates geometry once after configuration.
-  * Keep the older FT9348 experiment's repeated observations separate. */
-  second = first;
-  if (boot->sensor->sensor != FTE3600_SENSOR_FT9338 &&
-      !read_geometry (boot, &second, error))
+  if (!read_geometry (boot, &second, error))
     return FALSE;
   if (first != second)
     {
@@ -217,28 +215,6 @@ check_geometry (Boot *boot, gboolean before_start, GError **error)
 }
 
 static gboolean
-prepare_38 (Boot *boot, GError **error)
-{
-  const guint8 registers[] = { FTE3600_BOOT38_CONFIG_C8, FTE3600_BOOT38_CONFIG_CA,
-                               FTE3600_BOOT38_CONFIG_CB, FTE3600_BOOT38_CONFIG_B9,
-                               FTE3600_BOOT38_CONFIG_B9 };
-  const guint8 values[] = { FTE3600_BOOT38_CONFIG_ALL, FTE3600_BOOT38_CONFIG_ALL,
-                            FTE3600_BOOT38_CONFIG_ALL, FTE3600_BOOT38_CONFIG_PREPARE,
-                            FTE3600_BOOT38_CONFIG_ALL };
-
-  for (guint i = 0; i < G_N_ELEMENTS (registers); i++)
-    {
-      gsize size = fpi_fte3600_build_boot38_write (boot->tx, boot->capacity,
-                                                   registers[i], values[i]);
-
-      report (boot, "boot38 write %02x = %02x", registers[i], values[i]);
-      if (!size || !exchange (boot, size, error))
-        return FALSE;
-    }
-  return proceed (boot, error) && delay (boot, FTE3600_BOOT38_CONFIG_MS, error);
-}
-
-static gboolean
 upload (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
   gsize size = fpi_fte3600_build_firmware (boot->tx, boot->capacity, firmware, length, error);
@@ -249,34 +225,13 @@ upload (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 }
 
 static gboolean
-verify_38_readback (Boot *boot, const guint8 *firmware, gsize length, GError **error)
-{
-  gsize size = fpi_fte3600_build_boot38_readback (boot->tx, boot->capacity, length);
-
-  report (boot, "FT9338 complete RAM readback");
-  if (!size || !exchange (boot, size, error))
-    return FALSE;
-  if (memcmp (firmware, boot->rx + FTE3600_BOOT38_READBACK_OFFSET, length) != 0)
-    {
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                           "FT9338 RAM readback differs from the complete supplied firmware");
-      return FALSE;
-    }
-  return TRUE;
-}
-
-static gboolean
 start_application (Boot *boot, GError **error)
 {
-  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
-
   if (!reset_pulse (boot, error) || !proceed (boot, error) ||
       !delay (boot, FTE3600_RESET_GAP_MS, error) ||
       !reset_pulse (boot, error) || !proceed (boot, error) ||
-      !delay (boot, is_38 ? FTE3600_BOOT38_FT9338_START_MS : FTE3600_RESET_BOOT_MS, error))
+      !delay (boot, FTE3600_RESET_BOOT_MS, error))
     return FALSE;
-  if (is_38)
-    return TRUE;
   report (boot, "A8 application software reset");
   return command (boot, FTE3600_COMMAND_SOFT_RESET, error) &&
          proceed (boot, error) && delay (boot, FTE3600_SOFT_RESET_INTERVAL_MS, error) &&
@@ -287,8 +242,6 @@ start_application (Boot *boot, GError **error)
 static gboolean
 wait_idle (Boot *boot, guint attempts, GError **error)
 {
-  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
-
   g_autoptr(GError) read_error = NULL;
 
   for (guint i = 0; i < attempts; i++)
@@ -300,22 +253,13 @@ wait_idle (Boot *boot, guint attempts, GError **error)
               boot->rx[FTE3600_REG_RESULT_OFFSET + 1] == FTE3600_MCU_IDLE_LOW)
             return TRUE;
         }
-      else if (!is_38 ||
-               (!g_error_matches (read_error, G_IO_ERROR, G_IO_ERROR_FAILED) &&
-                !g_error_matches (read_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) ||
-               !proceed (boot, error))
+      else
         {
           if (!*error)
             g_propagate_error (error, g_steal_pointer (&read_error));
           return FALSE;
         }
-      else
-        {
-          report (boot, "MCU poll %u failed: %s", i + 1, read_error->message);
-        }
-      /* Windows 3695c-36981 delays after every unsuccessful poll, including
-      * the twentieth. Session loss and cancellation never enter a retry. */
-      if ((is_38 || i + 1 < attempts) &&
+      if (i + 1 < attempts &&
           (!proceed (boot, error) || !delay (boot, FTE3600_INIT_MCU_POLL_MS, error)))
         return FALSE;
     }
@@ -346,49 +290,15 @@ check_version (Boot *boot, guint8 reg, guint8 expected, GError **error)
 }
 
 static gboolean
-configure_38 (Boot *boot, GError **error)
-{
-  const guint8 registers[] = { FTE3600_REG_CONFIG_01, FTE3600_REG_CONFIG_41,
-                               FTE3600_REG_CONFIG_MARKER };
-  const guint8 values[] = { FTE3600_CONFIG_01_ENABLE, FTE3600_CONFIG_41_VALUE,
-                            FTE3600_CONFIGURED_MARKER };
-
-  /* Windows FT9338 InitMcuConfig, RVA 36a30, immediately after RAM startup.
-   * Keep this in the manual path too: BOOT PASS includes MCU configuration. */
-  for (guint i = 0; i < G_N_ELEMENTS (registers); i++)
-    {
-      gsize size = fpi_fte3600_build_app_write (boot->tx, boot->capacity,
-                                                registers[i], values[i], error);
-
-      if (!size || !exchange (boot, size, error) ||
-          !delay (boot, FTE3600_38_CONFIG_DELAY_MS, error))
-        return FALSE;
-    }
-  if (!read_register (boot, FTE3600_REG_CONFIG_MARKER, 1, error))
-    return FALSE;
-  /* Windows 36b6e-36bc2 logs a marker mismatch and returns success. A failed
-  * transaction above is still an error; a successful non-BB reply is not. */
-  if (boot->rx[FTE3600_REG_RESULT_OFFSET] != FTE3600_CONFIGURED_MARKER)
-    report (boot, "WARNING: MCU configuration marker is %02x, expected bb; "
-                  "continuing as Windows does",
-            boot->rx[FTE3600_REG_RESULT_OFFSET]);
-  return TRUE;
-}
-
-static gboolean
 download_and_start (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
-  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
-
   if (!proceed (boot, error))
     return FALSE;
   boot->touched = TRUE;
   report (boot, "boot entry: reset physical H10/L20/H followed by 55 aa");
   if (!callback_result (boot->io->reset_and_sync (boot->io->user_data, error),
                         "reset and boot sync", error) || !proceed (boot, error) ||
-      (is_38 && !prepare_38 (boot, error)) ||
       !upload (boot, firmware, length, error) ||
-      (is_38 && !verify_38_readback (boot, firmware, length, error)) ||
       !start_application (boot, error) ||
       !wait_idle (boot, FTE3600_INIT_MCU_MAX_ATTEMPTS, error))
     return FALSE;
@@ -398,37 +308,13 @@ download_and_start (Boot *boot, const guint8 *firmware, gsize length, GError **e
 static gboolean
 run_boot (Boot *boot, const guint8 *firmware, gsize length, GError **error)
 {
-  gboolean is_38 = boot->sensor->sensor == FTE3600_SENSOR_FT9338;
-
   report (boot, "explicit %s RAM experiment", boot->sensor->name);
-  /* The selected FT9338 path has no pre-download application probes. */
-  if (!is_38 && !check_geometry (boot, TRUE, error))
-    return FALSE;
-  for (guint attempt = 1; ; attempt++)
-    {
-      g_autoptr(GError) failure = NULL;
-
-      if (download_and_start (boot, firmware, length, &failure))
-        break;
-      if (!is_38 || attempt == FTE3600_FIRMWARE_MAX_ATTEMPTS ||
-          (!g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_FAILED) &&
-           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) &&
-           !g_error_matches (failure, G_IO_ERROR, G_IO_ERROR_INVALID_DATA)))
-        {
-          g_propagate_error (error, g_steal_pointer (&failure));
-          return FALSE;
-        }
-      if (!proceed (boot, error))
-        return FALSE;
-      report (boot, "retry FT9338 RAM download after attempt %u: %s", attempt, failure->message);
-    }
-  if ((is_38 && !configure_38 (boot, error)) ||
+  if (!check_geometry (boot, TRUE, error) ||
+      !download_and_start (boot, firmware, length, error) ||
       !check_geometry (boot, FALSE, error) ||
-      !check_version (boot, FTE3600_REG_FW_VERSION,
-                      is_38 ? FTE3600_FT9338_FW_VERSION : FTE3600_A8_FW_VERSION, error) ||
-      !check_version (boot, FTE3600_REG_AGC_VERSION,
-                      is_38 ? FTE3600_FT9338_AGC_VERSION : FTE3600_A8_AGC_VERSION, error) ||
-      (!is_38 && !wait_idle (boot, 1, error)))
+      !check_version (boot, FTE3600_REG_FW_VERSION, FTE3600_A8_FW_VERSION, error) ||
+      !check_version (boot, FTE3600_REG_AGC_VERSION, FTE3600_A8_AGC_VERSION, error) ||
+      !wait_idle (boot, 1, error))
     return FALSE;
   return proceed (boot, error);
 }
@@ -444,11 +330,13 @@ fte3600_medion_boot (const Fte3600MedionIdentifyIo *io, Fte3600Sensor sensor,
 
   g_autoptr(GError) failure = NULL;
 
+  if (sensor == FTE3600_SENSOR_FT9338)
+    return fte3600_medion_start_ft9338 (io, firmware, result, error);
   if (result)
     memset (result, 0, sizeof *result);
   if (!io || !firmware || !result || !io->exchange || !io->set_reset || !io->reset_and_sync ||
       !io->wait || !io->check_cancelled ||
-      (sensor != FTE3600_SENSOR_FT9338 && sensor != FTE3600_SENSOR_FT9348))
+      sensor != FTE3600_SENSOR_FT9348)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                            "RAM experiment requires explicit FT9338 or FT9348, firmware, and complete I/O callbacks");
@@ -464,8 +352,7 @@ fte3600_medion_boot (const Fte3600MedionIdentifyIo *io, Fte3600Sensor sensor,
                    boot.sensor->name, length, expected_size);
       return FALSE;
     }
-  boot.capacity = length + (sensor == FTE3600_SENSOR_FT9338 ? FTE3600_BOOT38_READBACK_OVERHEAD :
-                            FTE3600_FIRMWARE_HEADER_SIZE + FTE3600_FIRMWARE_TRAILER_SIZE);
+  boot.capacity = length + FTE3600_FIRMWARE_HEADER_SIZE + FTE3600_FIRMWARE_TRAILER_SIZE;
   if (io->max_transfer < boot.capacity)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE,

@@ -27,10 +27,13 @@
 #define FTE3600_FIRMWARE_MAX_ATTEMPTS 5
 
 /* Reference SPI factory, EvtDevicePrepareHardware: rounds 0 and 1 precede
- * legacy ROM recovery. Later forced-family firmware guesses are not used.
+ * legacy ROM recovery. Round 2 retries discovery after reset + 300 ms;
+ * rounds 3 and 4 force an FT9368 download and are outside an FT9338 test.
  * FT9368 ReadChipID (26d9c) has its own 5 ms wait, distinct from the 10 ms
  * application wake helper (28cc4). */
 #define FTE3600_FACTORY_APPLICATION_ROUNDS 2
+#define FTE3600_FACTORY_FT9338_ROUNDS 3
+#define FTE3600_FACTORY_RETRY_RESET_MS 300
 #define FTE3600_FACTORY_FT9368_ATTEMPTS 2
 #define FTE3600_FACTORY_FT9368_WAKE_MS 5
 

@@ -2,9 +2,10 @@
 
 The `medion-spidev` branch provides a standalone diagnostic for the Medion E3224
 wiring under investigation. Start with `--test-ft9338`: an independent FT9338
-engine follows the Windows ROM/OTP identification, firmware startup and MCU
-configuration sequence. An unsupported identity, including B38 OTP `00`, stops
-the test before firmware upload. This test does not capture a fingerprint.
+engine follows the Windows factory preparation, ROM/OTP identification,
+firmware startup, MCU configuration and sensor-mode entry. An unmapped OTP
+reaches the vendor discovery retry; it never authorizes a firmware upload.
+This test does not capture a fingerprint.
 
 Separate stages reuse this repository's general discovery, initialization and
 capture state machines. Explicit `--boot ft9338` and `--boot ft9348` remain
@@ -88,16 +89,45 @@ sudo python3 scripts/medion-spidev.py --test-ft9338 \
 
 The firmware remains in the local `medion-firmware` directory. Its exact size
 and SHA-256 are checked before sensor operations. No Windows code is executed.
-The test then identifies the sensor before uploading anything: `1534` alone
+The test first executes the inspected Windows SPI factory's two application
+probe rounds: FT9368 wake/information queries, special-family wake and C6/word-ID
+queries, and the hardware-reset/10 ms retry. Each C6 helper has its own bounded
+31-attempt budget; an unacknowledged C6 value still permits the ID read. A
+recognized other-family identity stops this FT9338-only test before any upload.
+It then checks the legacy application with up to six `70`, 5 ms, `70` pairs,
+reading MCU status immediately after each pair. The 350 ms geometry wait occurs
+only after confirmed MCU idle. The first ROM query is reached only after these
+application checks fail. The compact release-reset/`55 aa` operation is retained.
+
+The test identifies the sensor before uploading anything: `1534` or `1574` alone
 is not an FT9338 identity, and B38 OTP `00` still fails classification. There
 is no manual chip override or fallback to another firmware in this action.
 
-After an accepted FT9338 result, the same native test configures the boot
+After selecting FT9338, both cold and warm paths run Windows `LoadFW`:
+paired `70` with a 5 ms interval, mode read, conditional stop writes and a
+10 ms wait, then firmware/AGC version reads. No extra MCU or geometry reads
+are inserted into that version check. Matching versions reuse the running
+firmware; a mismatch or a transient version-read failure selects download.
+Cancellation and session loss stop the test.
+
+When download is required, the test configures the boot
 registers, uploads RAM firmware, compares the complete readback, restarts the
 application with the 80 ms startup wait and polls for MCU idle. It then performs
 the vendor MCU writes `01=01`, `41=0f`, `30=bb`, with 1 ms waits, reads register
-`30`, and checks the runtime geometry and versions. It does not add an
-FT9361/A8 `70` reset pair.
+`30`, then performs `SwitchNextSensorWorkMode(1)`: query MCU, return idle if
+busy, write `76=01`, `1f=01`, `1e=01`, wait 10 ms, read finger status and MCU
+status. If the MCU remains idle, it writes `76=00` and reports a warning,
+as Windows does. Runtime geometry and version validation follows this sequence.
+It does not add an FT9361/A8 `70` reset pair between the cold application
+restart and configuration. Matching existing firmware also gets configuration
+and sensor-mode entry.
+
+If ROM selection returns an unmapped OTP, or initialization fails transiently,
+factory round 2 (zero-based) is retained: one FT9368 query, reset + 300 ms,
+two more FT9368 queries, the special-family checks, then ROM selection again.
+The six legacy wake attempts are not repeated in this round. Recognized other
+chips stop immediately. Vendor rounds 3/4 force FT9368 firmware and are outside
+this FT9338-only test. There is no fallback to another payload.
 Runtime geometry and version checks are diagnostic acceptance criteria. A
 successful register `30` read returning something other than `bb` is reported
 as a warning and allowed to continue, matching Windows. A failed configuration
@@ -118,8 +148,11 @@ sudo python3 scripts/medion-spidev.py --boot ft9338 \
   --firmware "$PWD/medion-firmware/fte3600/ft9338.bin"
 ```
 
-This manual path also performs the vendor MCU configuration before reporting
-`BOOT PASS`. After either `FT9338 TEST PASS` or `BOOT PASS`, test capture in
+This manual path now shares the factory preparation and complete FT9338
+initialization engine with `--test-ft9338`. It bypasses ROM/OTP classification
+only; explicit chip selection does not skip wake, return-idle, version checking,
+MCU configuration or sensor-mode entry. Recognized other-family application
+evidence still stops it. After either `FT9338 TEST PASS` or `BOOT PASS`, test capture in
 the same boot, without suspending or running another sensor tool between them:
 
 ```sh
@@ -209,7 +242,7 @@ sizes, not proof that the SPI controller accepts the transaction. An existing
 | Stage | What it establishes | Sensor operations |
 | --- | --- | --- |
 | `--inspect` | Reports the known ACPI associations, candidate nodes and current driver binding | None |
-| `--test-ft9338` | Whether Windows-style ROM/OTP identification selects FT9338 and its firmware startup and MCU configuration pass | Independent identification, reset, RAM upload with complete readback, application restart and MCU configuration; no IRQ request or capture |
+| `--test-ft9338` | Whether factory preparation selects FT9338 and its startup and MCU configuration pass | Application probes and wake, ROM/OTP when required, RAM upload with complete readback when required, MCU configuration; no IRQ request or capture |
 | `--identify-legacy` | Application and ROM/OTP evidence for FT9338 or FT9348, preserving candidate versus confirmed-profile distinctions | Application register queries, bounded software wake and reset/ROM/OTP negotiation; no firmware upload, capture initialization or image acquisition |
 | `--boot ft9338` or `--boot ft9348` | Whether the manually selected firmware starts with its expected runtime parameters; not automatic identification | Validate the selected payload, reset, upload to RAM, verify transfer and application status; FT9338 also configures the MCU; no capture or IRQ request |
 | `--probe` | Whether the existing protocol discovery can establish a supported identity | SPI queries, wake commands and, when needed, reset/ROM negotiation |
@@ -254,8 +287,8 @@ It is mutually exclusive with all other stages.
 
 `--boot ft9338` explicitly selects the FT9338 RAM startup sequence. It is a
 manual candidate experiment, not the Windows automatic identification flow:
-it starts the selected download sequence without pre-boot application queries
-or prior OTP identification. Windows's B38 identification does not treat OTP `00` as
+it performs the shared factory preparation and FT9338 initialization without
+prior ROM/OTP classification. Windows's B38 identification does not treat OTP `00` as
 permission to load FT9338 firmware. Do not interpret this command as a fix for
 an unsuccessful identity check.
 
@@ -467,12 +500,17 @@ source commit, kernel, stage and sanitized result when reporting this Medion
 experiment; no Medion hardware success is claimed by the existence of this
 branch or its mock tests.
 
-## Windows FT9338 sequence, 2026-10-06
+## Windows FT9338 sequence, updated 2026-10-11
 
 The independent FT9338 test follows observations from `ftWbioUmdfDriverV2.dll`
-2.0.3.102: RVA `0x2ead0` supplies reset and `55 aa` entry, `0x27650` the B38 OTP
+2.0.3.102. Factory rounds at `23faf`-`24244`, FT9368 queries at `26d9c`,
+special-family helpers `fba0`/`10a74`, and application wake at `28344` now precede
+legacy selection. Earlier revisions jumped directly into legacy selection and
+therefore did not reproduce this entry flow. RVA `0x2ead0` supplies reset and `55 aa` entry, `0x27650` the B38 OTP
 procedure, `0x365c0` configuration/upload/readback, `0x36bd0` application restart,
-and `0x36a30` MCU configuration. An unknown boot-B family can lead to the OTP
+and `0x36a30` MCU configuration. The selected backend's full initialization is
+`2c754`: return idle (`28668`), check versions (`2c8bc`), optional download
+(`2c4a4`), MCU configuration and sensor-mode entry (`287d4`). An unknown boot-B family can lead to the OTP
 procedure; OTP `00` still fails classification. `--test-ft9338` keeps that gate
 and does not use the manual candidate-boot override.
 
@@ -490,9 +528,9 @@ register `30`: log a successful non-`bb` reply and continue. Failed configuratio
 transactions still fail. Success messages describe completion of the MCU
 configuration sequence, not validation of its marker. A passing startup test
 does not establish image capture or authentication.
-The `--boot ft9338` action remains a separate manual experiment with explicit
-chip selection. It now includes the same three MCU writes, waits and marker
-check before runtime validation.
+The `--boot ft9338` action uses explicit chip selection in the same engine.
+The former independent FT9338 downloader has been removed to keep startup
+ordering, configuration and retry fixes shared between both commands.
 
 Both FT9338 startup commands retry transient MCU status-read failures at 2 ms
 intervals within the same 20-read budget as busy replies (`3695c`-`36981`). The
@@ -500,12 +538,15 @@ twentieth failed poll also waits 2 ms, as in Windows. Cancellation, a missing
 or closed device, and an invalidated session terminate immediately. Reads do
 not individually restart the firmware. If the whole startup attempt exhausts
 that budget, or a retryable download/readback error occurs, both commands
-restart the complete download, with at most five attempts (`2C4A4`). They do
-not repeat factory selection or OTP discovery, boot an unverified payload, or
-retry configuration/diagnostic failures. Cancellation and device/session loss
-also stop this outer loop. Manual FT9338 startup no longer probes
-application geometry before reset, repeats geometry after startup, or adds a
-final idle read after its version checks. FT9348 behavior is unchanged.
+restart the complete download, with at most five attempts per selection
+(`2C4A4`). Both actions can then run factory round 2; the automatic action
+repeats ROM selection, while the manual action retains the selected FT9338.
+This bounds each action to ten uploads total. MCU configuration
+failures can also reach that factory retry. Final diagnostic validation and
+sensor-mode I/O failures do not restart firmware. Neither command boots an
+unverified payload. Cancellation and device/session loss terminate immediately.
+Geometry reads belong to successful application identification and final
+validation, not extra pre-download gates. FT9348 behavior is unchanged.
 
 The capture backend also omits the preliminary FT9338 marker read: that chip
 always performs the three configuration writes, so reading the marker first
@@ -518,7 +559,11 @@ message before releasing reset in the SPI worker immediately ahead of its
 sync ioctl. The standalone transport callback also keeps configuration reads
 outside this release/sync pair. Neither source review nor mock tests
 measure GPIO/SPI timing on the Medion. Physical startup and capture still need
-an actual device run.
+an actual device run. The integrated diagnostic combines factory selection and
+one `LoadFW` initialization in its single Linux session; it does not duplicate
+UMDF PrepareHardware/D0Entry scheduling. Unlike the Windows caller, it surfaces
+sensor-mode I/O errors instead of discarding them. No IRQ or image transfer is
+needed to perform these startup transactions.
 
 ## Local validation, 2026-10-06
 

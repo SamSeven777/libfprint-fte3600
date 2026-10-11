@@ -9,8 +9,9 @@
  * the selected chip's catalog size/SHA-256 loader before calling. This engine
  * also checks size/capacity before I/O, but length alone is not authentication.
  *
- * FT9338 starts the selected download sequence without pre-boot application
- * queries. FT9348 retains its repeated pre-boot geometry checks.
+ * FT9338 uses the shared factory preparation and LoadFW engine with explicit
+ * selection in place of ROM/OTP classification. FT9348 retains its separate
+ * download experiment and repeated pre-boot geometry checks.
  * It never tries a different chip, programs flash, or modifies automatic driver
  * identity/firmware policy. TRUE requires application idle, matching geometry
  * and firmware/AGC versions after RAM startup. FT9338 configuration-marker
