@@ -1,19 +1,19 @@
 {
   "schema": 1,
-  "independent_source_commit": "47e3b32d73d5c5df70869cd7ed0e153d2e1a4066",
+  "independent_source_commit": "c60e35070c49b62c42de68f6ec765c2f857aa897",
   "runtime_release": "0.2.1",
   "official_libfprint_commit": "6f9479c3d55f847c1b3769f28ceb99227f9858cf",
   "replaced_downstream_commit": "7e12c09abbd53516076b6d67a480003dc272cc8e",
   "sam7_dependency_commit": "7e12c09abbd53516076b6d67a480003dc272cc8e",
-  "scope": "Independently authored SPI/libfprint implementation with unchanged attributed Sam7 BRISK; no vendor matcher, firmware or personal biometric inputs. Runtime changes proposed after the A1 trial are excluded.",
-  "hardware_evidence": "A1 FT9361 on x86_64 NixOS: enrollment and three positive verifications using the same runtime with libfprint 1.94.10. This master integration passed separate software checks; other devices, negative controls and full Windows equivalence are unvalidated.",
+  "scope": "Independently authored SPI/libfprint implementation with unchanged attributed Sam7 BRISK; no vendor matcher, firmware or personal biometric inputs. This revision preserves all live transport metadata checks while reusing validated canonical paths.",
+  "hardware_evidence": "A1 FT9361 on x86_64 NixOS: original 0.2.1 stable integration enrolled and positively verified three times. Updated runtime passed automatic open/close, timed cancellation and reopening on the same stable framework; measured open median 3955.394 to 3488.181 ms. This master integration has separate software validation; recognition was not rerun in the automatic round.",
   "files": {
     "libfprint/drivers/fte3600/auth.c": "a488cc5e8745026a149484c105140b8830613a1e1311075f1462b96ca110b67c",
     "libfprint/drivers/fte3600/auth_profiles.c": "789475b45b2f640024ab47493386f3f17170c9fae6f70c0965f72afda5597223",
     "libfprint/drivers/fte3600/auth_test_image.h": "abc8b0874a410ca82dbb3040a40d93b3990ef0a21f0a8ab3bafc694112585da7",
     "libfprint/drivers/fte3600/calibration.c": "2049ba0b7cb6f90599c1825704b2678fce5d818a6baea45340508a587caf761b",
     "libfprint/drivers/fte3600/capture.c": "24f777d713aa0ace3f0fe87b84c2561ecc59fe840de4eea63b6f7877d0faf409",
-    "libfprint/drivers/fte3600/device_session.c": "cbb3a48be7a30079a47e3e9b12846ce8efd940a8f34701511de95b9343a43b5b",
+    "libfprint/drivers/fte3600/device_session.c": "c948364533c2c0f5c81f420885e2f28aeccbee94ebff2a13501322a0910a2026",
     "libfprint/drivers/fte3600/discovery.c": "99464e8214b108fcd73b0d6184b65972952c5bbb40964a48758019f63f8b0e38",
     "libfprint/drivers/fte3600/factory_byte_startup.c": "9e9d604d6415d6f0ae4a19b34aa8657f34b9b9d35071dc502a5b565926b8d8e2",
     "libfprint/drivers/fte3600/factory_integration.c": "0d88ada8b8a1af00f51868796936d569d28a096eae086a147d3dd2aa999a698b",
@@ -63,7 +63,7 @@
     "libfprint/drivers/fte3600/legacy_lifecycle.c": "f58a714868f7f275eb20c094140ff27c1a3dffd70c56cf6c74a187b7ea9e173c",
     "libfprint/drivers/fte3600/libfprint_api.c": "85a6351af2cda39e44362dc1d053743c9ce9df63bb3febcc23ca349b40cb6248",
     "libfprint/drivers/fte3600/libfprint_backend_fake.c": "5c1a3644ac069bca2ba709800f57b595e8aa08e44cca0c5b012199c266a7f07f",
-    "libfprint/drivers/fte3600/linux_board.c": "a589a6a14e57d70f47b4b6f4dd843453052008ca59296893bb7ade342c2411a8",
+    "libfprint/drivers/fte3600/linux_board.c": "682cdba39c152ed001654ab073d01c102e021750e41e59464b706d6e6ab64056",
     "libfprint/drivers/fte3600/linux_firmware.c": "2ac23ca61af2ca6289c616d08b50447902f6a17efa56b7611627bf4c32e94fab",
     "libfprint/drivers/fte3600/linux_runtime.c": "f1e8a57719baf6f3239f22c0b74f3dd62545f84b6134abf58ca85f2c178b450e",
     "libfprint/drivers/fte3600/meson.build": "a6d6196d3e7a98c36bd0357e33598c771b7b666329eacddbfef3d51f719618d2",
@@ -81,5 +81,6 @@
     "libfprint/drivers/fte3600/sam7-brisk/libfprint/matchers/brisk/brisk.h": "b43c754dc54c705eef9557c00867006989452bb2a7ce4a18eaaada08b6c9e8f2",
     "libfprint/drivers/fte3600/sam7-brisk/libfprint/matchers/brisk/meson.build": "3852dbaac93f0fe7392ebaf6516ea5553b2953203f1ab0e3bc19f47c23350e51",
     "libfprint/drivers/fte3600/test_auth.c": "73ff9db3a75b7796aafda3d6358a47d833f485bda68df5ec60f46cddeea32e5d"
-  }
+  },
+  "runtime_revision": "Post-0.2.1 Linux path-validation optimization and terminal legacy-error preservation; matcher unchanged."
 }

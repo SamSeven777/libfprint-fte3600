@@ -41,7 +41,8 @@ if missing:
 }
 
 fte_check_build production false fte3600-auth fp-context-udev fpi-device fpi-ssm \
-  fte3600-install-firmware fte3600-setup fte3600-pair
+  fte3600-install-firmware fte3600-setup fte3600-pair \
+  fte3600-linux-board fte3600-device-session fte3600-open-bench
 fte_check_build test-backend true fte3600-public-api
 
 # This host-side policy check needs no kernel headers or attached device.

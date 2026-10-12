@@ -491,4 +491,47 @@ if 'fte3600' in drivers
   test('fte3600-install-firmware', python3, args: files('test-install-firmware.py'), timeout: 120)
   test('fte3600-setup', python3, args: files('test-setup-fte3600.py'), timeout: 120)
   test('fte3600-pair', python3, args: files('test-fte3600-pair.py'), timeout: 120)
+
+  # Link the exact production core archive; ordinary static linking pulls only
+  # the objects used by these synthetic tests, without the framework adapter.
+  fte3600_test_include = include_directories('../libfprint/drivers/fte3600/include')
+  fte3600_session_test = executable('test-fte3600-device-session',
+    'test-fte3600-device-session.c',
+    dependencies: deps,
+    include_directories: fte3600_test_include,
+    link_with: fte3600_driver,
+    c_args: ['-fno-fast-math', '-ffp-contract=off',
+             '-fexcess-precision=standard', '-frounding-math'],
+    install: false)
+  test('fte3600-device-session', fte3600_session_test, timeout: 180)
+
+  if not get_option('fte3600-test-backend')
+    fte3600_board_test = executable('test-fte3600-linux-board',
+      'test-fte3600-linux-board.c',
+      dependencies: [deps, dependency('threads')],
+      include_directories: fte3600_test_include,
+      link_with: fte3600_driver,
+      # Syscall wrapper symbols intentionally have no public API declarations.
+      c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
+      override_options: ['c_std=gnu11'],
+      link_args: ['-Wl,--wrap=stat,--wrap=stat64,--wrap=fstat,--wrap=fstat64,--wrap=ioctl,--wrap=geteuid,--wrap=close,--wrap=poll,--wrap=__poll_chk,--wrap=read,--wrap=__read_chk,--wrap=clock_nanosleep,--wrap=clock_gettime,--wrap=realpath,--wrap=__realpath_chk,--wrap=open,--wrap=open64,--wrap=lstat,--wrap=lstat64'],
+      install: false)
+    test('fte3600-linux-board', fte3600_board_test, timeout: 180)
+  endif
+
+  fte3600_open_bench = executable('fte3600-open-bench',
+    '../tools/fte3600-open-bench.c',
+    dependencies: libfprint_dep,
+    include_directories: include_directories('../libfprint'),
+    install: false)
+  # The real benchmark is never a test: this executable wraps its public API
+  # calls and uses synthetic GObjects plus the real GLib context and timers.
+  fte3600_open_bench_test = executable('test-fte3600-open-bench',
+    'test-fte3600-open-bench.c',
+    dependencies: libfprint_dep,
+    include_directories: include_directories('../libfprint'),
+    c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
+    link_args: ['-Wl,--wrap=fp_context_new,--wrap=fp_context_get_devices,--wrap=fp_device_get_driver,--wrap=fp_device_is_open,--wrap=fp_device_open_sync,--wrap=fp_device_close_sync'],
+    install: false)
+  test('fte3600-open-bench', fte3600_open_bench_test, timeout: 30)
 endif
