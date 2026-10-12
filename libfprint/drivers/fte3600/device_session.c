@@ -95,15 +95,22 @@ clock_ms (void *context)
   return s->config.io.clock_ms (s->config.io.context);
 }
 static int
+legacy_raw_status (uint32_t value)
+{
+  /* LOAD distinguishes terminal device absence from retryable I/O failure.
+   * Preserve this callback's result, never an earlier failure diagnostic. */
+  return !failed (value) ? 0 : value == UINT32_C (0xc000000e) ? FTE3600_LEGACY_BOOT_RAW_DEVICE_ABSENT : 1;
+}
+static int
 legacy_gpio (void *context, int level)
 {
-  return failed (gpio (context, level));
+  return legacy_raw_status (gpio (context, level));
 }
 static int
 legacy_spi (void *context, const uint8_t *tx, uint8_t *rx, size_t length)
 {
   memcpy (rx, tx, length);
-  return failed (spi (context, rx, length));
+  return legacy_raw_status (spi (context, rx, length));
 }
 static enum fte3600_sensor
 legacy_sensor (enum fte3600_factory_model model)

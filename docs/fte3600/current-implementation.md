@@ -1,7 +1,8 @@
 # Current FTE3600 implementation
 
 This guide describes the independently written 0.2.1 SPI implementation now
-integrated directly into this libfprint tree. Earlier driver documentation is
+integrated directly into this libfprint tree, with subsequent Linux transport
+validation and legacy error-propagation improvements. Earlier driver documentation is
 retained as historical reference; its authentication flags, template format
 and runtime instructions do not describe this implementation.
 
@@ -18,6 +19,9 @@ verifications. Each verification reopened the device and loaded the saved
 template. This hardware observation used the 0.2.1 stable libfprint integration;
 the current tree integrates the same driver logic with official libfprint
 master. Software checks of that integration are distinct from hardware tests.
+The later transport revision passed automatic A1 open/close and timed
+cancellation/reopening tests. Its measured startup improvement and unchanged
+matcher scope are recorded in [transport performance](transport-performance.md).
 
 FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 and FT9769 paths are
 implemented. The A1 result does not validate the other families. Different-finger
@@ -194,7 +198,8 @@ The maintained driver lives in `libfprint/drivers/fte3600/`. It remains an
 `FpImageDevice`'s NBIS workflow. Generic ACPI enumeration belongs to the
 framework; device protocol and authentication policy belong to the driver.
 
-The independent implementation input is pinned to commit `47e3b32`.
+The independent implementation input is pinned in
+[`independent-source.json`](independent-source.json).
 The attributed SamSeven777 BRISK, reset/IRQ glue and firmware-installer inputs
 are pinned to `7e12c09abbd53516076b6d67a480003dc272cc8e`. The framework baseline
 is official libfprint master `6f9479c3d55f847c1b3769f28ceb99227f9858cf`.

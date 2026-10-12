@@ -23,9 +23,32 @@ struct identity
   struct stat                     dirs[5], devices[3];
   struct fte3600_linux_board_info info;
 };
+/* Two roots and eleven sysfs links resolved by inspect(). Only paths are
+ * retained: all sixteen metadata attributes are still read on every check. */
+struct path_component
+{
+  char                  *path;
+  struct stat            identity;
+  struct path_component *next;
+};
+struct path_cache
+{
+  struct { char       *resolved;
+           struct stat identity;
+  } paths[13];
+  unsigned               count;
+  struct path_component *components;
+};
+struct path_walk
+{
+  struct path_cache *cache;
+  unsigned           next;
+  int                reuse;
+};
 struct fte3600_linux_board
 {
   struct identity                   id;
+  struct path_cache                 paths;
   struct fte3600_linux_board_config config;
   char                              names[3][64];
   int                               chip, reset, uio, spi, error, configured;
@@ -42,6 +65,11 @@ bad (int e)
   return -1;
 }
 static int
+same_stat (const struct stat *a, const struct stat *b)
+{
+  return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_rdev == b->st_rdev && a->st_mode == b->st_mode;
+}
+static int
 join (char *out, const char *a, const char *b)
 {
   int n = snprintf (out, PATH_MAX, "%s/%s", a, b);
@@ -49,12 +77,87 @@ join (char *out, const char *a, const char *b)
   return n < 0 || n >= PATH_MAX ? bad (ENAMETOOLONG) : 0;
 }
 static int
-resolve (char *out, const char *a, const char *b, const char *root)
+remember_components (struct path_cache *cache, const char *resolved)
+{
+  char path[PATH_MAX];
+
+  strcpy (path, resolved);
+  for(;;)
+    {
+      struct path_component *p = cache->components;
+      char *last;
+      while(p && strcmp (p->path, path))
+        p = p->next;
+      if(!p)
+        {
+          p = calloc (1, sizeof (*p));
+          if(!p)
+            return -1;
+          p->path = strdup (path);
+          if(!p->path || lstat (path, &p->identity) || !S_ISDIR (p->identity.st_mode))
+            {
+              int e = errno ? errno : ENODEV;
+              free (p->path);
+              free (p);
+              return bad (e);
+            }
+          p->next = cache->components;
+          cache->components = p;
+        }
+      if(!strcmp (path, "/"))
+        return 0;
+      last = strrchr (path, '/');
+      if(last == path)
+        path[1] = 0;
+      else
+        *last = 0;
+    }
+}
+static int
+check_components (const struct path_cache *cache)
+{
+  for(const struct path_component *p = cache->components; p; p = p->next)
+    {
+      struct stat st;
+      if(lstat (p->path, &st) || !same_stat (&st, &p->identity))
+        return bad (ESTALE);
+    }
+  return 0;
+}
+static int
+resolve_path (struct path_walk *walk, const char *path, char *out)
+{
+  struct path_cache *cache = walk->cache;
+  struct stat st;
+  unsigned i = walk->next++;
+
+  if (!cache)
+    return realpath (path, out) ? 0 : -1;
+  if (i >= sizeof (cache->paths) / sizeof (cache->paths[0]))
+    return bad (EOVERFLOW);
+  if (walk->reuse)
+    {
+      if (i >= cache->count || stat (path, &st) || !same_stat (&st, &cache->paths[i].identity))
+        return bad (ESTALE);
+      strcpy (out, cache->paths[i].resolved);
+      return 0;
+    }
+  if (!realpath (path, out) || stat (out, &st) || remember_components (cache, out))
+    return -1;
+  cache->paths[i].resolved = strdup (out);
+  if (!cache->paths[i].resolved)
+    return -1;
+  cache->paths[i].identity = st;
+  ++cache->count;
+  return 0;
+}
+static int
+resolve (struct path_walk *walk, char *out, const char *a, const char *b, const char *root)
 {
   char p[PATH_MAX];
   size_t n = strlen (root);
 
-  if (join (p, a, b) || !realpath (p, out))
+  if (join (p, a, b) || resolve_path (walk, p, out))
     return -1;
   if (strncmp (out, root, n) || (out[n] && out[n] != '/'))
     return bad (EXDEV);
@@ -145,24 +248,21 @@ name_ok (const char *name, const char *prefix, int dot)
   return digits && seen_dot == dot;
 }
 static int
-same_stat (const struct stat *a, const struct stat *b)
-{
-  return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_rdev == b->st_rdev && a->st_mode == b->st_mode;
-}
-static int
-driver (const char *p, const char *root, const char *name)
+driver (struct path_walk *walk, const char *p, const char *root, const char *name)
 {
   char path[PATH_MAX];
   const char *base;
 
-  if (resolve (path, p, "driver", root))
+  if (resolve (walk, path, p, "driver", root))
     return -1;
   base = strrchr (path, '/');
   return !base || strcmp (base + 1, name) ? bad (ENODEV) : 0;
 }
 static int
-inspect (const struct fte3600_linux_board_config *c, struct identity *id)
+inspect (const struct fte3600_linux_board_config *c, struct identity *id,
+         struct path_cache *cache)
 {
+  struct path_walk walk = {cache, 0, cache && cache->count};
   char p[PATH_MAX], q[PATH_MAX], text[128], rel[128];
   const char *names[3];
   uint64_t n;
@@ -172,9 +272,14 @@ inspect (const struct fte3600_linux_board_config *c, struct identity *id)
   if (!c || !name_ok (c->spi, "spidev", 1) || !name_ok (c->gpio, "gpiochip", 0) ||
       !name_ok (c->uio, "uio", 0))
     return bad (EINVAL);
+  /* Check each unique canonical component once, without following a new
+   * symlink. Otherwise a renamed directory behind a forwarding symlink
+   * could retain its inode while silently changing a validated pathname. */
+  if(walk.reuse && check_components (cache))
+    return -1;
   memset (id, 0, sizeof (*id));
-  if (!realpath (c->sys_root ? c->sys_root : "/sys", id->sys) ||
-      !realpath (c->dev_root ? c->dev_root : "/dev", id->dev))
+  if (resolve_path (&walk, c->sys_root ? c->sys_root : "/sys", id->sys) ||
+      resolve_path (&walk, c->dev_root ? c->dev_root : "/dev", id->dev))
     return -1;
   if (number (id->sys, "module/spidev/parameters/bufsiz", &n) || !n || n > UINT32_MAX)
     return bad (EPROTO);
@@ -183,19 +288,19 @@ inspect (const struct fte3600_linux_board_config *c, struct identity *id)
   names[1] = c->gpio;
   names[2] = c->uio;
   snprintf (rel, sizeof (rel), "class/spidev/%s", c->spi);
-  if (resolve (id->classes[0], id->sys, rel, id->sys) ||
-      resolve (id->physical, id->classes[0], "device", id->sys) ||
-      driver (id->physical, id->sys, "spidev") ||
-      resolve (p, id->physical, "firmware_node", id->sys) || exact (p, "hid", "FTE3600"))
+  if (resolve (&walk, id->classes[0], id->sys, rel, id->sys) ||
+      resolve (&walk, id->physical, id->classes[0], "device", id->sys) ||
+      driver (&walk, id->physical, id->sys, "spidev") ||
+      resolve (&walk, p, id->physical, "firmware_node", id->sys) || exact (p, "hid", "FTE3600"))
     return -1;
   snprintf (rel, sizeof (rel), "bus/gpio/devices/%s", c->gpio);
-  if (resolve (id->classes[1], id->sys, rel, id->sys) ||
+  if (resolve (&walk, id->classes[1], id->sys, rel, id->sys) ||
       parent (id->glue, id->classes[1]) || parent (p, id->glue) ||
-      strcmp (p, id->physical) || driver (id->glue, id->sys, "fte3600-glue"))
+      strcmp (p, id->physical) || driver (&walk, id->glue, id->sys, "fte3600-glue"))
     return bad (ENODEV);
   snprintf (rel, sizeof (rel), "class/uio/%s", c->uio);
-  if (resolve (id->classes[2], id->sys, rel, id->sys) ||
-      resolve (p, id->classes[2], "device", id->sys) || strcmp (p, id->glue) ||
+  if (resolve (&walk, id->classes[2], id->sys, rel, id->sys) ||
+      resolve (&walk, p, id->classes[2], "device", id->sys) || strcmp (p, id->glue) ||
       exact (id->classes[2], "name", "fte3600-irq") || exact (id->classes[2], "version", "2"))
     return bad (ENODEV);
   if (exact (id->glue, "fte3600_glue_abi", "2") || exact (id->glue, "fte3600_ngpio", "1") ||
@@ -225,12 +330,14 @@ inspect (const struct fte3600_linux_board_config *c, struct identity *id)
           id->devices[i].st_rdev != makedev (maj, min))
         return bad (ENODEV);
       snprintf (rel, sizeof (rel), "dev/char/%u:%u", maj, min);
-      if (resolve (q, id->sys, rel, id->sys) || strcmp (q, id->classes[i]) ||
+      if (resolve (&walk, q, id->sys, rel, id->sys) || strcmp (q, id->classes[i]) ||
           stat (id->classes[i], &id->dirs[i]))
         return bad (ENODEV);
     }
   if (stat (id->physical, &id->dirs[3]) || stat (id->glue, &id->dirs[4]))
     return -1;
+  if (cache && walk.next != cache->count)
+    return bad (ESTALE);
   return 0;
 }
 int
@@ -241,7 +348,7 @@ fte3600_linux_board_validate (const struct fte3600_linux_board_config *c,
 
   if (!info)
     return bad (EINVAL);
-  if (inspect (c, &id))
+  if (inspect (c, &id, NULL))
     return -1;
   *info = id.info;
   return 0;
@@ -263,7 +370,7 @@ current (struct fte3600_linux_board *b, int ignore_error)
   if (!ignore_error && ((b->config.cancelled && *b->config.cancelled) ||
                         (b->config.is_cancelled && b->config.is_cancelled (b->config.cancel_context))))
     return latch (b, ECANCELED);
-  if (inspect (&b->config, &now))
+  if (inspect (&b->config, &now, &b->paths))
     return latch (b, ESTALE);
   if (strcmp (now.physical, b->id.physical) || strcmp (now.glue, b->id.glue) ||
       memcmp (&now.info, &b->id.info, sizeof (now.info)))
@@ -474,7 +581,7 @@ fte3600_linux_board_open (const struct fte3600_linux_board_config *c,
   if (!b)
     return -1;
   b->chip = b->reset = b->uio = b->spi = -1;
-  if (inspect (c, &b->id))
+  if (inspect (c, &b->id, &b->paths))
     goto fail;
   b->config = *c;
   if (b->config.transfer_capacity > b->id.info.spi_bufsiz)
@@ -668,6 +775,15 @@ fte3600_linux_board_close (struct fte3600_linux_board *b)
   for(unsigned i = 0; i < 4; ++i)
     if(fds[i] >= 0 && close (fds[i]) < 0 && !saved)
       saved = errno;
+  for(unsigned i = 0; i < b->paths.count; ++i)
+    free (b->paths.paths[i].resolved);
+  while(b->paths.components)
+    {
+      struct path_component *p = b->paths.components;
+      b->paths.components = p->next;
+      free (p->path);
+      free (p);
+    }
   free (b->receive);
   free (b);
   return saved ? bad (saved) : 0;
