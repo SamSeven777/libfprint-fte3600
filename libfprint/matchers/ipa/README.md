@@ -1,7 +1,6 @@
 # Reusing the 2D-IPA (2D Invariant Point Attention) core
 
-[Matcher architecture](../../../docs/fte3600/architecture.md) ·
-[Documentation index](../../../docs/fte3600/README.md)
+[FTE3600 installation](../../../docs/fte3600/install.md)
 
 `ipa.c` and `ipa.h` implement an independent, host-based biometric feature
 extractor and rigid point-set matcher. They depend only on GLib, the C library,

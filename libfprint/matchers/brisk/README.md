@@ -1,7 +1,6 @@
 # Reusing the BRISK-style core
 
-[Matcher architecture](../../../docs/fte3600/architecture.md) ·
-[Documentation index](../../../docs/fte3600/README.md)
+[FTE3600 installation](../../../docs/fte3600/install.md)
 
 `brisk.c` and `brisk.h` implement image normalization, feature extraction and
 rigid-match evidence. They depend only on GLib, the C library and libm. They

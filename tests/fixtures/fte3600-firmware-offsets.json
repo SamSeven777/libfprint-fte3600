@@ -1,0 +1,62 @@
+[
+  {
+    "label": "FT9338",
+    "size": 14184,
+    "file_offset": 412752
+  },
+  {
+    "label": "FT9348",
+    "size": 10312,
+    "file_offset": 426944
+  },
+  {
+    "label": "FT9361",
+    "size": 10396,
+    "file_offset": 437264
+  },
+  {
+    "label": "FT9368-app",
+    "size": 27120,
+    "file_offset": 447664
+  },
+  {
+    "label": "FT9368-pramboot",
+    "size": 6096,
+    "file_offset": 474784
+  },
+  {
+    "label": "FT9536",
+    "size": 11934,
+    "file_offset": 480880
+  },
+  {
+    "label": "FT9338",
+    "size": 14184,
+    "file_offset": 465312
+  },
+  {
+    "label": "FT9348",
+    "size": 10312,
+    "file_offset": 479504
+  },
+  {
+    "label": "FT9361",
+    "size": 10396,
+    "file_offset": 489824
+  },
+  {
+    "label": "FT9368-app",
+    "size": 27120,
+    "file_offset": 500224
+  },
+  {
+    "label": "FT9368-pramboot",
+    "size": 6096,
+    "file_offset": 527344
+  },
+  {
+    "label": "FT9536",
+    "size": 11934,
+    "file_offset": 533440
+  }
+]
