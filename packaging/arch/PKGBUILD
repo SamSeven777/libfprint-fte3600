@@ -11,6 +11,7 @@ license=(LGPL-2.1-or-later GPL-2.0-only MIT)
 groups=(fprint)
 depends=(libgcc glib2 glibc libgudev libgusb openssl pixman dkms python)
 makedepends=(cairo git glib2-devel gobject-introspection meson ninja python)
+checkdepends=(umockdev)
 provides=("libfprint=$pkgver" 'libfprint-2.so=2-64')
 conflicts=(libfprint)
 install=fte3600.install
@@ -49,8 +50,7 @@ build() {
     --buildtype=release
     -Db_lto=true
     -Dwerror=true
-    -Ddrivers=all,fte3600
-    -Dfte3600_personal_auth=true
+    -Ddrivers=all
     -Dgtk-examples=false
     -Ddoc=false
     -Dinstalled-tests=false
@@ -62,12 +62,7 @@ build() {
 
 check() {
   meson test -C "$srcdir/build" --print-errorlogs --no-rebuild \
-    fpi-device-cancel fpi-spi-transfer fte3600-context fte3600-resources fte3600-driver \
-    fte3600-sensor fte3600-firmware fte3600-protocol fte3600-lifecycle \
-    brisk-core fte3600-brisk fte3600-template \
-    fw9369-protocol ft93xx-protocol ft9368-protocol \
-    ft9368-backend fw9369-backend ft93xx-backend legacy38-recovery \
-    fte3600-special-probe fte3600-family-template fte3600-auth-lifecycle \
+    fpi-device fp-device fp-context-udev fte3600-auth \
     fte3600-install-firmware fte3600-setup fte3600-pair
 }
 
@@ -82,6 +77,7 @@ package() {
     install -Dm644 "$file" "$pkgdir/usr/src/fte3600-0.2/${file##*/}"
   done
   install -Dm755 "$srcdir/libfprint/scripts/fte3600-device-allow.sh" "$pkgdir/usr/bin/fte3600-device-allow"
+  install -Dm755 "$srcdir/libfprint/scripts/fte3600-pair.py" "$pkgdir/usr/libexec/fte3600-pair"
   install -Dm644 "$srcdir/libfprint/config/modprobe.d/fte3600-acpi-spidev.conf" "$pkgdir/usr/lib/modprobe.d/fte3600-acpi-spidev.conf"
   install -Dm644 "$srcdir/libfprint/config/udev/70-fte3600-acpi-spidev.rules" "$pkgdir/usr/lib/udev/rules.d/70-fte3600-acpi-spidev.rules"
 

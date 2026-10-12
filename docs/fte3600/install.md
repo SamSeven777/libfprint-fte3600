@@ -1,3 +1,8 @@
+> **Historical reference.** This document describes the previous implementation.
+> Use the [current implementation guide](current-implementation.md) for
+> current build, installation, authentication and validation information.
+> Earlier commands and hardware reports below retain their original scope.
+
 # FTE3600 Build & Installation Guide
 
 [Documentation Index](README.md) · [Wire Protocols](protocols.md) · [Troubleshooting](troubleshooting.md)

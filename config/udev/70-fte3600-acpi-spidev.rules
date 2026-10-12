@@ -1,5 +1,5 @@
 # Experimental ACPI glue and stock spidev. No physical gpiochip permissions.
-# Event-local guard: the Meson rule and standalone setup rule may coexist.
+# Event-local guard: distribution and standalone setup copies may coexist.
 ENV{.FTE3600_RULES_DONE}=="1", GOTO="fte3600_pair_end"
 ENV{.FTE3600_RULES_DONE}="1"
 ACTION=="add|change", SUBSYSTEM=="spi", DRIVER=="", ENV{MODALIAS}=="acpi:FTE3600:*", RUN{builtin}+="kmod load spi:spidev", RUN+="/bin/sh -c 'echo spidev > %S%p/driver_override && echo %k > %S%p/subsystem/drivers/spidev/bind'"

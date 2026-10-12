@@ -1,57 +1,44 @@
 # FTE3600 support for libfprint
 
-This downstream libfprint fork implements experimental Linux support for eight
-FocalTech sensor profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368,
-FW9369 (silicon ID 9362), and FT9769 (IDs 9391/9392).
+This downstream libfprint fork provides experimental Linux SPI support for
+FocalTech FTE3600 devices. The current driver uses the independently written
+0.2.1 device implementation and the attributed SamSeven777 BRISK matcher.
+Enrollment, saved prints, verification and identification use libfprint's
+normal API. Experimental personal-use BRISK authentication is enabled when
+the `fte3600` driver is built; there is no separate authentication option.
 
-The current `main` uses the distribution's **stock spidev** for SPI transfers
-and a small **ACPI reset/IRQ glue module** for board resources. Sensor identity
-is detected at runtime; there is no laptop-model whitelist. The glue is not
-included in the upstream kernel and still requires a trusted module signature
-where Secure Boot requires one.
+**Start with the [current implementation and installation guide](docs/fte3600/current-implementation.md).**
+It covers firmware, the ACPI reset/IRQ glue, service permissions, native Meson
+builds, migration and rollback.
 
-Capture backends exist for all eight profiles. On 2026-10-05, the maintainer
-reported current-main hardware testing on One-Netbook A1, and a GPD Pocket 3
-report demonstrated capture and close/reopen on unmodified main `7ea5cfc`.
-These reports do not establish all-device compatibility, image quality or a
-complete authentication/power test matrix. Read the
-[support and hardware status](docs/fte3600/status.md) for their scope before testing.
+```sh
+meson setup build -Ddrivers=fte3600 -Ddoc=false -Dintrospection=false \
+  -Dinstalled-tests=false
+meson compile -C build
+```
 
-<a id="build-and-use"></a>
+The driver uses distribution spidev plus this repository's ACPI reset/IRQ
+glue. It discovers the device through ACPI resources rather than a laptop
+model whitelist. Firmware remains external and is not bundled.
 
-## Getting started
+On 2026-10-12, the 0.2.1 production driver completed enrollment and three
+positive verification attempts on a One-Netbook A1 with an FT9361 sensor,
+running NixOS x86_64. That observation used the stable libfprint integration;
+this publication integrates the same driver logic with official libfprint
+master. The other implemented sensor families, negative controls, population
+accuracy and physical suspend behavior remain unvalidated. Windows parity is
+not established, and USB devices are outside this implementation.
 
-1. Follow the [installation guide](docs/fte3600/install.md) for dependencies,
-   chip-specific firmware, build options and rollback.
-2. Follow [ACPI glue and spidev integration](docs/fte3600/acpi-spidev.md) to
-   migrate an older bridge installation and configure the current transport.
-3. Use the [troubleshooting guide](docs/fte3600/troubleshooting.md) to separate
-   resource, permission, identification and capture failures.
+When migrating from the previous driver, preserve the existing prints and
+your rollback configuration, then enroll new prints. Compatibility with the
+previous SamSeven777 template format has not been established. Keep password
+access while evaluating the experimental authentication policy.
 
-Select `-Ddrivers=fte3600` or `-Ddrivers=all,fte3600` when building. Authentication
-is disabled by default; `-Dfte3600_personal_auth=true` enables experimental
-BRISK enrollment and verification. Keep a working password fallback. See
-[authentication and template compatibility](docs/fte3600/family-authentication.md)
-and [security](SECURITY.md) for the validation limits.
+- [Current guide](docs/fte3600/current-implementation.md): build, use, limits and provenance.
+- [Contributing](CONTRIBUTING.md): software checks and contribution scope.
+- [Historical documentation index](docs/fte3600/README.md): retained earlier implementation and validation references.
+- [Security reporting](SECURITY.md).
 
-The board-specific [Medion E3224 diagnostic](https://github.com/SamSeven777/libfprint-fte3600/blob/medion-spidev/docs/fte3600/medion-spidev.md)
-lives on the separate `medion-spidev` branch. Its standalone testing procedure
-is distinct from installing this driver.
-
-## Documentation and development
-
-The **[documentation index](docs/fte3600/README.md)** groups user guides,
-architecture, protocols, Windows research and dated validation records.
-
-- [Architecture](docs/fte3600/architecture.md): driver, transport, protocol,
-  algorithm and build boundaries.
-- [Matcher cores](docs/fte3600/matcher-architectures.md): reusable BRISK and
-  2D-IPA interfaces, separate from sensor protocols.
-- [Contributing](CONTRIBUTING.md): development checks and documentation policy.
-- [Upstream preparation](docs/fte3600/upstream-preparation.md): proposed kernel
-  and libfprint review boundaries and outstanding evidence.
-
-The host implementation is independently written under LGPL-2.1-or-later and
-does not execute a vendor matching library. Proprietary sensor firmware is
-external and is not bundled. [Implementation provenance](docs/fte3600/clean-room.md)
-records the use of Windows binary/transport analysis and hardware experiments.
+The host implementation is LGPL-2.1-or-later. No vendor matching library is
+executed; proprietary firmware, biometric captures and templates are excluded
+from this repository.

@@ -2,20 +2,19 @@
 
 General libfprint development guidance remains in [HACKING.md](HACKING.md).
 This file adds rules for the experimental FTE3600 work.
-The [documentation index](docs/fte3600/README.md) is the entry point for
-installation, architecture, protocol references and validation records.
+The [current implementation guide](docs/fte3600/current-implementation.md) is the
+entry point for installation, architecture, validation limits and provenance.
+The [earlier documentation index](docs/fte3600/README.md) is historical reference.
 
-The [architecture](docs/fte3600/architecture.md) defines the module boundaries.
-Keep hardware commands in the wire module, protocol timing in its own header,
-and device lifecycle in the driver. The reusable BRISK core must build with
-only GLib and libm; it accepts image views and returns numerical evidence.
-Sensor geometry profiles, persistent template formats and authentication
-decisions belong in adapters. Do not import driver/build-policy headers into
-the generic matcher to enable another sensor.
+The maintained driver lives in `libfprint/drivers/fte3600/`. Keep generic ACPI
+enumeration in the framework and device protocol/authentication policy in the
+driver. The attributed BRISK dependency remains separate from sensor geometry,
+persistent template formats and authentication decisions. Changes to that
+approved dependency need their own explicit scope and attribution.
 
 ## Before opening a change
 
-Run both policy configurations:
+Build production and the separate synthetic backend, then run their software checks:
 
 ```sh
 ./scripts/check-fte3600.sh
@@ -64,11 +63,10 @@ Write maintained documentation in English. Add new documents to the
 Prefer linking to the document responsible for a topic over copying its
 instructions into several files:
 
-- `install.md`: dependencies, firmware, library build and enrollment.
-- `acpi-spidev.md`: transport installation, migration and system integration.
-- `status.md`: implemented support and reported hardware results.
-- `architecture.md` and protocol references: implementation contracts.
-- Dated audit/validation records: findings and checks for a specific revision.
+- `current-implementation.md`: current build, firmware, migration, architecture
+  and the scope of hardware/software evidence.
+- Existing guides and dated records: historical findings for their stated
+  revision; preserve their paths and label them accordingly.
 
 Write current guides in the present tense. Identify the source version and
 scope of Windows observations. Mark historical records explicitly and link

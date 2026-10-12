@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Synthetic sysfs topology and native file-boundary tests; no real device I/O."""
-import ast
 import importlib.util
 import contextlib
 import io
@@ -454,14 +453,10 @@ class PairTests(unittest.TestCase):
                 (self.irq / name).rmdir()
             opened.assert_not_called()
 
-    def test_generated_and_setup_rules_are_identical_and_guarded(self):
-        source = (ROOT / "libfprint/fprint-list-udev-rules.c").read_text()
-        block = re.search(r'g_print \("%s",\s*((?:"(?:\\.|[^"\\])*"\s*)+)\);', source)
-        self.assertIsNotNone(block)
-        generated = "".join(ast.literal_eval(token) for token in
-                            re.findall(r'"(?:\\.|[^"\\])*"', block.group(1)))
+    def test_standalone_pairing_rules_are_guarded(self):
+        # Board pairing is installed separately from libfprint's generic
+        # spidev-binding rule by setup-fte3600.sh or the distribution package.
         standalone = (ROOT / "config/udev/70-fte3600-acpi-spidev.rules").read_text()
-        self.assertEqual(generated, standalone)
         # The leading dot makes this property event-local, so the duplicate
         # installed copy is skipped without suppressing later change events.
         guard = 'ENV{.FTE3600_RULES_DONE}=="1", GOTO="fte3600_pair_end"'

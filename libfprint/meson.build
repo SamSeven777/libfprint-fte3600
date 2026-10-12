@@ -87,17 +87,8 @@ nbis_sources = [
     'nbis/mindtct/xytreps.c',
 ]
 
-fte3600_sources = []
-driver_extra_deps = []
-if 'fte3600' in drivers
-    subdir('matchers/brisk')
-    subdir('matchers/ipa')
-    subdir('drivers/fte3600')
-    driver_extra_deps += brisk_core_dep
-    driver_extra_deps += ipa_core_dep
-endif
-
 driver_sources = {
+    'fte3600': [], # Built with driver-specific flags below.
     'upekts' : files(
         'drivers/upekts.c',
         'drivers/upek_proto.c',
@@ -132,7 +123,6 @@ driver_sources = {
     'elan' : files('drivers/elan.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
-    'fte3600' : fte3600_sources,
     'nb1010' : files('drivers/nb1010.c'),
     'virtual_image' : files('drivers/virtual-image.c'),
     'virtual_device' : files('drivers/virtual-device.c'),
@@ -159,7 +149,6 @@ helper_sources = {
     'openssl': files(),
     'pixman': files(),
     'udev': files(),
-    'gpiod': files(),
     'virtual': files('drivers/virtual-device-listener.c'),
 }
 
@@ -168,9 +157,6 @@ drivers_cflags = []
 foreach driver: drivers
     drivers_sources += driver_sources[driver]
 endforeach
-if 'fte3600' in drivers
-    drivers_cflags += fte3600_personal_auth_cflags
-endif
 foreach helper : driver_helpers
     drivers_sources += helper_sources[helper]
 endforeach
@@ -265,10 +251,17 @@ libfprint_private = static_library('fprint-private',
     link_with: libnbis,
     install: false)
 
+driver_objects = []
+if 'fte3600' in drivers
+    subdir('drivers/fte3600')
+    driver_objects += fte3600_driver.extract_all_objects(recursive: true)
+endif
+
 libfprint_drivers = static_library('fprint-drivers',
     sources: drivers_sources,
+    objects: driver_objects,
     c_args: drivers_cflags,
-    dependencies: deps + driver_extra_deps,
+    dependencies: deps,
     link_with: libfprint_private,
     install: false)
 
@@ -291,7 +284,7 @@ libfprint = shared_library(versioned_libname.split('lib')[1],
     link_depends : mapfile,
     link_with: [libfprint_drivers, libfprint_private],
     dependencies: deps,
-    install: true)
+    install: not get_option('fte3600-test-backend'))
 
 libfprint_dep = declare_dependency(link_with: libfprint,
     include_directories: root_inc,
@@ -315,32 +308,6 @@ libfprint_private_dep = declare_dependency(
         libfprint_dep,
     ]
 )
-
-# --wrap intercepts unresolved references. LTO can resolve calls inside these
-# archives before the linker sees them, bypassing the hardware test doubles.
-# Keep production LTO enabled and compile separate archives only for tests.
-libfprint_test_private = libfprint_private
-libfprint_test_drivers = libfprint_drivers
-libfprint_test_private_dep = libfprint_private_dep
-if get_option('b_lto')
-    libfprint_test_private = static_library('fprint-test-private',
-        sources: [fpi_enums, libfprint_private_sources],
-        dependencies: deps,
-        link_with: libnbis,
-        override_options: ['b_lto=false'],
-        install: false)
-    libfprint_test_drivers = static_library('fprint-test-drivers',
-        sources: drivers_sources,
-        c_args: drivers_cflags,
-        dependencies: deps + driver_extra_deps,
-        link_with: libfprint_test_private,
-        override_options: ['b_lto=false'],
-        install: false)
-    libfprint_test_private_dep = declare_dependency(
-        include_directories: include_directories('.'),
-        link_with: libfprint_test_private,
-        dependencies: [deps, libfprint_dep])
-endif
 
 udev_hwdb_list = 'fprint-list-udev-hwdb.c'
 udev_hwdb_list_file = files(udev_hwdb_list)
@@ -373,7 +340,7 @@ metainfo_generator = custom_target('metainfo',
     depend_files: drivers_sources,
     capture: true,
     command: [ metainfo ],
-    install: true,
+    install: not get_option('fte3600-test-backend'),
     install_dir: datadir / 'metainfo'
 )
 
@@ -391,7 +358,7 @@ if install_udev_rules
         depend_files: drivers_sources,
         capture: true,
         command: [ udev_rules ],
-        install: true,
+        install: not get_option('fte3600-test-backend'),
         install_dir: udev_rules_dir,
     )
 endif
@@ -446,7 +413,17 @@ if get_option('introspection')
             'GUsb-1.0',
         ],
         fatal_warnings: true,
-        install : true)
+        install : not get_option('fte3600-test-backend'))
     libfprint_gir = libfprint_girtarget[0]
     libfprint_typelib = libfprint_girtarget[1]
+endif
+
+if get_option('fte3600-test-backend')
+    if 'fte3600' not in drivers
+        error('The FTE3600 test backend requires -Ddrivers=fte3600')
+    endif
+    fte3600_api_test = executable('test-fte3600-api', 'drivers/fte3600/libfprint_api.c',
+        dependencies: libfprint_dep, install: false)
+    test('fte3600-public-api', fte3600_api_test, timeout: 180,
+        env: ['G_DEBUG=fatal-warnings', 'FP_DRIVERS_ALLOWLIST=fte3600'])
 endif
