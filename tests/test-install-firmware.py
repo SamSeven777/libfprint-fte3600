@@ -36,7 +36,7 @@ class FirmwareInstallerTest(unittest.TestCase):
         payload = bytes((index * 29 + seed) & 255 for index in range(firmware.size))
         return replace(firmware, sha256=hashlib.sha256(payload).hexdigest()), payload
 
-    def test_catalog_matches_runtime_and_audited_offsets(self):
+    def test_catalog_matches_runtime_and_fixture_offsets(self):
         runtime = (ROOT / "libfprint/drivers/fte3600/linux_firmware.c").read_text()
         entries = re.findall(
             r'\{\s*FTE3600_MODEL_([A-Z0-9_]+),\s*"([^"\n]+)",\s*(\d+),\s*"([0-9a-f]{64})"\s*\}',
@@ -47,13 +47,13 @@ class FirmwareInstallerTest(unittest.TestCase):
                      for chip, group in installer.CATALOG.items() for f in group}
         self.assertEqual(installed, expected)
         self.assertEqual(len(installed), 6)
-        inventory = json.loads((ROOT / "docs/fte3600/windows-hardware-inventory.json").read_text())
+        regions = json.loads((ROOT / "tests/fixtures/fte3600-firmware-offsets.json").read_text())
+        self.assertTrue(regions)
         firmware_by_name = {f.filename: f for group in installer.CATALOG.values() for f in group}
-        for version in inventory["versions"]:
-            for region in version["firmware_exact_matches"]:
-                firmware = firmware_by_name[region["label"].lower() + ".bin"]
-                self.assertEqual(firmware.size, region["size"])
-                self.assertIn(region["file_offset"], firmware.offsets)
+        for region in regions:
+            firmware = firmware_by_name[region["label"].lower() + ".bin"]
+            self.assertEqual(firmware.size, region["size"])
+            self.assertIn(region["file_offset"], firmware.offsets)
 
     def test_cli_selection_and_legacy_compatibility(self):
         legacy = installer.parse_arguments([])

@@ -3,7 +3,7 @@ post_install() {
   udevadm control --reload
   printf '%s\n' \
     'FTE3600 experimental: install matching kernel headers for DKMS 0.2 GPIO glue.' \
-    'Review docs/fte3600/acpi-spidev.md before migrating the old bridge.' \
+    'Review docs/fte3600/install.md#migrate-an-earlier-bridge-installation before migrating the old bridge.' \
     'spidev needs bufsiz >= 65536; reboot rather than unloading a shared module.' \
     'Generate exact companion-node fprintd permissions only after all three nodes are present.'
 }
