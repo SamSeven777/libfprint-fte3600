@@ -53,8 +53,6 @@ enum {
   PROP_FPI_USB_DEVICE,
   PROP_FPI_UDEV_DATA_SPIDEV,
   PROP_FPI_UDEV_DATA_HIDRAW,
-  PROP_FPI_UDEV_DATA_GPIO,
-  PROP_FPI_UDEV_DATA_UIO,
   PROP_FPI_DRIVER_DATA,
   N_PROPS
 };
@@ -114,17 +112,14 @@ fp_device_cancelled_cb (GCancellable *cancellable, FpDevice *self)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (self);
 
-  g_autoptr(GSource) source = g_idle_source_new ();
-
-  g_source_set_callback (source,
+  priv->current_idle_cancel_source = g_idle_source_new ();
+  g_source_set_callback (priv->current_idle_cancel_source,
                          fp_device_cancel_in_idle_cb,
                          self,
                          NULL);
-  priv->current_idle_cancel_source = source;
-  /* Cancellation may come from another thread. The main context can dispatch
-   * the source and clear the private pointer before attach returns, so retain
-   * and release the initial reference through the local pointer only. */
-  g_source_attach (source, g_task_get_context (priv->current_task));
+  g_source_attach (priv->current_idle_cancel_source,
+                   g_task_get_context (priv->current_task));
+  g_source_unref (priv->current_idle_cancel_source);
 }
 
 /* Forward the external task cancellable to the internal one. */
@@ -242,8 +237,6 @@ fp_device_finalize (GObject *object)
   g_clear_pointer (&priv->virtual_env, g_free);
   g_clear_pointer (&priv->udev_data.spidev_path, g_free);
   g_clear_pointer (&priv->udev_data.hidraw_path, g_free);
-  g_clear_pointer (&priv->udev_data.gpio_path, g_free);
-  g_clear_pointer (&priv->udev_data.uio_path, g_free);
 
   G_OBJECT_CLASS (fp_device_parent_class)->finalize (object);
 }
@@ -314,16 +307,6 @@ fp_device_get_property (GObject    *object,
         g_value_set_string (value, NULL);
       break;
 
-    case PROP_FPI_UDEV_DATA_GPIO:
-      g_value_set_string (value, cls->type == FP_DEVICE_TYPE_UDEV ?
-                          priv->udev_data.gpio_path : NULL);
-      break;
-
-    case PROP_FPI_UDEV_DATA_UIO:
-      g_value_set_string (value, cls->type == FP_DEVICE_TYPE_UDEV ?
-                          priv->udev_data.uio_path : NULL);
-      break;
-
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -366,20 +349,6 @@ fp_device_set_property (GObject      *object,
     case PROP_FPI_UDEV_DATA_HIDRAW:
       if (cls->type == FP_DEVICE_TYPE_UDEV)
         priv->udev_data.hidraw_path = g_value_dup_string (value);
-      else
-        g_assert (g_value_get_string (value) == NULL);
-      break;
-
-    case PROP_FPI_UDEV_DATA_GPIO:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        priv->udev_data.gpio_path = g_value_dup_string (value);
-      else
-        g_assert (g_value_get_string (value) == NULL);
-      break;
-
-    case PROP_FPI_UDEV_DATA_UIO:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        priv->udev_data.uio_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
       break;
@@ -613,30 +582,6 @@ fp_device_class_init (FpDeviceClass *klass)
                          "Udev data: hidraw path",
                          "Private: The path to /dev/hidrawN",
                          NULL,
-                         G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY);
-
-  /**
-   * FpDevice::fpi-udev-data-gpio: (skip)
-   *
-   * Private path to the GPIO character device associated with this sensor.
-   *
-   * Stability: private
-   */
-  properties[PROP_FPI_UDEV_DATA_GPIO] =
-    g_param_spec_string ("fpi-udev-data-gpio", "Udev data: GPIO path",
-                         "Private: The path to /dev/gpiochipN", NULL,
-                         G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY);
-
-  /**
-   * FpDevice::fpi-udev-data-uio: (skip)
-   *
-   * Private path to the UIO interrupt device associated with this sensor.
-   *
-   * Stability: private
-   */
-  properties[PROP_FPI_UDEV_DATA_UIO] =
-    g_param_spec_string ("fpi-udev-data-uio", "Udev data: UIO path",
-                         "Private: The path to /dev/uioN", NULL,
                          G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY);
 
   /**

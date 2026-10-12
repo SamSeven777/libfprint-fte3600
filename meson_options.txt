@@ -2,14 +2,6 @@ option('drivers',
        description: 'Drivers to integrate, "default" selects the default set, "all" selects all drivers',
        type: 'string',
        value: 'default')
-option('fte3600_personal_auth',
-       description: 'Enable the explicitly uncalibrated, personal-use FTE3600 verification policy',
-       type: 'boolean',
-       value: false)
-option('fte3600_ipa_auth',
-       description: 'Opt into experimental IPA/dual authentication; requires fte3600_personal_auth',
-       type: 'boolean',
-       value: false)
 option('introspection',
        description: 'Build GObject Introspection repository',
        type: 'boolean',
@@ -42,3 +34,8 @@ option('installed-tests',
        description: 'Whether to install the installed tests',
        type: 'boolean',
        value: true)
+
+option('fte3600-firmware-dir', type: 'string', value: '/usr/lib/firmware/fte3600',
+       description: 'Directory containing verified FTE3600 firmware')
+option('fte3600-test-backend', type: 'boolean', value: false,
+       description: 'Build a non-installable FTE3600 library with synthetic hardware for API tests')

@@ -21,7 +21,6 @@
     libasan
     libgusb-devel
     libgudev-devel
-    libgpiod-devel
     libubsan
     libX11-devel
     libXv-devel

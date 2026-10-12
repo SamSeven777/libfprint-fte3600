@@ -37,49 +37,17 @@ static gsize block_size = 0;
  * for the linux spidev device. The main goal are to ease memory management
  * and provide a usable asynchronous API to libfprint drivers.
  *
- * Write and read buffers are transferred sequentially by default. Drivers can
- * request a simultaneous full-duplex transfer when both buffers have the same
- * length. Full-duplex transfers are never split as that would deassert chip
- * select between chunks.
+ * Currently only transfers with a write and subsequent read are supported.
  *
  * Drivers should always use this API rather than calling read/write/ioctl on
  * the spidev device.
  *
  * Setting %G_MESSAGES_DEBUG and %FP_DEBUG_TRANSFER will result in the message
- * content being dumped unless a driver marks the transfer as sensitive.
+ * content to be dumped.
  */
 
 
 G_DEFINE_BOXED_TYPE (FpiSpiTransfer, fpi_spi_transfer, fpi_spi_transfer_ref, fpi_spi_transfer_unref)
-
-typedef struct
-{
-  FpiSpiTransferGuard callback;
-} SpiDeviceGuard;
-
-/**
- * fpi_spi_transfer_set_device_guard:
- * @device: The device whose transport session is checked
- * @guard: (nullable): Transport session check, or %NULL to remove it
- *
- * Register only while no transfer is in flight. Each newly allocated transfer
- * snapshots the function, so clearing the registration cannot bypass a guard
- * already attached to a pending message. Devices without a guard retain the
- * ordinary spidev transfer behavior.
- */
-void
-fpi_spi_transfer_set_device_guard (FpDevice *device, FpiSpiTransferGuard guard)
-{
-  SpiDeviceGuard *data = NULL;
-
-  g_return_if_fail (FP_IS_DEVICE (device));
-  if (guard)
-    {
-      data = g_new (SpiDeviceGuard, 1);
-      data->callback = guard;
-    }
-  g_object_set_data_full (G_OBJECT (device), "fpi-spi-device-guard", data, g_free);
-}
 
 static void
 log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
@@ -93,10 +61,7 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
                    transfer->length_wr,
                    transfer->length_rd);
 
-          if (transfer->sensitive)
-            g_debug ("Transfer %p buffer contents redacted (sensitive)",
-                     transfer);
-          else if (transfer->buffer_wr)
+          if (transfer->buffer_wr)
             fp_dbg_hex_dump_data (transfer->buffer_wr, transfer->length_wr);
         }
       else
@@ -112,10 +77,7 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
                    error_str,
                    transfer->length_wr,
                    transfer->length_rd);
-          if (transfer->sensitive)
-            g_debug ("Transfer %p buffer contents redacted (sensitive)",
-                     transfer);
-          else if (transfer->buffer_rd)
+          if (transfer->buffer_rd)
             fp_dbg_hex_dump_data (transfer->buffer_rd, transfer->length_rd);
         }
     }
@@ -131,21 +93,13 @@ log_transfer (FpiSpiTransfer *transfer, gboolean submit, GError *error)
  * Returns: (transfer full): A newly created #FpiSpiTransfer
  */
 FpiSpiTransfer *
-fpi_spi_transfer_new (FpDevice *device, int spidev_fd)
-{
-  return fpi_spi_transfer_new_with_buffer_size (device, spidev_fd, 0);
-}
-
-/* A nonzero size comes from the transport ABI, not the spidev module. */
-FpiSpiTransfer *
-fpi_spi_transfer_new_with_buffer_size (FpDevice *device, int spidev_fd,
-                                       gsize buffer_size)
+fpi_spi_transfer_new (FpDevice * device, int spidev_fd)
 {
   FpiSpiTransfer *self;
 
   g_assert (FP_IS_DEVICE (device));
 
-  if (buffer_size == 0 && G_UNLIKELY (block_size == 0))
+  if (G_UNLIKELY (block_size == 0))
     {
       g_autoptr(GError) error = NULL;
       g_autofree char *contents = NULL;
@@ -176,12 +130,6 @@ fpi_spi_transfer_new_with_buffer_size (FpDevice *device, int spidev_fd,
 
   self->device = device;
   self->spidev_fd = spidev_fd;
-  self->buffer_size = buffer_size ? buffer_size : block_size;
-  {
-    SpiDeviceGuard *guard = g_object_get_data (G_OBJECT (device), "fpi-spi-device-guard");
-
-    self->guard = guard ? guard->callback : NULL;
-  }
 
   return self;
 }
@@ -325,47 +273,6 @@ fpi_spi_transfer_read_full (FpiSpiTransfer *transfer,
   transfer->free_buffer_rd = free_func;
 }
 
-/**
- * fpi_spi_transfer_set_full_duplex:
- * @transfer: The #FpiSpiTransfer
- * @full_duplex: Whether to transfer the write and read buffers simultaneously
- *
- * Select whether @transfer is submitted as a simultaneous full-duplex SPI
- * transfer. In full-duplex mode, write and read buffers must both be set and
- * have the same non-zero length. The transfer must also fit into the spidev
- * block size because splitting it would deassert chip select.
- *
- * By default, write and read buffers are transferred sequentially.
- */
-void
-fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
-                                  gboolean        full_duplex)
-{
-  g_return_if_fail (transfer);
-
-  transfer->full_duplex = full_duplex;
-}
-
-/**
- * fpi_spi_transfer_set_sensitive:
- * @transfer: A #FpiSpiTransfer
- * @sensitive: Whether the transfer contains sensitive data
- *
- * Prevent the write and read buffers from being included in transfer debug
- * logs. Transfer lengths and completion status are still logged. Drivers must
- * enable this for biometric images and other secret material.
- *
- * By default, transfers are not marked as sensitive.
- */
-void
-fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
-                                gboolean        sensitive)
-{
-  g_return_if_fail (transfer);
-
-  transfer->sensitive = sensitive;
-}
-
 static void
 transfer_finish_cb (GObject *source_object, GAsyncResult *res, gpointer user_data)
 {
@@ -384,8 +291,7 @@ transfer_finish_cb (GObject *source_object, GAsyncResult *res, gpointer user_dat
 }
 
 static int
-transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
-                gsize *expected)
+transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred)
 {
   struct spi_ioc_transfer xfer[2] = { 0 };
   gsize skip = *transferred;
@@ -395,10 +301,10 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
 
   if (transfer->buffer_wr)
     {
-      if (skip < transfer->length_wr && len < transfer->buffer_size)
+      if (skip < transfer->length_wr && len < block_size)
         {
           xfer[transfers].tx_buf = (gsize) transfer->buffer_wr + skip;
-          xfer[transfers].len = MIN (transfer->buffer_size, transfer->length_wr - skip);
+          xfer[transfers].len = MIN (block_size, transfer->length_wr - skip);
 
           len += xfer[transfers].len;
           skip += xfer[transfers].len;
@@ -412,10 +318,10 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
 
   if (transfer->buffer_rd)
     {
-      if (skip < transfer->length_rd && len < transfer->buffer_size)
+      if (skip < transfer->length_rd && len < block_size)
         {
           xfer[transfers].rx_buf = (gsize) transfer->buffer_rd + skip;
-          xfer[transfers].len = MIN (transfer->buffer_size, transfer->length_rd - skip);
+          xfer[transfers].len = MIN (block_size, transfer->length_rd - skip);
 
           len += xfer[transfers].len;
           /* skip += xfer[transfers].len; */
@@ -449,46 +355,11 @@ transfer_chunk (FpiSpiTransfer *transfer, gsize full_length, gsize *transferred,
 
   /* This ioctl cannot be interrupted. */
   status = ioctl (transfer->spidev_fd, SPI_IOC_MESSAGE (transfers), xfer);
-  *expected = len;
-  if (status >= 0 && (gsize) status == len)
+
+  if (status >= 0)
     *transferred += len;
 
   return status;
-}
-
-/**
- * fpi_spi_transfer_set_prepare:
- * @transfer: A single full-duplex SPI transfer
- * @prepare: (nullable): Worker callback immediately before the message
- *
- * Set a preparation callback, for example to release a reset GPIO. Buffer and
- * session validation precede this callback. Preparation and the SPI ioctl run
- * in the same worker without another main-context dispatch or guard between
- * them. The normal post-transfer guard and complete-length check still apply.
- * A cancelled or invalid transfer does not run preparation.
- */
-void
-fpi_spi_transfer_set_prepare (FpiSpiTransfer       *transfer,
-                              FpiSpiTransferPrepare prepare)
-{
-  g_return_if_fail (transfer != NULL);
-  g_return_if_fail (transfer->callback == NULL);
-  transfer->prepare = prepare;
-}
-
-static int
-transfer_full_duplex (FpiSpiTransfer *transfer, GError **error)
-{
-  struct spi_ioc_transfer xfer = {
-    .tx_buf = (gsize) transfer->buffer_wr,
-    .rx_buf = (gsize) transfer->buffer_rd,
-    .len = transfer->length_wr,
-  };
-
-  if (transfer->prepare && !transfer->prepare (transfer->device, error))
-    return -1;
-  /* This ioctl cannot be interrupted. */
-  return ioctl (transfer->spidev_fd, SPI_IOC_MESSAGE (1), &xfer);
 }
 
 static void
@@ -502,88 +373,12 @@ transfer_thread_func (GTask        *task,
   gsize transferred = 0;
   int status = 0;
 
-  g_autoptr(GError) error = NULL;
-
-  if (transfer->prepare && g_task_return_error_if_cancelled (task))
-    return;
-
-  if (transfer->prepare && !transfer->full_duplex)
-    {
-      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-                               "SPI preparation requires one full-duplex message");
-      return;
-    }
-
   if (transfer->buffer_wr == NULL && transfer->buffer_rd == NULL)
     {
       g_task_return_new_error (task,
                                G_IO_ERROR,
                                G_IO_ERROR_INVALID_ARGUMENT,
                                "Transfer with neither write or read!");
-      return;
-    }
-
-  if (transfer->full_duplex)
-    {
-      if (transfer->buffer_wr == NULL || transfer->buffer_rd == NULL ||
-          transfer->length_wr <= 0 || transfer->length_rd <= 0 ||
-          transfer->length_wr != transfer->length_rd)
-        {
-          g_task_return_new_error (task,
-                                   G_IO_ERROR,
-                                   G_IO_ERROR_INVALID_ARGUMENT,
-                                   "Full-duplex SPI transfers require equally sized write and read buffers");
-          return;
-        }
-
-      if ((gsize) transfer->length_wr > transfer->buffer_size)
-        {
-          g_task_return_new_error (task,
-                                   G_IO_ERROR,
-                                   G_IO_ERROR_MESSAGE_TOO_LARGE,
-                                   "Full-duplex SPI transfer length %zd exceeds "
-                                   "transport buffer size %" G_GSIZE_FORMAT,
-                                   transfer->length_wr,
-                                   transfer->buffer_size);
-          return;
-        }
-
-      if (transfer->guard && !transfer->guard (transfer->device, &error))
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-          return;
-        }
-      if (transfer->prepare && g_task_return_error_if_cancelled (task))
-        return;
-      status = transfer_full_duplex (transfer, &error);
-      if (error)
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-        }
-      else if (status < 0)
-        {
-          g_task_return_new_error (task,
-                                   G_IO_ERROR,
-                                   g_io_error_from_errno (errno),
-                                   "Error invoking ioctl for SPI transfer (%d)",
-                                   errno);
-        }
-      else if ((gsize) status != (gsize) transfer->length_wr)
-        {
-          g_task_return_new_error (task,
-                                   G_IO_ERROR,
-                                   G_IO_ERROR_PARTIAL_INPUT,
-                                   "Short full-duplex SPI transfer (%d of %zd bytes)",
-                                   status,
-                                   transfer->length_wr);
-        }
-      else
-        {
-          if (transfer->guard && !transfer->guard (transfer->device, &error))
-            g_task_return_error (task, g_steal_pointer (&error));
-          else
-            g_task_return_boolean (task, TRUE);
-        }
       return;
     }
 
@@ -594,28 +389,7 @@ transfer_thread_func (GTask        *task,
     full_length += transfer->length_rd;
 
   while (transferred < full_length && status >= 0)
-    {
-      gsize expected = 0;
-
-      if (transfer->guard && !transfer->guard (transfer->device, &error))
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-          return;
-        }
-      status = transfer_chunk (transfer, full_length, &transferred, &expected);
-      if (status >= 0 && (gsize) status != expected)
-        {
-          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT,
-                                   "Short SPI transfer (%d of %" G_GSIZE_FORMAT " bytes)",
-                                   status, expected);
-          return;
-        }
-      if (status >= 0 && transfer->guard && !transfer->guard (transfer->device, &error))
-        {
-          g_task_return_error (task, g_steal_pointer (&error));
-          return;
-        }
-    }
+    status = transfer_chunk (transfer, full_length, &transferred);
 
   if (status < 0)
     {
@@ -719,8 +493,7 @@ fpi_spi_transfer_submit_sync (FpiSpiTransfer *transfer,
 
   log_transfer (transfer, FALSE, err);
 
-  if (err)
-    g_propagate_error (error, err);
+  g_propagate_error (error, err);
 
   return res;
 }

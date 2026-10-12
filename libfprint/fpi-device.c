@@ -467,10 +467,8 @@ fpi_device_add_timeout (FpDevice      *device,
 
   g_source_attach (&source->source, context);
   g_source_set_callback (&source->source, (GSourceFunc) func, user_data, destroy_notify);
-  /* The main-context time may predate the operation which requested this
-   * delay. Hardware minimum waits must start at the actual scheduling time. */
   g_source_set_ready_time (&source->source,
-                           g_get_monotonic_time () + interval * (guint64) 1000);
+                           g_source_get_time (&source->source) + interval * (guint64) 1000);
   priv->sources = g_slist_prepend (priv->sources, source);
   g_source_unref (&source->source);
 
@@ -505,7 +503,7 @@ fpi_device_get_usb_device (FpDevice *device)
  * Get a subtype-specific hardware resource for this #FpDevice. Only permissible to call if the
  * #FpDevice is of type %FP_DEVICE_TYPE_UDEV.
  *
- * Returns: The device path for SPIDEV, FTE3600, GPIO, UIO or HIDRAW.
+ * Returns: Depends on @subtype; for SPIDEV/HIDRAW returns a path to the relevant device.
  */
 gpointer
 fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
@@ -520,15 +518,8 @@ fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
     case FPI_DEVICE_UDEV_SUBTYPE_HIDRAW:
       return priv->udev_data.hidraw_path;
 
-    case FPI_DEVICE_UDEV_SUBTYPE_FTE3600:
     case FPI_DEVICE_UDEV_SUBTYPE_SPIDEV:
       return priv->udev_data.spidev_path;
-
-    case FPI_DEVICE_UDEV_SUBTYPE_GPIO:
-      return priv->udev_data.gpio_path;
-
-    case FPI_DEVICE_UDEV_SUBTYPE_UIO:
-      return priv->udev_data.uio_path;
 
     default:
       g_return_val_if_reached (NULL);
@@ -1008,15 +999,7 @@ clear_device_cancel_action (FpDevice *device)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
-  /* Stop forwarding external cancellation, then wait for any internal cancel
-   * handler to finish publishing/attaching its source. Clearing the source
-   * first could destroy it before attach, or miss a source published later. */
-  if (priv->current_task_cancellable_id)
-    {
-      g_cancellable_disconnect (g_task_get_cancellable (priv->current_task),
-                                priv->current_task_cancellable_id);
-      priv->current_task_cancellable_id = 0;
-    }
+  g_clear_pointer (&priv->current_idle_cancel_source, g_source_destroy);
 
   if (priv->current_cancellable_id)
     {
@@ -1025,7 +1008,12 @@ clear_device_cancel_action (FpDevice *device)
       priv->current_cancellable_id = 0;
     }
 
-  g_clear_pointer (&priv->current_idle_cancel_source, g_source_destroy);
+  if (priv->current_task_cancellable_id)
+    {
+      g_cancellable_disconnect (g_task_get_cancellable (priv->current_task),
+                                priv->current_task_cancellable_id);
+      priv->current_task_cancellable_id = 0;
+    }
 }
 
 typedef enum _FpDeviceTaskReturnType {

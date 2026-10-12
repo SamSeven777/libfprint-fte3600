@@ -331,12 +331,7 @@ save_image_to_pgm (FpImage *img, const char *path)
       return FALSE;
     }
 
-  if (fclose (fd) != 0)
-    {
-      g_critical ("failed closing '%s' after writing: %s",
-                  path, g_strerror (errno));
-      return FALSE;
-    }
+  fclose (fd);
   g_debug ("written to '%s'", path);
 
   return TRUE;

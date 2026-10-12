@@ -37,44 +37,20 @@ print_driver (const FpDeviceClass *cls)
 
   for (entry = cls->id_table; entry->udev_types != 0; entry++)
     {
-      if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_FTE3600)
-        {
-          /* The glue owns reset and an IRQ-only UIO device; SPI remains stock spidev.
-           * The installed helper validates the common physical SPI parent. */
-          g_print ("%s",
-                   "# Experimental ACPI glue and stock spidev. No physical gpiochip permissions.\n"
-                   "# Event-local guard: the Meson rule and standalone setup rule may coexist.\n"
-                   "ENV{.FTE3600_RULES_DONE}==\"1\", GOTO=\"fte3600_pair_end\"\n"
-                   "ENV{.FTE3600_RULES_DONE}=\"1\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", ENV{MODALIAS}==\"acpi:FTE3600:*\", RUN{builtin}+=\"kmod load spi:spidev\", RUN+=\"/bin/sh -c 'echo spidev > %S%p/driver_override && echo %k > %S%p/subsystem/drivers/spidev/bind'\"\n"
-                   "ACTION==\"add|change|bind\", SUBSYSTEM==\"spi\", DRIVER==\"spidev\", ENV{MODALIAS}==\"acpi:FTE3600:*\", RUN{builtin}+=\"kmod load fte3600\"\n"
-                   "ACTION==\"add|change|bind\", SUBSYSTEM==\"spi\", DRIVER==\"spidev\", ENV{MODALIAS}==\"acpi:FTE3600:*\", RUN+=\"/usr/libexec/fte3600-pair --refresh-spi %p\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"spidev\", KERNEL==\"spidev*\", ENV{FTE3600_PAIR_ROLE}=\"\", ENV{FTE3600_PAIR_ID}=\"\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"spidev\", KERNEL==\"spidev*\", IMPORT{program}=\"/usr/libexec/fte3600-pair --udev %p\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"gpio\", KERNEL==\"gpiochip*\", ENV{FTE3600_PAIR_ROLE}=\"\", ENV{FTE3600_PAIR_ID}=\"\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"gpio\", KERNEL==\"gpiochip*\", IMPORT{program}=\"/usr/libexec/fte3600-pair --udev %p\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"uio\", KERNEL==\"uio*\", ENV{FTE3600_PAIR_ROLE}=\"\", ENV{FTE3600_PAIR_ID}=\"\"\n"
-                   "ACTION==\"add|change\", SUBSYSTEM==\"uio\", KERNEL==\"uio*\", IMPORT{program}=\"/usr/libexec/fte3600-pair --udev %p\"\n"
-                   "ENV{FTE3600_PAIR_ROLE}==\"spi\", OWNER=\"root\", GROUP=\"root\", MODE=\"0600\", SYMLINK+=\"fte3600-spi-$env{FTE3600_PAIR_ID}\", TAG+=\"systemd\"\n"
-                   "ENV{FTE3600_PAIR_ROLE}==\"gpio\", OWNER=\"root\", GROUP=\"root\", MODE=\"0600\", SYMLINK+=\"fte3600-gpio-$env{FTE3600_PAIR_ID}\", TAG+=\"systemd\"\n"
-                   "ENV{FTE3600_PAIR_ROLE}==\"irq\", OWNER=\"root\", GROUP=\"root\", MODE=\"0600\", SYMLINK+=\"fte3600-irq-$env{FTE3600_PAIR_ID}\", TAG+=\"systemd\"\n"
-                   "LABEL=\"fte3600_pair_end\"\n");
-          continue;
-        }
-      /* Other SPI drivers still use spidev. */
+      /* We only add rules for spidev right now. */
       if ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) == 0)
         continue;
 
-      if (g_hash_table_lookup (printed, entry->spi_acpi_id) != NULL)
+      if (g_hash_table_lookup (printed, (entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id)) != NULL)
         continue;
 
-      g_hash_table_insert (printed, g_strdup (entry->spi_acpi_id), GINT_TO_POINTER (1));
+      g_hash_table_insert (printed, g_strdup ((entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id)), GINT_TO_POINTER (1));
 
       if (num_printed == 0)
         g_print ("# %s\n", cls->full_name);
 
-      g_print ("ACTION==\"add|change\", SUBSYSTEM==\"spi\", DRIVER==\"\", ENV{MODALIAS}==\"acpi:%s:*\", RUN{builtin}+=\"kmod load spi:spidev\", RUN+=\"/bin/sh -c 'echo spidev > %%S%%p/driver_override && echo %%k > %%S%%p/subsystem/drivers/spidev/bind'\"\n",
-               entry->spi_acpi_id);
+      g_print ("ACTION==\"add|change\", SUBSYSTEM==\"spi\", ENV{MODALIAS}==\"acpi:%s:\", RUN{builtin}+=\"kmod load spi:spidev\", RUN+=\"/bin/sh -c 'echo spidev > %%S%%p/driver_override && echo %%k > %%S%%p/subsystem/drivers/spidev/bind'\"\n",
+               (entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id));
       num_printed++;
     }
 

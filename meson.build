@@ -148,9 +148,9 @@ drivers_info = {
     'mafpmoc': {},
     'secugen': {},
 
-    # SPI drivers (fte3600 is optional/experimental)
+    # SPI driver (non-optional if SPI is available)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
-    'fte3600': { 'spi': true, 'helper': ['udev'], 'optional': true },
+    'fte3600': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
 
     # Virtual drivers (test-only, optional)
     'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },
@@ -171,28 +171,13 @@ endforeach
 
 all_drivers = default_drivers + virtual_drivers
 
-# Support composite driver lists with keyword expansion (e.g. 'all,fte3600', 'default,fte3600')
-expanded_drivers = []
-foreach d : drivers
-    if d == 'all'
-        expanded_drivers += all_drivers
-    elif d == 'default'
-        expanded_drivers += default_drivers
-    elif d == 'virtual'
-        expanded_drivers += virtual_drivers
-    elif d != ''
-        expanded_drivers += d
-    endif
-endforeach
+if drivers == [ 'all' ]
+    drivers = all_drivers
+endif
 
-# Deduplicate while preserving order
-unique_drivers = []
-foreach d : expanded_drivers
-    if d not in unique_drivers
-        unique_drivers += d
-    endif
-endforeach
-drivers = unique_drivers
+if drivers == [ 'default' ]
+    drivers = default_drivers
+endif
 
 if not have_spi
     foreach driver: drivers
@@ -216,20 +201,6 @@ endforeach
 
 if drivers.length() == 0 or drivers[0] == ''
     error('Cannot build libfprint without drivers, please specify a valid value for the drivers option')
-endif
-
-fte3600_personal_auth_cflags = []
-if get_option('fte3600_personal_auth')
-    if 'fte3600' not in drivers
-        error('fte3600_personal_auth requires the fte3600 driver')
-    endif
-    fte3600_personal_auth_cflags += '-DFTE3600_ENABLE_PERSONAL_AUTH=1'
-endif
-if get_option('fte3600_ipa_auth')
-    if not get_option('fte3600_personal_auth')
-        error('fte3600_ipa_auth requires fte3600_personal_auth=true')
-    endif
-    fte3600_personal_auth_cflags += '-DFTE3600_ENABLE_IPA_AUTH=1'
 endif
 
 if drivers == all_drivers or drivers == default_drivers
@@ -364,13 +335,6 @@ subdir('tests')
 
 subdir('examples')
 
-if 'fte3600' in drivers
-    # The experimental glue setup and udev rules use this fixed system path.
-    install_data('scripts/fte3600-pair.py',
-        install_dir: '/usr/libexec', rename: 'fte3600-pair',
-        install_mode: 'rwxr-xr-x')
-endif
-
 meson.add_dist_script(sync_unsupported_files, '--check', udev_hwdb_list_file)
 
 pkgconfig = import('pkgconfig')
@@ -384,8 +348,4 @@ pkgconfig.generate(
     filebase: versioned_libname,
 )
 
-summary({
-    'Drivers': drivers,
-    'FTE3600 personal authentication': get_option('fte3600_personal_auth'),
-    'FTE3600 experimental IPA authentication': get_option('fte3600_ipa_auth'),
-}, section: 'Drivers')
+summary({'Drivers': drivers, }, section: 'Drivers')

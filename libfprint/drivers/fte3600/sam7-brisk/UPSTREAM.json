@@ -1,0 +1,95 @@
+{
+  "repository": "https://github.com/SamSeven777/libfprint-fte3600",
+  "commit": "7e12c09abbd53516076b6d67a480003dc272cc8e",
+  "license": "LGPL-2.1-or-later (preserve each original file notice and COPYING)",
+  "source": "Exact Git objects from the upstream commit, not the modified research working tree. Remote main independently resolves to the same commit on 2026-10-12.",
+  "scope": "BRISK core, FTE3600 policy/profile adapter, one identity type header, and upstream synthetic tests only. No vendor matcher, firmware, protocol implementation, IPA, or Pocket4 adapter.",
+  "modifications": "None to upstream files.",
+  "provenance_limit": "Upstream authors state independent implementation of published techniques and a public-seed descriptor table. This is attributed provenance, not independent reconstruction of their development history or a patent clearance conclusion.",
+  "files": [
+    {
+      "path": "COPYING",
+      "size_bytes": 26436,
+      "sha256": "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a",
+      "git_blob": "5ab7695ab8cabe0c5c8a814bb0ab1e8066578fbb"
+    },
+    {
+      "path": "libfprint/matchers/brisk/brisk.c",
+      "size_bytes": 66389,
+      "sha256": "cb4cd1a6fbe5172a9c575b41f65dc55c294922092da647da6ef8b4acc3851d82",
+      "git_blob": "db357f742d3a6e07026567a42ecdea3daded31fe"
+    },
+    {
+      "path": "libfprint/matchers/brisk/brisk.h",
+      "size_bytes": 6082,
+      "sha256": "b43c754dc54c705eef9557c00867006989452bb2a7ce4a18eaaada08b6c9e8f2",
+      "git_blob": "24834205b8109598e02e92343e602c90845e1274"
+    },
+    {
+      "path": "libfprint/matchers/brisk/README.md",
+      "size_bytes": 4051,
+      "sha256": "dbec3e4a703779a9126de42fd43e339bb6136665a6b6159ce6c54d09bb9156e0",
+      "git_blob": "7ae2879347ae86c4af4162de6bd5df7622c69bc2"
+    },
+    {
+      "path": "libfprint/matchers/brisk/meson.build",
+      "size_bytes": 447,
+      "sha256": "3852dbaac93f0fe7392ebaf6516ea5553b2953203f1ab0e3bc19f47c23350e51",
+      "git_blob": "1615345599b043c2b99f7b0a169513aa0bf1b1ab"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-brisk.c",
+      "size_bytes": 16659,
+      "sha256": "8c73ecb9b2a68e4e092df8c133cc763dc32c950706af4cc75cafc59ceb58a1a9",
+      "git_blob": "32663c5cc46880047fd85492cd1bde959fb80c42"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-brisk.h",
+      "size_bytes": 12484,
+      "sha256": "923840c4962883737bbe014c5f5e6af0171a43858003a3892297c300b77e494b",
+      "git_blob": "91856a6c874de1fe66e703d1345f4a5660bfecdf"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-match-profile.c",
+      "size_bytes": 1519,
+      "sha256": "a06f65dfb6bc5e4e0cddb77a722e1c43c32c4e32c7490877de8cafd7dc16c90b",
+      "git_blob": "33e2ee94fd0dd3afa741796703b3058a881b7d12"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-match-profile.h",
+      "size_bytes": 849,
+      "sha256": "7ecd4b11ecf1feb4c6e56cadbd8f6c463c369a980223181f5b427365a9b69776",
+      "git_blob": "a51d64d2d85ed470fd811fe4fdf0ef055ebbce7d"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-build-config.h",
+      "size_bytes": 706,
+      "sha256": "8c398fb501e433499eb3f8a80b0aa0e1df8b379320134beee9f4721ac3742311",
+      "git_blob": "68420f0a60f9b9b4b2ac702f6eb506ba750912e5"
+    },
+    {
+      "path": "libfprint/drivers/fte3600-sensor.h",
+      "size_bytes": 4472,
+      "sha256": "18ce9cf3e865906407ea1004b6e1bcad456544f8d1372e43210bf220a12c9310",
+      "git_blob": "6a4f2279635052a707b503433cd5898992e35b96"
+    },
+    {
+      "path": "tests/test-brisk-core.c",
+      "size_bytes": 12112,
+      "sha256": "68f23ecdc013693e757fe3719cf47b2f1b259c13647fa4b60786df41b6d2f86b",
+      "git_blob": "119cbdea331254c05803e465f4c15696a492362d"
+    },
+    {
+      "path": "tests/test-fte3600-brisk.c",
+      "size_bytes": 32181,
+      "sha256": "39047d927381e6b9d9bb0083ddbe0fd65058fe0c2858f981b932e7f825519736",
+      "git_blob": "2a9278ad6e3a203f64d5b27debae59d194f8c922"
+    },
+    {
+      "path": "tests/fte3600-test-image.h",
+      "size_bytes": 2131,
+      "sha256": "359e5370465f792fdefb413bc800150ca6e06f730e307d113a2ae40ca6aed1f6",
+      "git_blob": "1346405663a40a22be0c61972b8cb9b434c8e893"
+    }
+  ]
+}

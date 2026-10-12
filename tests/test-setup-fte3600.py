@@ -216,7 +216,7 @@ class Fixture:
         (self.scripts / "fte3600-pair.py").write_text(PAIR_MOCK)
         buffer = root / "sys/module/spidev/parameters/bufsiz"
         buffer.parent.mkdir(parents=True)
-        buffer.write_text("32768\n")
+        buffer.write_text("65536\n")
         (root / f"lib/modules/{KERNEL}/build").mkdir(parents=True)
         (root / "etc").mkdir()
         (root / "etc/os-release").write_text('ID=test\nPRETTY_NAME="Fixture Linux"\n')
@@ -428,6 +428,7 @@ class SetupTests(unittest.TestCase):
         self.assertTrue(f.state()["loaded"])
         self.assertTrue(f.state()["dkms"])
         self.assertEqual(f.dropin.read_text(), f.expected_dropin())
+        self.assertIn(["modprobe", "spidev", "bufsiz=65536"], f.commands())
         self.assertIn(["systemctl", "restart", "fprintd.service"], f.commands())
 
     def test_install_module_load_failure_is_not_success(self):
@@ -513,12 +514,14 @@ class SetupTests(unittest.TestCase):
     def test_loaded_small_spidev_is_not_unloaded_or_misreported(self):
         f = self.fixture
         f.bridge()
-        (f.root / "sys/module/spidev/parameters/bufsiz").write_text("4096\n")
-        result = f.run("setup-fte3600.sh", "install-all")
-        self.assert_failed(result)
-        self.assertIn("32768", result.stderr)
-        self.assertFalse(any(c[0] == "rmmod" or (c[0] == "modprobe" and "-r" in c) for c in f.commands()))
-        self.assertFalse(f.state()["loaded"])
+        for size in (4096, 32768, 65535):
+            with self.subTest(bufsiz=size):
+                (f.root / "sys/module/spidev/parameters/bufsiz").write_text(f"{size}\n")
+                result = f.run("setup-fte3600.sh", "install-all")
+                self.assert_failed(result)
+                self.assertIn("65536", result.stderr)
+                self.assertFalse(any(c[0] == "rmmod" or (c[0] == "modprobe" and "-r" in c) for c in f.commands()))
+                self.assertFalse(f.state()["loaded"])
 
     def test_legacy_dropin_blocks_install_before_mutation(self):
         f = self.fixture

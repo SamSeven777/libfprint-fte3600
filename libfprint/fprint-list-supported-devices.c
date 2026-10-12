@@ -70,11 +70,10 @@ insert_drivers (GList **usb_list, GList **spi_list)
               char *key;
 
               /* Need SPI device */
-              if ((entry->udev_types & (FPI_DEVICE_UDEV_SUBTYPE_SPIDEV |
-                                       FPI_DEVICE_UDEV_SUBTYPE_FTE3600)) == 0)
+              if ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) == 0)
                 continue;
 
-              key = g_strdup_printf ("SPI:%s:%04x:%04x", entry->spi_acpi_id, entry->hid_id.vid, entry->hid_id.pid);
+              key = g_strdup_printf ("SPI:%s:%04x:%04x", (entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id), entry->hid_id.vid, entry->hid_id.pid);
 
               if (g_hash_table_lookup (printed, key) != NULL)
                 {
@@ -86,10 +85,10 @@ insert_drivers (GList **usb_list, GList **spi_list)
 
               if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
                 *spi_list = g_list_prepend (*spi_list,
-                                            g_strdup_printf ("%s | %04x:%04x | %s\n", entry->spi_acpi_id, entry->hid_id.vid, entry->hid_id.pid, cls->full_name));
+                                            g_strdup_printf ("%s | %04x:%04x | %s\n", (entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id), entry->hid_id.vid, entry->hid_id.pid, cls->full_name));
               else
                 *spi_list = g_list_prepend (*spi_list,
-                                            g_strdup_printf ("%s | - | %s\n", entry->spi_acpi_id, cls->full_name));
+                                            g_strdup_printf ("%s | - | %s\n", (entry->spi_acpi_hid ? entry->spi_acpi_hid : entry->spi_acpi_id), cls->full_name));
             }
           break;
 

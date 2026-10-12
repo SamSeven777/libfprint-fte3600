@@ -29,29 +29,6 @@ G_BEGIN_DECLS
 typedef struct _FpiSpiTransfer FpiSpiTransfer;
 typedef struct _FpiSsm         FpiSsm;
 
-/**
- * FpiSpiTransferGuard:
- * @device: The device whose transport session is checked
- * @error: Location for the failure reason
- *
- * Runs in the transfer worker before and after each successful SPI message.
- * The driver must keep its session alive until all transfers complete. Guards
- * may read immutable session metadata, but must not call main-context device
- * methods. Return %FALSE and set @error if the session is no longer valid.
- *
- * Returns: Whether the transport session is valid
- */
-typedef gboolean (*FpiSpiTransferGuard)(FpDevice *device,
-                                        GError  **error);
-
-/* Runs in the worker after validation and the pre-transfer guard, immediately
- * before a single full-duplex message. Useful for a GPIO release that must
- * precede the first SPI clock. Do not call main-context device methods here.
- * A failed preparation suppresses the message; normal completion and the
- * post-transfer guard still apply. The device must outlive the transfer. */
-typedef gboolean (*FpiSpiTransferPrepare)(FpDevice *device,
-                                          GError  **error);
-
 typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
                                        FpDevice       *dev,
                                        gpointer        user_data,
@@ -66,11 +43,10 @@ typedef void (*FpiSpiTransferCallback)(FpiSpiTransfer *transfer,
  * @length_rd: The length of the read buffer
  * @buffer_wr: The write buffer.
  * @buffer_rd: The read buffer.
- * @sensitive: Whether buffer contents must be redacted from transfer logs.
  *
- * Helper for handling SPI transfers. Transfers can either be pure write/read
- * transfers, a write followed by a read, or a simultaneous full-duplex
- * transfer.
+ * Helper for handling SPI transfers. Currently transfers can either be pure
+ * write/read transfers or a write followed by a read (full duplex support
+ * can easily be added if desired).
  */
 struct _FpiSpiTransfer
 {
@@ -89,31 +65,19 @@ struct _FpiSpiTransfer
   guint ref_count;
 
   int   spidev_fd;
-  gsize buffer_size;
 
   /* Callbacks */
   gpointer               user_data;
   FpiSpiTransferCallback callback;
-  FpiSpiTransferGuard    guard;
-  FpiSpiTransferPrepare  prepare;
 
   /* Data free function */
   GDestroyNotify free_buffer_wr;
   GDestroyNotify free_buffer_rd;
-
-  /* Transfer options */
-  gboolean full_duplex;
-  gboolean sensitive;
 };
 
 GType              fpi_spi_transfer_get_type (void) G_GNUC_CONST;
-void               fpi_spi_transfer_set_device_guard (FpDevice           *device,
-                                                      FpiSpiTransferGuard guard);
 FpiSpiTransfer     *fpi_spi_transfer_new (FpDevice *device,
                                           int       spidev_fd);
-FpiSpiTransfer     *fpi_spi_transfer_new_with_buffer_size (FpDevice *device,
-                                                           int       spidev_fd,
-                                                           gsize     buffer_size);
 FpiSpiTransfer     *fpi_spi_transfer_ref (FpiSpiTransfer *self);
 void               fpi_spi_transfer_unref (FpiSpiTransfer *self);
 
@@ -134,15 +98,6 @@ void               fpi_spi_transfer_read_full (FpiSpiTransfer *transfer,
                                                guint8         *buffer,
                                                gsize           length,
                                                GDestroyNotify  free_func);
-
-void               fpi_spi_transfer_set_full_duplex (FpiSpiTransfer *transfer,
-                                                     gboolean        full_duplex);
-
-void               fpi_spi_transfer_set_sensitive (FpiSpiTransfer *transfer,
-                                                   gboolean        sensitive);
-
-void               fpi_spi_transfer_set_prepare (FpiSpiTransfer       *transfer,
-                                                 FpiSpiTransferPrepare prepare);
 
 void               fpi_spi_transfer_submit (FpiSpiTransfer        *transfer,
                                             GCancellable          *cancellable,

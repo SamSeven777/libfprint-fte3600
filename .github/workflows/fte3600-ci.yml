@@ -9,21 +9,21 @@ permissions:
 
 jobs:
   fedora:
-    name: Fedora 43
+    name: Fedora 43 native build and software tests
     runs-on: ubuntu-latest
     container: fedora:43
     steps:
       - name: Install dependencies
         run: >-
-          dnf install -y git gcc gcc-c++ meson ninja-build
+          dnf install -y git gcc gcc-c++ make meson ninja-build python3
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
-          systemd systemd-devel cairo-devel
+          systemd systemd-devel cairo-devel umockdev umockdev-devel
       - uses: actions/checkout@v6
-      - name: Build both authentication policies
+      - name: Check production and separate synthetic API builds
         run: ./scripts/check-fte3600.sh
 
   ubuntu:
-    name: Ubuntu 26.04
+    name: Ubuntu 26.04 native build and software tests
     runs-on: ubuntu-latest
     container: ubuntu:26.04
     steps:
@@ -33,22 +33,15 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates git meson ninja-build pkg-config \
+            build-essential ca-certificates git meson ninja-build pkg-config python3 \
             libglib2.0-dev libgusb-dev libgudev-1.0-dev \
-            libudev-dev systemd systemd-dev libcairo2-dev linux-headers-generic
+            libudev-dev systemd systemd-dev libcairo2-dev \
+            umockdev libumockdev-dev linux-headers-generic
       - uses: actions/checkout@v6
       - name: Build ACPI reset and IRQ glue
         run: |
           kernel_headers=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
           test -n "$kernel_headers"
           make -C kernel/fte3600 KDIR="$kernel_headers" W=1
-          make -C kernel/fte3600 check
-      - name: Build both authentication policies
+      - name: Check production and separate synthetic API builds
         run: ./scripts/check-fte3600.sh
-      - name: Check linker-wrapped tests with production LTO
-        run: |
-          meson configure build-fte3600-ci-true -Db_lto=true
-          meson compile -C build-fte3600-ci-true
-          meson test -C build-fte3600-ci-true --no-rebuild --print-errorlogs \
-            fpi-device-cancel fte3600-context ft9368-backend fw9369-backend \
-            fte3600-special-probe fte3600-lifecycle fte3600-auth-lifecycle

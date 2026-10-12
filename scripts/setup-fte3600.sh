@@ -44,8 +44,8 @@ check_buffer() {
   local size
   size=$(cat /sys/module/spidev/parameters/bufsiz) || return 1
   case "$size" in ''|*[!0-9]*) fail 'Invalid spidev bufsiz.'; return 1 ;; esac
-  if [ "$size" -lt 32768 ]; then
-    fail "spidev bufsiz=$size, need at least 32768. Reboot to apply the saved module setting; spidev was not unloaded."; return 1
+  if [ "$size" -lt 65536 ]; then
+    fail "spidev bufsiz=$size, need at least 65536. Reboot to apply the saved module setting; spidev was not unloaded."; return 1
   fi
 }
 trigger_spi() {
@@ -78,7 +78,7 @@ cmd_install_kernel() {
   install -Dm755 "$PAIR_HELPER" "$INSTALLED_HELPER"
   install -Dm644 "$REPO_DIR/config/udev/70-fte3600-acpi-spidev.rules" "$RULES"
   install -Dm644 "$REPO_DIR/config/modprobe.d/fte3600-acpi-spidev.conf" "$MODPROBE_CONF"
-  modprobe spidev bufsiz=32768
+  modprobe spidev bufsiz=65536
   check_buffer
   if command -v dkms >/dev/null; then
     status=$(dkms status -m fte3600 -v "$DKMS_VERSION")

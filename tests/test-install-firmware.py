@@ -37,10 +37,14 @@ class FirmwareInstallerTest(unittest.TestCase):
         return replace(firmware, sha256=hashlib.sha256(payload).hexdigest()), payload
 
     def test_catalog_matches_runtime_and_audited_offsets(self):
-        runtime = (ROOT / "libfprint/drivers/fte3600-sensor.c").read_text()
-        expected = {name: (int(size), digest) for name, size, digest in re.findall(
-            r'"fte3600/([^"\n]+)",\s*(\d+),\s*"([0-9a-f]{64})"', runtime)}
-        installed = {f.filename: (f.size, f.sha256) for group in installer.CATALOG.values() for f in group}
+        runtime = (ROOT / "libfprint/drivers/fte3600/linux_firmware.c").read_text()
+        entries = re.findall(
+            r'\{\s*FTE3600_MODEL_([A-Z0-9_]+),\s*"([^"\n]+)",\s*(\d+),\s*"([0-9a-f]{64})"\s*\}',
+            runtime)
+        self.assertEqual(len(entries), 6)
+        expected = {name: (model.lower(), int(size), digest) for model, name, size, digest in entries}
+        installed = {f.filename: (chip, f.size, f.sha256)
+                     for chip, group in installer.CATALOG.items() for f in group}
         self.assertEqual(installed, expected)
         self.assertEqual(len(installed), 6)
         inventory = json.loads((ROOT / "docs/fte3600/windows-hardware-inventory.json").read_text())

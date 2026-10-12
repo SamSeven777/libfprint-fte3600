@@ -26,18 +26,12 @@
 
 /**
  * FpiDeviceUdevSubtypeFlags:
- * @FPI_DEVICE_UDEV_SUBTYPE_FTE3600: The device pairs spidev with FTE3600 ACPI GPIO and IRQ resources
- * @FPI_DEVICE_UDEV_SUBTYPE_GPIO: The device requires a GPIO character device
- * @FPI_DEVICE_UDEV_SUBTYPE_UIO: The device requires a UIO interrupt device
  * @FPI_DEVICE_UDEV_SUBTYPE_SPIDEV: The device requires an spidev node
  * @FPI_DEVICE_UDEV_SUBTYPE_HIDRAW: The device requires a hidraw node
  *
  * Bitfield of required hardware resources for a udev-backed device.
  */
 typedef enum {
-  FPI_DEVICE_UDEV_SUBTYPE_FTE3600 = 1 << 2,
-  FPI_DEVICE_UDEV_SUBTYPE_GPIO = 1 << 3,
-  FPI_DEVICE_UDEV_SUBTYPE_UIO = 1 << 4,
   FPI_DEVICE_UDEV_SUBTYPE_SPIDEV = 1 << 0,
   FPI_DEVICE_UDEV_SUBTYPE_HIDRAW = 1 << 1,
 } FpiDeviceUdevSubtypeFlags;
@@ -49,7 +43,8 @@ typedef enum {
  * @virtual_envvar: Environment variable name (for virtual devices)
  * @driver_data: Optional driver-specific data, defaults to 0
  * @udev_types: Subtypes for udev-based devices
- * @spi_acpi_id: ACPI ID (for SPI devices)
+ * @spi_acpi_id: Legacy ACPI ID substring matched against the SPI sysfs path
+ * @spi_acpi_hid: Exact ACPI HID in SPI ancestry, preferred over @spi_acpi_id
  * @hid_id: HID device identifier (for HID devices)
  *
  * An entry in the table of supported hardware. For USB devices, the product ID
@@ -72,6 +67,7 @@ struct _FpIdEntry
     {
       FpiDeviceUdevSubtypeFlags udev_types;
       const gchar              *spi_acpi_id;
+      const gchar              *spi_acpi_hid;
       struct
       {
         guint pid;
