@@ -505,7 +505,18 @@ if 'fte3600' in drivers
     install: false)
   test('fte3600-device-session', fte3600_session_test, timeout: 180)
 
+  fte3600_release_test = executable('test-fte3600-fw9369-release',
+    'test-fte3600-fw9369-release.c',
+    dependencies: deps,
+    include_directories: fte3600_test_include,
+    link_with: fte3600_driver,
+    c_args: ['-fno-fast-math', '-ffp-contract=off',
+             '-fexcess-precision=standard', '-frounding-math'],
+    install: false)
+  test('fte3600-fw9369-release', fte3600_release_test, timeout: 180)
+
   if not get_option('fte3600-test-backend')
+    fte3600_syscall_wrap = ['-Wl,--wrap=stat,--wrap=stat64,--wrap=fstat,--wrap=fstat64,--wrap=ioctl,--wrap=geteuid,--wrap=close,--wrap=poll,--wrap=__poll_chk,--wrap=read,--wrap=__read_chk,--wrap=clock_nanosleep,--wrap=clock_gettime,--wrap=realpath,--wrap=__realpath_chk,--wrap=open,--wrap=open64,--wrap=lstat,--wrap=lstat64']
     fte3600_board_test = executable('test-fte3600-linux-board',
       'test-fte3600-linux-board.c',
       dependencies: [deps, dependency('threads')],
@@ -514,9 +525,24 @@ if 'fte3600' in drivers
       # Syscall wrapper symbols intentionally have no public API declarations.
       c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
       override_options: ['c_std=gnu11'],
-      link_args: ['-Wl,--wrap=stat,--wrap=stat64,--wrap=fstat,--wrap=fstat64,--wrap=ioctl,--wrap=geteuid,--wrap=close,--wrap=poll,--wrap=__poll_chk,--wrap=read,--wrap=__read_chk,--wrap=clock_nanosleep,--wrap=clock_gettime,--wrap=realpath,--wrap=__realpath_chk,--wrap=open,--wrap=open64,--wrap=lstat,--wrap=lstat64'],
+      link_args: fte3600_syscall_wrap,
       install: false)
     test('fte3600-linux-board', fte3600_board_test, timeout: 180)
+
+    # Public runtime entrypoints use the production runtime/session archive.
+    # Only physical syscalls and monotonic time are synthetic; no runtime clone.
+    fte3600_runtime_test = executable('test-fte3600-fw9369-runtime',
+      'test-fte3600-fw9369-runtime.c',
+      dependencies: [deps, dependency('threads')],
+      include_directories: fte3600_test_include,
+      link_with: fte3600_driver,
+      c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations',
+               '-fno-fast-math', '-ffp-contract=off',
+               '-fexcess-precision=standard', '-frounding-math'],
+      override_options: ['c_std=gnu11'],
+      link_args: fte3600_syscall_wrap + ['-Wl,--wrap=g_get_monotonic_time'],
+      install: false)
+    test('fte3600-fw9369-runtime', fte3600_runtime_test, timeout: 180)
   endif
 
   fte3600_open_bench = executable('fte3600-open-bench',

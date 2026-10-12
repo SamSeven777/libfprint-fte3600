@@ -59,7 +59,8 @@ enum fte3600_device_error {
   FTE3600_DEVICE_ACQUISITION_ERROR,
   FTE3600_DEVICE_NO_FRAME,
   FTE3600_DEVICE_CANCELLED,
-  FTE3600_DEVICE_FIRMWARE_MISMATCH
+  FTE3600_DEVICE_FIRMWARE_MISMATCH,
+  FTE3600_DEVICE_RECOVERY_REQUIRED
 };
 enum fte3600_device_state {
   FTE3600_DEVICE_CREATED, FTE3600_DEVICE_IDLE,
@@ -102,6 +103,22 @@ enum fte3600_device_error fte3600_device_start (struct fte3600_device_session *)
 enum fte3600_device_error fte3600_device_arm (struct fte3600_device_session *);
 enum fte3600_device_error fte3600_device_irq (struct fte3600_device_session *);
 enum fte3600_device_error fte3600_device_capture (struct fte3600_device_session *);
+/* FW9369 only: poll one physical status and, on UP, confirm/maintain/rearm.
+ * released is written only on success; false means still held/unknown. The
+ * caller supplies bounded waits, deadline and cancellation through callbacks.
+ * Capture arms Up before publishing pixels and requires this operation to
+ * complete before the next arm. Completed release is idempotent. State is
+ * staged until all maintenance/rearm I/O succeeds; errors fault the session.
+ * A queued Down after release is preserved by the next arm. */
+enum fte3600_device_error fte3600_device_release_step (struct fte3600_device_session *,
+                                                       int *released);
+/* Reviewed FW9369 SPI recovery after RECOVERY_REQUIRED: physical reset pulse,
+ * 5 ms wait and checked chip startup, without rediscovery/upload. Preserve the
+ * last published image and sequence. waiting_release keeps release pending and
+ * rearms Up; otherwise retain the pending capture and startup's Down arm.
+ * Caller bounds attempts per action. Failure requires explicit cold restart. */
+enum fte3600_device_error fte3600_device_recover_fw9369 (struct fte3600_device_session *,
+                                                         int waiting_release);
 enum fte3600_device_error fte3600_device_copy_image (const struct fte3600_device_session *,
                                                      uint64_t sequence,
                                                      uint8_t *pixels,

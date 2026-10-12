@@ -2,7 +2,7 @@
 
 This downstream libfprint fork provides experimental Linux SPI support for
 FocalTech FTE3600 devices. The current driver uses the independently written
-0.2.1 device implementation, subsequent Linux transport improvements and the
+0.2.1 device implementation, subsequent Linux transport and FW9369 lifecycle fixes, and the
 attributed SamSeven777 BRISK matcher.
 Enrollment, saved prints, verification and identification use libfprint's
 normal API. Experimental personal-use BRISK authentication is enabled when
@@ -39,6 +39,8 @@ The transport update reduced the A1's measured median open/startup time from
 3.955 to 3.488 seconds while retaining live identity and state checks. Automatic
 cancellation/reopening tests also passed; the matcher is unchanged. See the
 [measurement and test scope](docs/fte3600/transport-performance.md).
+The FW9369 lifecycle revision adds release confirmation, retained FDT/image
+baseline maintenance and recovery; see [its validation scope](docs/fte3600/fw9369-release.md).
 
 - [Current guide](docs/fte3600/current-implementation.md): build, use, limits and provenance.
 - [Contributing](CONTRIBUTING.md): software checks and contribution scope.

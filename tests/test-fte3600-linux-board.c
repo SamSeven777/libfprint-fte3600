@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 /* Meson enables large-file APIs for both the production archive and this
  * translation unit. Keep the doubles on those same redirected ABI symbols. */
 #if defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS == 64

@@ -64,7 +64,10 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_open (const struct fte360
 enum fte3600_linux_runtime_error fte3600_linux_runtime_start (struct fte3600_linux_runtime *,
                                                               GCancellable *,
                                                               struct fte3600_linux_runtime_diagnostic *);
-/* Capture always arms and waits for an actual UIO event. Caller supplies an
+/* Capture arms and waits for a UIO event, with physical status qualification
+ * and bounded polling for FW9369. FW9369 automatically completes pending
+ * release/maintenance first under the same deadline, preserving queued touches.
+ * Caller supplies an
  * empty frame; successful output owns malloc pixels and exact sequence status.
  * Timeout covers arm/wait/acquire and callbacks observe its monotonic deadline. */
 enum fte3600_linux_runtime_error fte3600_linux_runtime_capture (struct fte3600_linux_runtime *,
@@ -72,7 +75,10 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_capture (struct fte3600_l
                                                                 uint32_t timeout_ms,
                                                                 struct fte3600_linux_runtime_frame *,
                                                                 struct fte3600_linux_runtime_diagnostic *);
-/* Healthy FT9368 information observations implement reviewed contact predicate.
+/* FT9368 uses healthy information observations. FW9369 uses physical UP flags,
+ * three reviewed FDT confirmations, retained maintenance and Down rearm;
+ * repeated calls after completion do not repeat maintenance. Partial failure,
+ * cancellation or timeout requires close+open before another capture.
  * Unknown family release semantics fail explicitly; no synthetic finger-up. */
 enum fte3600_linux_runtime_error fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *,
                                                                      GCancellable *,
