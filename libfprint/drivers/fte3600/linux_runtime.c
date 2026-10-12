@@ -21,6 +21,8 @@ struct fte3600_linux_runtime
   GCancellable                  *cancellable;
   gint64                         deadline;
   int                            timed_out;
+  int                            needs_reopen;
+  unsigned                       recoveries;
 };
 static enum fte3600_linux_runtime_error
 result (struct fte3600_linux_runtime_diagnostic *d,
@@ -179,6 +181,7 @@ begin (struct fte3600_linux_runtime *r, GCancellable *cancel, uint32_t timeout)
 {
   r->cancellable = cancel ? g_object_ref (cancel) : NULL;
   r->timed_out = 0;
+  r->recoveries = 0;
   r->deadline = timeout ? g_get_monotonic_time () + (gint64) timeout * 1000 : 0;
 }
 static void
@@ -221,6 +224,8 @@ fte3600_linux_runtime_start (struct fte3600_linux_runtime *r,
   diagnostic_clear (d);
   if(!r || !r->board)
     return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
+  if(r->needs_reopen)
+    return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   begin (r, cancel, 0);
   if(cancelled (r))
     {
@@ -365,6 +370,53 @@ contact (struct fte3600_linux_runtime *r)
     }
   return info[1] == 0x11 && info[2] == 0x11;
 }
+static enum fte3600_linux_runtime_error
+wait_fw_release (struct fte3600_linux_runtime            *r,
+                 struct fte3600_linux_runtime_diagnostic *d)
+{
+  enum fte3600_linux_runtime_error rc;
+
+  for (;;)
+    {
+      if (cancelled (r))
+        {
+          rc = wait_error (r, ECANCELED, d);
+          break;
+        }
+      int released = 0;
+      enum fte3600_device_error e = fte3600_device_release_step (r->session, &released);
+      if (e == FTE3600_DEVICE_RECOVERY_REQUIRED && r->recoveries < 3)
+        {
+          ++r->recoveries;
+          e = fte3600_device_recover_fw9369 (r->session, 1);
+          if (!e)
+            continue;
+        }
+      if (e)
+        {
+          rc = session_error (r, e, d);
+          break;
+        }
+      if (cancelled (r))
+        {
+          rc = wait_error (r, ECANCELED, d);
+          break;
+        }
+      if (released)
+        return FTE3600_RUNTIME_OK;
+      uint32_t ms = remaining (r);
+      if (!ms)
+        {
+          rc = wait_error (r, ETIMEDOUT, d);
+          break;
+        }
+      r->device.io.wait_ms (r->device.io.context, ms < 20 ? ms : 20);
+    }
+  /* Partial maintenance or cancellation cannot be followed by capture on
+  * this owner. Closing and reopening performs explicit cold recovery. */
+  r->needs_reopen = 1;
+  return rc;
+}
 enum fte3600_linux_runtime_error
 fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
                                GCancellable *cancel, uint32_t timeout, struct fte3600_linux_runtime_frame *frame,
@@ -378,8 +430,19 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
   diagnostic_clear (d);
   if(!r || !r->session || !frame || frame->pixels || !timeout)
     return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
+  if(r->needs_reopen)
+    return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   begin (r, cancel, timeout);
-  if(drain (r) < 0)
+  fte3600_device_get_status (r->session, &next.status);
+  if(next.status.model == FTE3600_MODEL_FW9369)
+    {
+      rc = wait_fw_release (r, d);
+      if(rc)
+        goto done;
+      /* Startup/release already armed Down. Draining or rearming here can
+       * lose a touch arriving while the previous result was processed. */
+    }
+  else if(drain (r) < 0)
     {
       rc = wait_error (r, errno, d);
       goto done;
@@ -398,6 +461,40 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
         {
           rc = wait_error (r, ETIMEDOUT, d);
           goto done;
+        }
+      if(next.status.model == FTE3600_MODEL_FW9369)
+        {
+          if(cancelled (r))
+            {
+              rc = wait_error (r, ECANCELED, d);
+              goto done;
+            }
+          e = fte3600_device_irq (r->session);
+          if(e == FTE3600_DEVICE_RECOVERY_REQUIRED && r->recoveries < 3)
+            {
+              ++r->recoveries;
+              e = fte3600_device_recover_fw9369 (r->session, 0);
+              if(!e)
+                continue;
+            }
+          if(e != FTE3600_DEVICE_NO_FRAME)
+            {
+              if(e)
+                {
+                  rc = session_error (r, e, d);
+                  goto done;
+                }
+              break;
+            }
+          /* IRQ is a wake hint; physical status remains the authority and
+           * bounded polling also sees flags latched before this wait. */
+          n = fte3600_linux_board_wait_irq (r->board, ms < 20 ? ms : 20, &counter);
+          if(n < 0)
+            {
+              rc = wait_error (r, errno, d);
+              goto done;
+            }
+          continue;
         }
       n = fte3600_linux_board_wait_irq (r->board, ms, &counter);
       if(n <= 0)
@@ -452,7 +549,11 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
   rc = FTE3600_RUNTIME_OK;
 done:
   if(rc)
-    fte3600_device_cancel (r->session);
+    {
+      if(next.status.model == FTE3600_MODEL_FW9369)
+        r->needs_reopen = 1;
+      fte3600_device_cancel (r->session);
+    }
   fte3600_linux_runtime_frame_clear (&next);
   end (r);
   return rc;
@@ -467,12 +568,20 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *r,
   diagnostic_clear (d);
   if(!r || !r->session || !timeout)
     return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
+  if(r->needs_reopen)
+    return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   fte3600_device_get_status (r->session, &status);
-  if(status.model != FTE3600_MODEL_FT9368)
+  if(status.model != FTE3600_MODEL_FT9368 && status.model != FTE3600_MODEL_FW9369)
     return result (d, FTE3600_RUNTIME_RELEASE_UNSUPPORTED, ENOTSUP, FTE3600_DEVICE_UNSUPPORTED);
   if(status.state != FTE3600_DEVICE_IDLE)
     return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   begin (r, cancel, timeout);
+  if(status.model == FTE3600_MODEL_FW9369)
+    {
+      rc = wait_fw_release (r, d);
+      end (r);
+      return rc;
+    }
   for(;;)
     {
       int state = contact (r);

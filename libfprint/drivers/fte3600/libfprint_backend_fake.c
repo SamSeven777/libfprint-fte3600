@@ -86,6 +86,12 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
   };
   if (g_str_equal (mode, "unsupported"))
     runtime->status.width = 3;
+  if (g_str_equal (mode, "fw9369"))
+    {
+      runtime->status.model = FTE3600_MODEL_FW9369;
+      runtime->status.chip_id = 0x9369;
+      runtime->status.raw_id = 0x9362;
+    }
   if (g_str_equal (mode, "release-unsupported"))
     {
       runtime->status.model = FTE3600_MODEL_FT9361;
@@ -142,6 +148,8 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
   guint sample = 8;
   if (g_str_has_prefix (mode, "enroll"))
     sample = runtime->sample++ % 8;
+  if (g_str_equal (mode, "enroll-retry") && runtime->sample > 1)
+    sample = (runtime->sample - 2) % 8;
   if (g_str_equal (mode, "duplicate"))
     sample = 0;
   if (!g_str_equal (mode, "blank"))
@@ -162,7 +170,8 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
 
   (void) timeout;
   trace (runtime->control, "release-begin");
-  if (runtime->status.model != FTE3600_MODEL_FT9368)
+  if (runtime->status.model != FTE3600_MODEL_FT9368 &&
+      runtime->status.model != FTE3600_MODEL_FW9369)
     {
       trace (runtime->control, "release-unsupported");
       return failure (diag, FTE3600_RUNTIME_RELEASE_UNSUPPORTED);

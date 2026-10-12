@@ -14,6 +14,7 @@ fte3600_sources = files(
     'fw9369_startup.c',
     'fw9369_fdt.c',
     'fw9369_grayscale.c',
+    'fw9369_release.c',
     'ft93xx_image_pipeline.c',
     'capture.c',
     'calibration.c',

@@ -207,6 +207,108 @@ test_release_observations (void)
     }
 }
 
+static void
+fw9369_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  (void) data;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, 1);
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      retry_count++;
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+    }
+}
+
+/* Adapter path proof only: the distinct production-object runtime test checks
+ * real FW9369 FDT observations and maintenance. This backend supplies images. */
+static void
+test_fw9369_action_lifecycle (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  busy_device = device;
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  mode ("enroll-retry");
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                    fw9369_retry_progress, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 9);
+  g_assert_cmpuint (trace_count ("release-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("open"), ==, 0);
+
+  reset_trace ();
+  mode ("positive");
+  gboolean matched = FALSE;
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &matched, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (matched);
+  g_assert_cmpuint (trace_count ("release-ok"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 1);
+  g_assert_cmpuint (trace_count ("open"), ==, 0);
+  reset_trace ();
+  g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (image);
+  g_assert_cmpuint (trace_count ("release-ok"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 1);
+
+  reset_trace ();
+  mode ("capture-fail");
+  g_clear_object (&image);
+  image = fp_device_capture_sync (device, TRUE, NULL, &error);
+  g_assert_null (image);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_clear_error (&error);
+  g_assert_cmpuint (trace_count ("release-ok"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+
+  mode ("fw9369");
+  image = fp_device_capture_sync (device, TRUE, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (image);
+  reset_trace ();
+  mode ("release-block");
+  g_autoptr(GCancellable) cancel = g_cancellable_new ();
+  g_timeout_add (20, cancel_timeout, cancel);
+  g_clear_object (&image);
+  image = fp_device_capture_sync (device, TRUE, cancel, &error);
+  g_assert_null (image);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_clear_error (&error);
+  g_assert_cmpuint (trace_count ("capture-begin"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+
+  mode ("fw9369");
+  image = fp_device_capture_sync (device, TRUE, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (image);
+  reset_trace ();
+  /* Closing discards the retained state; it must not block for finger-up. */
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (trace_count ("release-begin"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+}
+
 static gboolean
 suspend_active (gpointer data)
 {
@@ -699,6 +801,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/public-api", test_public_api);
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
+  g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
   int result = g_test_run ();

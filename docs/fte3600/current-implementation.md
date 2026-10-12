@@ -2,7 +2,8 @@
 
 This guide describes the independently written 0.2.1 SPI implementation now
 integrated directly into this libfprint tree, with subsequent Linux transport
-validation and legacy error-propagation improvements. Earlier driver documentation is
+validation, legacy error-propagation improvements and FW9369 release-time
+maintenance. Earlier driver documentation is
 retained as historical reference; its authentication flags, template format
 and runtime instructions do not describe this implementation.
 
@@ -22,6 +23,8 @@ master. Software checks of that integration are distinct from hardware tests.
 The later transport revision passed automatic A1 open/close and timed
 cancellation/reopening tests. Its measured startup improvement and unchanged
 matcher scope are recorded in [transport performance](transport-performance.md).
+FW9369 release confirmation, baseline maintenance and recovery are described
+in [the revision-specific validation note](fw9369-release.md).
 
 FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369 and FT9769 paths are
 implemented. The A1 result does not validate the other families. Different-finger
@@ -160,9 +163,10 @@ fprintd-verify -f right-index-finger "$USER"
 
 Test a different finger and an empty sensor, plus cancellation and reopening,
 before relying on authentication. Enrollment stages alone do not establish
-independent physical touches: only FT9368 currently implements separate
-release polling. The other families rely on their acquisition behavior and
-duplicate rejection. Physical suspend/resume remains unvalidated; active
+independent physical touches. FT9368 and FW9369 implement separate release
+observation. FW9369 confirms release and maintains its FDT/image baselines
+before accepting the next touch; the other families rely on their acquisition
+behavior and duplicate rejection. Physical suspend/resume remains unvalidated; active
 suspend follows libfprint's unsupported/cancellation fallback.
 
 For failures, inspect `journalctl -u fprintd -b`, the device pairing and the

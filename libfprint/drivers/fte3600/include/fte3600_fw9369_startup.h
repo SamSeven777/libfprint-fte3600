@@ -144,6 +144,14 @@ enum fte3600_fw9369_startup_status fte3600_fw9369_image_baseline_run (struct fte
                                                                       size_t                                     capacity,
                                                                       const struct fte3600_capture_io           *io,
                                                                       struct fte3600_fw9369_startup_diagnostics *diagnostics);
+/* Runtime safety entry: identical retained update, but exhausted FIFO reads
+ * stop before baseline mutation. Other transport diagnostics remain explicit. */
+enum fte3600_fw9369_startup_status fte3600_fw9369_image_baseline_checked (struct fte3600_fw9369_startup_state *,
+                                                                          uint8_t reset,
+                                                                          struct fte3600_fw9369_startup_workspace *,
+                                                                          size_t,
+                                                                          const struct fte3600_capture_io *,
+                                                                          struct fte3600_fw9369_startup_diagnostics *);
 /* Re-arm retained automatic finger detection using calibrated thresholds.
  * No measurement, image baseline update, reset or allocation. channel_mode
  * must be 1 and rate/fast_rate nonzero. Same nonoverlap/serialized ownership

@@ -301,6 +301,11 @@ static void legacy_terminal_recovery_errors(void)
 }
 int main(void)
 {
-    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {if(!fixtures[i].unconfirmed_stop)scenario(&fixtures[i]);}
+    /* FW9369 now requires physical contact/release event scripts. Its full
+     * session path is exercised by test_fw9369_runtime using production APIs;
+     * the generic bus here deliberately does not fabricate those events. */
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        if(!fixtures[i].unconfirmed_stop && fixtures[i].model!=FTE3600_MODEL_FW9369)scenario(&fixtures[i]);
+    }
     missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
 }

@@ -521,6 +521,17 @@ fte3600_fw9369_startup_observed (
 }
 
 enum fte3600_fw9369_startup_status
+fte3600_fw9369_image_baseline_checked (
+  struct fte3600_fw9369_startup_state *state, uint8_t reset,
+  struct fte3600_fw9369_startup_workspace *workspace, size_t capacity,
+  const struct fte3600_capture_io *io,
+  struct fte3600_fw9369_startup_diagnostics *diagnostics)
+{
+  return run (FTE3600_FW9369_IMAGE_BASELINE, state, 10, reset,
+              workspace, capacity, io, diagnostics, NULL, 1);
+}
+
+enum fte3600_fw9369_startup_status
 fte3600_fw9369_startup_checked (
   struct fte3600_fw9369_startup_state *state,
   struct fte3600_fw9369_startup_workspace *workspace, size_t capacity,
