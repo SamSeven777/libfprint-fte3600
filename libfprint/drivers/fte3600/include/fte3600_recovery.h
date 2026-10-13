@@ -45,10 +45,19 @@ struct fte3600_recovery_io
                   uint32_t duration_ms);
   /* Monotonic milliseconds modulo 2^32, including I/O and waits. */
   uint32_t (*clock_ms)(void *context);
+  /* Optional explicit final reset release + SPI 55 aa. The caller already
+  * requested H/10ms/L/20ms. Set *gpio_status to the release result and
+  * return the overall raw result (same categories as gpio/spi). Zero GPIO
+  * status means sync was attempted; a failed release must skip sync.
+  * Synchronous, no retained pointers. NULL preserves portable callbacks.
+  * Private source ABI extension: rebuild all callback-table consumers. */
+  int (*release_and_sync)(void *context,
+                          int  *gpio_status);
 };
 
 /* Optional synchronous, passive reset observation. raw_status is the reset
- * GPIO callback result; it is zero on entry. No mutation or reentry. */
+ * GPIO callback result; it is zero on entry. Compound reset/sync defers exit
+ * until after sync, retaining the GPIO result. No mutation or reentry. */
 struct fte3600_reset_observer
 {
   void *context;

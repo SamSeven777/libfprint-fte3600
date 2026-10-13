@@ -452,6 +452,56 @@ gpio_cb (void *context, int physical)
     }
   return checked_ioctl (b, b->reset, GPIO_V2_LINE_SET_VALUES_IOCTL, &v) < 0 ? UINT32_C (0x80000000) : 0;
 }
+/* The complete transaction is checked before release and after sync. There is
+ * deliberately no general "unchecked" state: every other operation continues
+ * to use checked_ioctl(), including the first two GPIOs and both pulse waits. */
+static int
+finish_release_and_sync (struct fte3600_linux_board *b, int io_error)
+{
+  int checked = current (b, 0);
+
+  /* Entry validation established a clean latch. A syscall failure happened
+   * before the trailing validation: retain that first meaningful error even
+   * if cancellation/removal is also observed. Close still checks the lease. */
+  if (io_error)
+    {
+      b->error = io_error;
+      return bad (io_error);
+    }
+  return checked;
+}
+static uint32_t
+release_and_sync_cb (void *context, uint32_t *gpio_status)
+{
+  struct fte3600_linux_board *b = context;
+  struct gpio_v2_line_values release = {.mask = 1, .bits = 0};
+  const uint8_t tx[2] = {0x55, 0xaa};
+  uint8_t rx[2];
+  struct spi_ioc_transfer tr = {.tx_buf = (uintptr_t) tx, .rx_buf = (uintptr_t) rx,
+                                .len = sizeof (tx), .speed_hz = b->speed, .bits_per_word = 8};
+  int transferred, saved;
+
+  *gpio_status = UINT32_C (0x80000000);
+  if (b->config.transfer_capacity < sizeof (tx))
+    {
+      latch (b, EMSGSIZE);
+      return UINT32_C (0x80000000);
+    }
+  if (current (b, 0))
+    return UINT32_C (0x80000000);
+  if (ioctl (b->reset, GPIO_V2_LINE_SET_VALUES_IOCTL, &release) < 0)
+    {
+      saved = errno;
+      (void) finish_release_and_sync (b, saved);
+      return UINT32_C (0x80000000);
+    }
+  /* Successful physical release: the next system operation is the prepared
+   * SPI message. No callback, clock, allocation, logging or metadata I/O. */
+  transferred = ioctl (b->spi, SPI_IOC_MESSAGE (1), &tr);
+  saved = transferred < 0 ? errno : transferred != (int) sizeof (tx) ? EIO : 0;
+  *gpio_status = 0;
+  return finish_release_and_sync (b, saved) ? UINT32_C (0x80000000) : 0;
+}
 static int
 now_ms (struct fte3600_linux_board *b, uint64_t *ms)
 {
@@ -655,7 +705,7 @@ fte3600_linux_board_open (const struct fte3600_linux_board_config *c,
       checked_ioctl (b, b->spi, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0 ||
       boundary_cb (b, FTE3600_BOUNDARY_SETTINGS))
     goto fail;
-  b->io = (struct fte3600_device_io){b, spi_cb, wait_ms_cb, wait_us_cb, gpio_cb, boundary_cb, clock_cb, error_cb, clear_cb};
+  b->io = (struct fte3600_device_io){b, spi_cb, wait_ms_cb, wait_us_cb, gpio_cb, boundary_cb, clock_cb, error_cb, clear_cb, release_and_sync_cb};
   *out = b;
   return 0;
 fail:

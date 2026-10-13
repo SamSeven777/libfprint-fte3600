@@ -152,7 +152,7 @@ static int error(void *context) {return ((struct bus *)context)->latched;}
 static void clear(void *context) {((struct bus *)context)->latched=0;}
 static struct fte3600_device_config config(struct bus *b,int firmware)
 {
-    struct fte3600_device_config c={.io={b,spi,ms,us,gpio,boundary,now,error,clear}};
+    struct fte3600_device_config c={.io={b,spi,ms,us,gpio,boundary,now,error,clear,NULL}};
     if (firmware && b->fixture->model==4) {
         c.startup.pram=(struct fte3600_ft9368_boot_image){b->fixture->pram,b->fixture->pram_length,(b->fixture->pram_length+127)/128*128};
         c.startup.application=(struct fte3600_ft9368_boot_image){b->fixture->app,b->fixture->app_length,b->fixture->app_length};
@@ -295,14 +295,22 @@ static void refuse_guessed_firmware(void)
         }
     }
 }
+static uint32_t simulated_release_and_sync(void *context,uint32_t *gpio_status)
+{
+    uint8_t sync[2]={0x55,0xaa};
+    *gpio_status=gpio(context,1);
+    return *gpio_status?*gpio_status:spi(context,sync,sizeof(sync));
+}
 static void legacy_terminal_recovery_errors(void)
 {
     test_name="legacy recovery preserves terminal absence";
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         const struct fixture *f=&fixtures[i];if(f->unconfirmed_stop || !is_legacy(f))continue;
+        for(int compound=0;compound<=1;++compound)
         for(int absent=0;absent<=1;++absent) for(int gpio_error=0;gpio_error<=1;++gpio_error) {
             struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
             struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+            c.io.release_and_sync=compound?simulated_release_and_sync:NULL;
             success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
             success(fte3600_device_arm(s),s);
             b->unhealthy=1;b->recovery_failure=absent?UINT32_C(0xc000000e):UINT32_C(0xc0000185);

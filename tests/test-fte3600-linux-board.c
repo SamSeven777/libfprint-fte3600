@@ -41,6 +41,14 @@ static void (*bus_sleep)(uint64_t);
 static int (*bus_poll)(int);
 static void (*after_spi)(void);
 static void (*after_mode)(void);
+/* Test-only guard around real board ioctl calls. The bus identifies the
+ * expected final release from its frozen protocol trace. All wrappers below
+ * observe production calls; synthetic replies are supplied inside ioctl. */
+static int (*expect_release_sync)(void);
+static int sync_gap;
+static unsigned sync_pairs, sync_side_operations, sync_metadata_reads;
+static void sync_side_operation(void)
+{ if(sync_gap) ++sync_side_operations; }
 static int count_calls;
 static struct {
     unsigned realpaths, stats, lstats, metadata_opens, metadata_reads, metadata_closes;
@@ -118,13 +126,13 @@ static int metadata_fd(int fd)
 { char target[PATH_MAX];return fd_path(fd,target)&&metadata_path(target); }
 char *__real_realpath(const char *,char *);
 char *__wrap_realpath(const char *p,char *out)
-{ if(count_calls) ++calls.realpaths;return __real_realpath(p,out); }
+{ sync_side_operation(); if(count_calls) ++calls.realpaths;return __real_realpath(p,out); }
 char *__real___realpath_chk(const char *,char *,size_t);
 char *__wrap___realpath_chk(const char *p,char *out,size_t capacity)
-{ if(count_calls) ++calls.realpaths;return __real___realpath_chk(p,out,capacity); }
+{ sync_side_operation(); if(count_calls) ++calls.realpaths;return __real___realpath_chk(p,out,capacity); }
 int __real_open(const char *,int,...);
 int __wrap_open(const char *p,int flags,...)
-{
+{ sync_side_operation();
     if(count_calls&&metadata_path(p)) ++calls.metadata_opens;
     if(flags&O_CREAT) {
         va_list args;mode_t mode;va_start(args,flags);mode=(mode_t)va_arg(args,int);va_end(args);
@@ -139,16 +147,16 @@ static void char_stat(struct stat *st,int which)
     st->st_rdev=which==1?makedev(153,0):which==2?makedev(254,7):makedev(247,3);
 }
 int __real_stat(const char *,struct stat *);
-int __wrap_stat(const char *p,struct stat *st) { if(count_calls) ++calls.stats;int r=__real_stat(p,st); if(!r) char_stat(st,classify(p)); return r; }
+int __wrap_stat(const char *p,struct stat *st) { sync_side_operation(); if(count_calls) ++calls.stats;int r=__real_stat(p,st); if(!r) char_stat(st,classify(p)); return r; }
 int __real_lstat(const char *,struct stat *);
 int __wrap_lstat(const char *p,struct stat *st)
-{ if(count_calls) ++calls.lstats;return __real_lstat(p,st); }
+{ sync_side_operation(); if(count_calls) ++calls.lstats;return __real_lstat(p,st); }
 int __real_fstat(int,struct stat *);
-int __wrap_fstat(int fd,struct stat *st) { int r=__real_fstat(fd,st); if(!r) char_stat(st,fd_kind(fd)); return r; }
-uid_t __wrap_geteuid(void) { return (uid_t)fake.uid; }
+int __wrap_fstat(int fd,struct stat *st) { sync_side_operation(); int r=__real_fstat(fd,st); if(!r) char_stat(st,fd_kind(fd)); return r; }
+uid_t __wrap_geteuid(void) { sync_side_operation(); return (uid_t)fake.uid; }
 int __real_close(int);
 int __wrap_close(int fd)
-{
+{ sync_side_operation();
     int kind=fd_kind(fd);
     if(count_calls&&metadata_fd(fd)) ++calls.metadata_closes;
     if(kind && fake.closes<8) fake.closed[fake.closes++]=fd==fake.reset_fd?4:kind;
@@ -158,6 +166,17 @@ int __wrap_ioctl(int fd,unsigned long command,...)
 {
     va_list args; void *arg;
     va_start(args,command); arg=va_arg(args,void *); va_end(args);
+    if(sync_gap) {
+        struct spi_ioc_transfer *tr=arg;
+        sync_gap=0;
+        CHECK(command==SPI_IOC_MESSAGE(1));
+        CHECK(tr->len==2&&!memcmp((const void *)(uintptr_t)tr->tx_buf,"\x55\xaa",2));
+        ++sync_pairs;
+        if(sync_side_operations) fprintf(stderr,
+            "reset release -> 55aa gap: %u side operations, %u metadata reads\n",
+            sync_side_operations,sync_metadata_reads);
+        CHECK(sync_side_operations==0);
+    }
     ++fake.ioctls; if(fake.fail_ioctl==fake.ioctls) { errno=EIO; return -1; }
     switch(command) {
     case GPIO_GET_CHIPINFO_IOCTL: CHECK(fd_kind(fd)==2); ((struct gpiochip_info *)arg)->lines=1; return 0;
@@ -178,6 +197,7 @@ int __wrap_ioctl(int fd,unsigned long command,...)
         else CHECK(v->bits==(fake.gpio_calls?0u:1u));
         ++fake.gpio_calls;
         if(fake.stale_gpio) write_value(glue,"fte3600_generation","1\n");
+        if(expect_release_sync&&expect_release_sync()) { sync_side_operations=0;sync_metadata_reads=0;sync_gap=1; }
         return 0;
     }
     case SPI_IOC_RD_MODE32: *(uint32_t *)arg=fake.mode; return 0;
@@ -208,15 +228,16 @@ int __wrap_ioctl(int fd,unsigned long command,...)
     }
 }
 int __wrap_poll(struct pollfd *p,nfds_t n,int ms)
-{
+{ sync_side_operation();
     CHECK(n==1&&fd_kind(p->fd)==3); fake.clock_ms+=(unsigned)ms;
     p->revents=fake.poll_hup?POLLHUP:(bus_poll?bus_poll(ms):fake.poll_event)?POLLIN:0; return p->revents?1:0;
 }
 int __wrap___poll_chk(struct pollfd *p,nfds_t n,int ms,size_t capacity)
-{ CHECK(n*sizeof(*p)<=capacity); return __wrap_poll(p,n,ms); }
+{ sync_side_operation(); CHECK(n*sizeof(*p)<=capacity); return __wrap_poll(p,n,ms); }
 ssize_t __real_read(int,void *,size_t);
 ssize_t __wrap_read(int fd,void *buffer,size_t n)
-{
+{ sync_side_operation();
+    if(sync_gap&&metadata_fd(fd)) ++sync_metadata_reads;
     if(count_calls&&metadata_fd(fd)) ++calls.metadata_reads;
     if(fd_kind(fd)!=3) return __real_read(fd,buffer,n);
     CHECK(n==4); *(uint32_t *)buffer=37;
@@ -224,20 +245,48 @@ ssize_t __wrap_read(int fd,void *buffer,size_t n)
     return fake.short_uio?2:4;
 }
 ssize_t __wrap___read_chk(int fd,void *buffer,size_t n,size_t capacity)
-{ CHECK(n<=capacity); return __wrap_read(fd,buffer,n); }
+{ sync_side_operation(); CHECK(n<=capacity); return __wrap_read(fd,buffer,n); }
 int __wrap_clock_gettime(clockid_t clock,struct timespec *t)
-{
+{ sync_side_operation();
     CHECK(clock==CLOCK_MONOTONIC);
     if(fake.clock_error) { errno=EIO; return -1; }
     t->tv_sec=(time_t)(fake.clock_ms/1000); t->tv_nsec=(long)(fake.clock_ms%1000)*1000000; return 0;
 }
 int __wrap_clock_nanosleep(clockid_t clock,int flags,const struct timespec *request,struct timespec *left)
-{
+{ sync_side_operation();
     (void)left; CHECK(clock==CLOCK_MONOTONIC&&flags==0);
     if(fake.sleep_error) return EIO;
     if(bus_sleep) bus_sleep((uint64_t)request->tv_sec*1000000000+(uint64_t)request->tv_nsec);
     fake.clock_ms+=(unsigned long long)request->tv_sec*1000+(unsigned long long)request->tv_nsec/1000000; return 0;
 }
+/* Allocation and logging are also forbidden in the two-ioctl interval. */
+void *__real_malloc(size_t);
+void *__wrap_malloc(size_t n) { sync_side_operation();return __real_malloc(n); }
+void *__real_calloc(size_t,size_t);
+void *__wrap_calloc(size_t n,size_t size) { sync_side_operation();return __real_calloc(n,size); }
+void *__real_realloc(void *,size_t);
+void *__wrap_realloc(void *p,size_t n) { sync_side_operation();return __real_realloc(p,n); }
+char *__real_strdup(const char *);
+char *__wrap_strdup(const char *p) { sync_side_operation();return __real_strdup(p); }
+void __real_free(void *);
+void __wrap_free(void *p) { sync_side_operation();__real_free(p); }
+ssize_t __real_write(int,const void *,size_t);
+ssize_t __wrap_write(int fd,const void *p,size_t n) { sync_side_operation();return __real_write(fd,p,n); }
+size_t __real_fwrite(const void *,size_t,size_t,FILE *);
+size_t __wrap_fwrite(const void *p,size_t n,size_t count,FILE *f)
+{ sync_side_operation();return __real_fwrite(p,n,count,f); }
+int __real_puts(const char *);
+int __wrap_puts(const char *p) { sync_side_operation();return __real_puts(p); }
+int __real_fputs(const char *,FILE *);
+int __wrap_fputs(const char *p,FILE *f) { sync_side_operation();return __real_fputs(p,f); }
+#if defined(__GNUC__) || defined(__clang__)
+int __wrap_fprintf(FILE *,const char *,...) __attribute__((format(printf,2,3)));
+int __wrap_printf(const char *,...) __attribute__((format(printf,1,2)));
+#endif
+int __wrap_fprintf(FILE *f,const char *format,...)
+{ sync_side_operation();va_list args;va_start(args,format);int n=vfprintf(f,format,args);va_end(args);return n; }
+int __wrap_printf(const char *format,...)
+{ sync_side_operation();va_list args;va_start(args,format);int n=vprintf(format,args);va_end(args);return n; }
 static unsigned fd_count(void)
 {
     unsigned n=0; DIR *d=opendir("/proc/self/fd"); CHECK(d); while(readdir(d)) ++n; CHECK(!closedir(d)); return n;
@@ -408,11 +457,82 @@ static void inode_changes(void)
         rejected_spi(b,post);CHECK(!unlink(replaced_path));CHECK(!rename(retained_path,replaced_path));
     }
 }
+static unsigned pair_case, pair_queries;
+static int pair_cancel;
+static int pair_cancelled(void *context)
+{
+    (void)context;sync_side_operation();++pair_queries;return pair_cancel;
+}
+static int pair_expected(void) { return 1; }
+static void pair_gpio(int level)
+{
+    CHECK(level==1);
+    if(pair_case==6||pair_case==8) pair_cancel=1;
+    if(pair_case==7||pair_case==9) write_value(glue,"fte3600_generation","1\n");
+}
+static uint32_t pair_spi(uint8_t *data,size_t length)
+{ CHECK(length==2&&data[0]==0x55&&data[1]==0xaa);return 0; }
+static void compound_boundaries(void)
+{
+    unsigned before=fd_count();
+    for(pair_case=0;pair_case<10;++pair_case) {
+        struct fte3600_linux_board_config c=config();struct fte3600_linux_board *b;
+        uint32_t gpio_status=99;int expected=0, ioctls;
+        reset_fake(1);pair_cancel=0;c.is_cancelled=pair_cancelled;
+        CHECK(!fte3600_linux_board_open(&c,&b));
+        const struct fte3600_device_io *io=fte3600_linux_board_callbacks(b);
+        /* Permit the unchanged baseline callback table to reach the decisive
+         * production-session ordering regression, instead of failing on NULL. */
+        if(!io->release_and_sync) { CHECK(!fte3600_linux_board_close(b));return; }
+        bus_gpio=pair_gpio;bus_spi=pair_spi;expect_release_sync=pair_expected;
+        if(pair_case==1) fake.fail_ioctl=fake.ioctls+1;
+        if(pair_case==2) fake.fail_ioctl=fake.ioctls+2;
+        if(pair_case==3||pair_case==8||pair_case==9) fake.short_spi=1;
+        if(pair_case==4) pair_cancel=1;
+        if(pair_case==5) write_value(glue,"fte3600_generation","1\n");
+        if(pair_case) expected=(pair_case==4||pair_case==6)?ECANCELED:
+            (pair_case==5||pair_case==7)?ESTALE:EIO;
+        ioctls=fake.ioctls;pair_queries=0;memset(&calls,0,sizeof(calls));count_calls=1;
+        CHECK((io->release_and_sync(io->context,&gpio_status)!=0)==(expected!=0));
+        count_calls=0;
+        CHECK(!sync_gap&&io->error(io->context)==expected);
+        CHECK(gpio_status==((pair_case==1||pair_case==4||pair_case==5)?UINT32_C(0x80000000):0));
+        CHECK(fake.ioctls-ioctls==((pair_case==4||pair_case==5)?0:pair_case==1?1:2));
+        CHECK(pair_queries==((pair_case==4||pair_case==5)?1:2));
+        if(!pair_case) {
+            CHECK(calls.metadata_reads==32&&calls.metadata_opens==32&&calls.metadata_closes==32);
+            /* Ordinary transfers immediately retain their full checks. */
+            unsigned reads=calls.metadata_reads;uint8_t data[2]={0x55,0xaa};
+            count_calls=1;CHECK(!io->spi(io->context,data,sizeof(data)));count_calls=0;
+            CHECK(calls.metadata_reads==reads+32);
+        } else {
+            int prior=fake.ioctls;uint8_t data=0x70;
+            io->clear_error(io->context);CHECK(io->spi(io->context,&data,1));
+            CHECK(fake.ioctls==prior&&io->error(io->context)==expected);
+        }
+        expect_release_sync=NULL;bus_gpio=NULL;bus_spi=NULL;
+        int closed=fte3600_linux_board_close(b);
+        CHECK((closed!=0)==(pair_case==5||pair_case==7||pair_case==9));
+        CHECK(fd_count()==before);
+    }
+    {
+        struct fte3600_linux_board_config c=config();struct fte3600_linux_board *b;
+        uint32_t gpio_status=99;c.transfer_capacity=1;reset_fake(1);
+        CHECK(!fte3600_linux_board_open(&c,&b));
+        const struct fte3600_device_io *io=fte3600_linux_board_callbacks(b);
+        int before_ioctl=fake.ioctls;
+        CHECK(io->release_and_sync(io->context,&gpio_status));
+        CHECK(gpio_status&&io->error(io->context)==EMSGSIZE&&fake.ioctls==before_ioctl);
+        CHECK(!fte3600_linux_board_close(b)&&fd_count()==before);
+    }
+    reset_fake(1);pair_cancel=0;
+    puts("board reset/sync: direct ioctl order, boundary validation, sticky errors, cancellation/removal and first error passed");
+}
 int main(void)
 {
     struct fte3600_linux_board *b; struct fte3600_linux_board_info info; struct fte3600_linux_board_config c;
     const struct fte3600_device_io *io; uint8_t data[16],original[16]; uint32_t count=0; unsigned before;
-    fixture(); reset_fake(1); c=config(); before=fd_count();
+    fixture();compound_boundaries(); reset_fake(1); c=config(); before=fd_count();
     if(getenv("FTE3600_BOARD_BENCHMARK")) { benchmark();return 0; }
     fake.uid=1000; CHECK(!fte3600_linux_board_validate(&c,&info)); CHECK(fake.ioctls==0);
     CHECK(fte3600_linux_board_open(&c,&b)==-1&&errno==EPERM&&b==NULL); fake.uid=0;

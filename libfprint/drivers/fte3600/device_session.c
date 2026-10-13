@@ -78,6 +78,30 @@ gpio (void *context, int level)
   return value;
 }
 static uint32_t
+release_and_sync (void *context, uint32_t *gpio_status)
+{
+  struct fte3600_device_session *s = context;
+  uint32_t status = s->config.io.release_and_sync (s->config.io.context, gpio_status);
+
+  if (failed (*gpio_status))
+    {
+      s->io_failed = 1;
+      s->status.last_gpio_status = *gpio_status;
+    }
+  else
+    {
+      ++s->status.spi_calls;
+      if (failed (status))
+        {
+          s->io_failed = 1;
+          if (s->status.failed_spi_calls != UINT32_MAX)
+            ++s->status.failed_spi_calls;
+          s->status.last_spi_status = status;
+        }
+    }
+  return status;
+}
+static uint32_t
 boundary (void *context, enum fte3600_factory_boundary which)
 {
   struct fte3600_device_session *s = context;
@@ -114,6 +138,15 @@ legacy_spi (void *context, const uint8_t *tx, uint8_t *rx, size_t length)
 {
   memcpy (rx, tx, length);
   return legacy_raw_status (spi (context, rx, length));
+}
+static int
+legacy_release_and_sync (void *context, int *gpio_status)
+{
+  uint32_t gpio_result;
+  uint32_t status = release_and_sync (context, &gpio_result);
+
+  *gpio_status = legacy_raw_status (gpio_result);
+  return legacy_raw_status (status);
 }
 static enum fte3600_sensor
 legacy_sensor (enum fte3600_factory_model model)
@@ -243,11 +276,13 @@ fte3600_device_create (
   if (!s)
     return FTE3600_DEVICE_NO_MEMORY;
   s->config = *config;
-  s->factory_io = (fte3600_factory_integration_io){s, spi, wait_ms, wait_us, gpio, boundary};
+  s->factory_io = (fte3600_factory_integration_io){s, spi, wait_ms, wait_us, gpio, boundary,
+                                                   config->io.release_and_sync ? release_and_sync : NULL};
   s->fw_io = (struct fte3600_capture_io){s, spi, wait_ms};
   s->modern_io = (struct fte3600_ft93xx_io){s, spi, wait_ms};
   s->byte_io = (struct fte3600_ft9368_io){s, spi, wait_ms};
-  s->legacy_io = (struct fte3600_recovery_io){s, legacy_gpio, legacy_spi, wait_ms, clock_ms};
+  s->legacy_io = (struct fte3600_recovery_io){s, legacy_gpio, legacy_spi, wait_ms, clock_ms,
+                                              config->io.release_and_sync ? legacy_release_and_sync : NULL};
   (void) fte3600_factory_integration_state_defaults (&s->factory);
   s->status.state = FTE3600_DEVICE_CREATED;
   *output = s;

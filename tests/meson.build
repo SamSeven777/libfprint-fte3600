@@ -516,7 +516,7 @@ if 'fte3600' in drivers
   test('fte3600-fw9369-release', fte3600_release_test, timeout: 180)
 
   if not get_option('fte3600-test-backend')
-    fte3600_syscall_wrap = ['-Wl,--wrap=stat,--wrap=stat64,--wrap=fstat,--wrap=fstat64,--wrap=ioctl,--wrap=geteuid,--wrap=close,--wrap=poll,--wrap=__poll_chk,--wrap=read,--wrap=__read_chk,--wrap=clock_nanosleep,--wrap=clock_gettime,--wrap=realpath,--wrap=__realpath_chk,--wrap=open,--wrap=open64,--wrap=lstat,--wrap=lstat64']
+    fte3600_syscall_wrap = ['-Wl,--wrap=stat,--wrap=stat64,--wrap=fstat,--wrap=fstat64,--wrap=ioctl,--wrap=geteuid,--wrap=close,--wrap=poll,--wrap=__poll_chk,--wrap=read,--wrap=__read_chk,--wrap=clock_nanosleep,--wrap=clock_gettime,--wrap=realpath,--wrap=__realpath_chk,--wrap=open,--wrap=open64,--wrap=lstat,--wrap=lstat64,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=strdup,--wrap=free,--wrap=write,--wrap=fwrite,--wrap=fputs,--wrap=fprintf,--wrap=printf,--wrap=puts']
     fte3600_board_test = executable('test-fte3600-linux-board',
       'test-fte3600-linux-board.c',
       dependencies: [deps, dependency('threads')],

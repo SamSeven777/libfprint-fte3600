@@ -33,7 +33,10 @@ int fte3600_linux_board_validate (const struct fte3600_linux_board_config *,
                                   struct fte3600_linux_board_info *);
 /* euid zero required. Claim active-low reset OUTPUT logical 0, then UIO
  * O_RDONLY|O_NONBLOCK. Own all opened fds. Check generation/identity around
- * every hardware operation. Sticky failures prevent further hardware I/O.
+ * every ordinary hardware operation and before/after the explicit final
+ * reset-release + 55-aa pair. No metadata or callback work interrupts that
+ * pair. Two userspace ioctls are not atomic or a timing guarantee.
+ * Sticky failures prevent further hardware I/O.
  * Configure native CS from ACPI; fixed CS NEVER writes mode. Preserve initial
  * bits/speed; native CS returns to ACPI mode on close (not stale trial mode).
  * Effective speed is the lesser of ACPI maximum and saved nonzero spidev

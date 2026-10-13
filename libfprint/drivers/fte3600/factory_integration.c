@@ -170,6 +170,32 @@ gpio (void *c, int level)
   return status;
 }
 static uint32_t
+release_and_sync (void *c, uint32_t *gpio_status)
+{
+  struct operation *op = c;
+  uint32_t status = op->io->release_and_sync (op->io->context, gpio_status);
+
+  ++op->r->event_count;
+  if (negative (*gpio_status))
+    {
+      ++op->r->gpio_failures;
+      op->r->last_gpio_failure = *gpio_status;
+    }
+  else
+    {
+      ++op->r->physical_calls;
+      ++op->r->event_count;
+      if (negative (status))
+        {
+          ++op->r->transport_failures;
+          op->r->last_transport_failure = status;
+        }
+      if (status == FTE3600_FACTORY_INTEGRATION_UNAVAILABLE)
+        op->unavailable = 1;
+    }
+  return status;
+}
+static uint32_t
 word_gpio (void *c, unsigned int level)
 {
   return gpio (c, (int) level);
@@ -192,7 +218,8 @@ static enum fte3600_factory_integration_error
 word (struct operation *op,
       enum fte3600_factory_word_operation which, uint32_t settle, uint16_t *id)
 {
-  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary};
+  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary,
+                                                op->io->release_and_sync ? release_and_sync : NULL};
   const struct fte3600_factory_startup_observer observer = {op, word_phase};
   enum fte3600_factory_startup_error e = fte3600_factory_word_operation (which, settle, &io, &observer, &op->r->word, id);
 
@@ -225,7 +252,7 @@ byte_load (struct operation *op, int check)
 {
   if (!op->in->pram.length || !op->in->application.length)
     return FTE3600_FACTORY_INTEGRATION_MISSING_FIRMWARE;
-  const struct fte3600_factory_byte_io io = {op, byte_spi, wait_ms, wait_us, gpio, boundary};
+  const struct fte3600_factory_byte_io io = {op, byte_spi, wait_ms, wait_us, gpio, boundary, NULL};
   const struct fte3600_factory_byte_observer observer = {op, byte_phase};
   op->r->check_version = (uint8_t) check;
   enum fte3600_factory_byte_error e = fte3600_factory_byte_load_selected (&op->s->byte, check, &io, &observer, &op->r->byte);
@@ -264,7 +291,8 @@ legacy (struct operation *op, enum fte3600_factory_legacy_child which)
   if (which == FTE3600_FL_CHILD_INITIALIZE && !op->in->firmware_length)
     return FTE3600_FACTORY_INTEGRATION_MISSING_FIRMWARE;
   const struct fte3600_factory_legacy_input in = {op->in->scene, 0, op->r->model, op->in->firmware, op->in->firmware_length};
-  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary};
+  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary,
+                                                op->io->release_and_sync ? release_and_sync : NULL};
   const struct fte3600_factory_legacy_observer observer = {op, legacy_phase};
   op->r->legacy.model = op->r->model;
   op->r->legacy.clock_us = op->r->clock_us;
@@ -292,7 +320,8 @@ static int
 select_sensor (struct operation *op)
 {
   enum fte3600_factory_model m = op->r->model;
-  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary};
+  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, word_gpio, boundary,
+                                                op->io->release_and_sync ? release_and_sync : NULL};
 
   phase (op, FTE3600_FI_SELECT, 1, 0, 0);
   if (m == FTE3600_MODEL_UNKNOWN)

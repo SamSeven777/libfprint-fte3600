@@ -57,15 +57,24 @@ static int runtime_poll(int timeout)
     }
     return timeout>0&&irq_enabled;
 }
+static int runtime_expect_release_sync(void)
+{
+    if(runtime_bus->next<runtime_bus->fixture->count) {
+        const struct event *e=&runtime_bus->fixture->events[runtime_bus->next];
+        return e->kind==0&&e->length==2&&e->tx[0]==0x55&&e->tx[1]==0xaa;
+    }
+    return runtime_bus->recovery_failure&&runtime_bus->recovery_gpio_calls==3;
+}
 static void setup_bus(const struct fixture *f)
 {
     runtime_bus=calloc(1,sizeof(*runtime_bus));CHECK(runtime_bus);
     runtime_bus->fixture=f;runtime_bus->mode=0x50;wait_remaining=0;
     test_name=f->name;reset_fake(1);irq_enabled=1;byte_contact=1;byte_unhealthy=0;
     bus_spi=runtime_spi;bus_gpio=runtime_gpio;bus_sleep=runtime_sleep;bus_poll=runtime_poll;
+    expect_release_sync=runtime_expect_release_sync;
 }
 static void teardown_bus(void)
-{ free(runtime_bus);runtime_bus=NULL;bus_spi=NULL;bus_gpio=NULL;bus_sleep=NULL;bus_poll=NULL; }
+{ CHECK(!sync_gap);expect_release_sync=NULL;free(runtime_bus);runtime_bus=NULL;bus_spi=NULL;bus_gpio=NULL;bus_sleep=NULL;bus_poll=NULL; }
 static struct fte3600_linux_runtime_config runtime_config(void)
 {
     static char device[PATH_MAX];path(device,devroot,"spidev0.0");
@@ -196,6 +205,19 @@ static void supplied_firmware_case(const struct fixture *f)
     }
     runtime_bus->pattern=5;CHECK(!fte3600_linux_runtime_capture(r,NULL,10000,&frame,&d));
     CHECK(frame.status.image_sequence==2);fte3600_linux_runtime_frame_clear(&frame);
+    if(is_legacy(f)&&f->model!=FTE3600_MODEL_FT9536) {
+        /* Force the real lifecycle reinitialization/LOAD path after capture;
+         * version mismatch reaches Boot A or A8 synchronization, then the bus
+         * fails that sync. Sticky board errors prevent the remaining retries. */
+        unsigned pairs=sync_pairs;
+        runtime_bus->unhealthy=1;runtime_bus->recovery_failure=UINT32_C(0xc0000185);
+        CHECK(fte3600_linux_runtime_capture(r,NULL,10000,&frame,&d)==FTE3600_RUNTIME_IO);
+        CHECK(d.system_error==EIO&&sync_pairs==pairs+1);
+        CHECK(runtime_bus->recovery_gpio_calls==3&&runtime_bus->recovery_sync_calls==1);
+        struct fte3600_device_status status;
+        CHECK(!fte3600_linux_runtime_get_status(r,&status));
+        CHECK(status.failed_spi_calls==1&&status.last_spi_status==UINT32_C(0x80000000));
+    }
     CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);teardown_bus();
     printf("runtime supplied-fixture PASS %s\n",f->name);
 }
@@ -230,7 +252,7 @@ static struct {
     uint32_t responsive_mode;
     unsigned zero_calls,live_calls;
     uint16_t partial_family;
-    unsigned family_reads,sync_calls,unconfirmed_bulk;
+    unsigned family_reads,sync_calls,unconfirmed_bulk,wake70,ping_reads,sync_step;
     int silent,fail_first,fail_trial,cancel_first,cancel_mode,cancel_trial;
     GCancellable *cancel;
 } cs_test;
@@ -240,7 +262,17 @@ static uint32_t cs_spi(uint8_t *data,size_t length)
 {
     if(!cs_responsive()) {
         int family=length==8&&!memcmp(data,"\x04\xfb\x85\xc0",4);
-        if(length==2&&data[0]==0x55&&data[1]==0xaa) ++cs_test.sync_calls;
+        if(length==1&&data[0]==0x70) ++cs_test.wake70;
+        if(length==6&&!memcmp(data,"\x10\xef\x20",3)) ++cs_test.ping_reads;
+        if(family) {
+            /* The first ROM family read must follow the complete six-attempt
+             * legacy wake/ping prefix, even on an unresponsive CS polarity. */
+            CHECK(cs_test.wake70>=12&&cs_test.ping_reads>=6);
+            cs_test.sync_step=1;
+        }
+        if(length==2&&data[0]==0x55&&data[1]==0xaa) {
+            CHECK(cs_test.sync_step==6);cs_test.sync_step=0;++cs_test.sync_calls;
+        }
         if(length>128) ++cs_test.unconfirmed_bulk;
         ++cs_test.zero_calls;
         if(cs_test.cancel_first) g_cancellable_cancel(cs_test.cancel);
@@ -254,14 +286,33 @@ static uint32_t cs_spi(uint8_t *data,size_t length)
     if(cs_test.fail_trial) return UINT32_C(0x80000000);
     return runtime_spi(data,length);
 }
-static void cs_gpio(int level) { if(cs_responsive()) runtime_gpio(level); }
-static void cs_sleep(uint64_t ns) { if(cs_responsive()) runtime_sleep(ns); }
+static void cs_gpio(int level)
+{
+    if(cs_responsive()) runtime_gpio(level);
+    else if(cs_test.sync_step) {
+        CHECK((cs_test.sync_step==1&&level==1)||(cs_test.sync_step==3&&level==0)||
+            (cs_test.sync_step==5&&level==1));
+        ++cs_test.sync_step;
+    }
+}
+static void cs_sleep(uint64_t ns)
+{
+    if(cs_responsive()) runtime_sleep(ns);
+    else if(cs_test.sync_step) {
+        CHECK((cs_test.sync_step==2&&ns==UINT64_C(10000000))||
+            (cs_test.sync_step==4&&ns==UINT64_C(20000000)));
+        ++cs_test.sync_step;
+    }
+}
+static int cs_expect_release_sync(void)
+{ return cs_responsive()?runtime_expect_release_sync():cs_test.sync_step==6; }
 static void cs_mode(void)
 { if(fake.mode_writes==2&&cs_test.cancel_mode) g_cancellable_cancel(cs_test.cancel); }
 static void cs_setup(const struct fixture *f)
 {
     setup_bus(f);memset(&cs_test,0,sizeof(cs_test));cs_test.responsive_mode=SPI_CS_HIGH;
     bus_spi=cs_spi;bus_gpio=cs_gpio;bus_sleep=cs_sleep;after_mode=cs_mode;
+    expect_release_sync=cs_expect_release_sync;
 }
 static void cs_teardown(void)
 { CHECK(!cs_test.unconfirmed_bulk);after_mode=NULL;teardown_bus(); }
@@ -389,6 +440,8 @@ int main(void)
             supplied_firmware_case(&fixtures[i]);
     for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i) if(fixtures[i].model==FTE3600_MODEL_FT9365) { threaded_cancel(&fixtures[i]);break; }
     rejected_startups();chip_select_negotiation();legacy_chip_select_negotiation();
+    CHECK(sync_pairs>0);
+    printf("runtime: %u release/sync pairs passed syscall-order guard through full startup and lifecycle LOAD\n",sync_pairs);
     puts("runtime: strict pairing, verified firmware, actual startup/capture, timeout, fault/reopen and cross-thread cancellation passed");
     return 0;
 }
