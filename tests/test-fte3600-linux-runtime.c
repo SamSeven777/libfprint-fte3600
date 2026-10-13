@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Test-only composition: actual Linux board, runtime and device-session paths,
  * synthetic sysfs/cdev identities and frozen protocol startup transcripts. */
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 #include "fte3600_linux_runtime.h"
 #define main board_suite_main
 #define config board_test_config
