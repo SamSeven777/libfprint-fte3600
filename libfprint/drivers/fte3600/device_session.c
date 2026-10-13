@@ -433,8 +433,8 @@ fte3600_device_arm (struct fte3600_device_session *s)
       if (!s->fw_down_armed)
         {
           struct fte3600_fw9369_release_diagnostics d;
-          s->status.component_error = fte3600_fw9369_arm_detection (&s->factory.word.fw,
-                                                                    FTE3600_FW9369_DOWN, &s->fw_io, &d);
+          s->status.component_error = fte3600_fw9369_arm_detection_linux (&s->factory.word.fw,
+                                                                          FTE3600_FW9369_DOWN, &s->fw_io, &d);
           if (s->status.component_error)
             error = FTE3600_DEVICE_ACQUISITION_ERROR;
           else
@@ -494,8 +494,8 @@ acquire (struct fte3600_device_session *s)
       struct fte3600_fw9369_release_diagnostics rd;
       enum fte3600_fw9369_event event;
       fw_next = s->factory.word.fw;
-      s->status.component_error = fte3600_fw9369_event_run (&fw_next, 0, &s->fw_release_rejections,
-                                                            &s->startup_storage.fw, sizeof (s->startup_storage.fw), &event, &s->fw_io, &rd);
+      s->status.component_error = fte3600_fw9369_event_run_linux (&fw_next, 0, &s->fw_release_rejections,
+                                                                  &s->startup_storage.fw, sizeof (s->startup_storage.fw), &event, &s->fw_io, &rd);
       if (s->status.component_error)
         {
           error = FTE3600_DEVICE_ACQUISITION_ERROR;
@@ -510,8 +510,8 @@ acquire (struct fte3600_device_session *s)
         {
           if (event == FTE3600_FW9369_EVENT_RELEASED)
             {
-              s->status.component_error = fte3600_fw9369_arm_detection (&fw_next,
-                                                                        FTE3600_FW9369_DOWN, &s->fw_io, &rd);
+              s->status.component_error = fte3600_fw9369_arm_detection_linux (&fw_next,
+                                                                              FTE3600_FW9369_DOWN, &s->fw_io, &rd);
               if (s->status.component_error)
                 {
                   error = FTE3600_DEVICE_ACQUISITION_ERROR;
@@ -532,8 +532,8 @@ acquire (struct fte3600_device_session *s)
       if (!error)
         {
           /* Preserve an UP arriving while the caller processes the image. */
-          s->status.component_error = fte3600_fw9369_arm_detection (&fw_next,
-                                                                    FTE3600_FW9369_UP, &s->fw_io, &rd);
+          s->status.component_error = fte3600_fw9369_arm_detection_linux (&fw_next,
+                                                                          FTE3600_FW9369_UP, &s->fw_io, &rd);
           if (s->status.component_error)
             error = FTE3600_DEVICE_ACQUISITION_ERROR;
         }
@@ -596,8 +596,8 @@ fte3600_device_release_step (struct fte3600_device_session *s,
   struct fte3600_fw9369_release_diagnostics d;
   enum fte3600_fw9369_event outcome = FTE3600_FW9369_EVENT_PENDING;
   enum fte3600_device_error error = FTE3600_DEVICE_OK;
-  s->status.component_error = fte3600_fw9369_event_run (&next, 1, &s->fw_release_rejections,
-                                                        &s->startup_storage.fw, sizeof (s->startup_storage.fw), &outcome, &s->fw_io, &d);
+  s->status.component_error = fte3600_fw9369_event_run_linux (&next, 1, &s->fw_release_rejections,
+                                                              &s->startup_storage.fw, sizeof (s->startup_storage.fw), &outcome, &s->fw_io, &d);
   if (s->status.component_error)
     {
       error = FTE3600_DEVICE_CALIBRATION_ERROR;
@@ -610,9 +610,9 @@ fte3600_device_release_step (struct fte3600_device_session *s,
     }
   if (outcome != FTE3600_FW9369_EVENT_PENDING)
     {
-      s->status.component_error = fte3600_fw9369_arm_detection (&next,
-                                                                outcome == FTE3600_FW9369_EVENT_RELEASED ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP,
-                                                                &s->fw_io, &d);
+      s->status.component_error = fte3600_fw9369_arm_detection_linux (&next,
+                                                                      outcome == FTE3600_FW9369_EVENT_RELEASED ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP,
+                                                                      &s->fw_io, &d);
       if (s->status.component_error)
         error = FTE3600_DEVICE_ACQUISITION_ERROR;
     }
@@ -660,8 +660,8 @@ fte3600_device_recover_fw9369 (struct fte3600_device_session *s,
   wait_ms (s, 5);
   if (s->config.io.error (s->config.io.context))
     goto done;
-  s->status.component_error = fte3600_fw9369_startup_checked (&next, &s->startup_storage.fw,
-                                                              sizeof (s->startup_storage.fw), &s->fw_io, NULL, &d);
+  s->status.component_error = fte3600_fw9369_startup_linux (&next, &s->startup_storage.fw,
+                                                            sizeof (s->startup_storage.fw), &s->fw_io, NULL, &d);
   if (s->status.component_error || d.completed != 7 || d.fdt_status || d.image_status || d.warnings ||
       d.transport.exhausted_transactions || d.transport.ready_timeout ||
       !next.baseline_flag_1 || !next.baseline_flag_2)
@@ -672,7 +672,7 @@ fte3600_device_recover_fw9369 (struct fte3600_device_session *s,
   if (waiting_release)
     {
       struct fte3600_fw9369_release_diagnostics rd;
-      s->status.component_error = fte3600_fw9369_arm_detection (&next, FTE3600_FW9369_UP, &s->fw_io, &rd);
+      s->status.component_error = fte3600_fw9369_arm_detection_linux (&next, FTE3600_FW9369_UP, &s->fw_io, &rd);
       if (s->status.component_error)
         {
           error = FTE3600_DEVICE_ACQUISITION_ERROR;

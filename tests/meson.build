@@ -529,6 +529,19 @@ if 'fte3600' in drivers
       install: false)
     test('fte3600-linux-board', fte3600_board_test, timeout: 180)
 
+    fte3600_linux_runtime_test = executable('test-fte3600-linux-runtime',
+      'test-fte3600-linux-runtime.c',
+      dependencies: [deps, dependency('threads')],
+      include_directories: fte3600_test_include,
+      link_with: fte3600_driver,
+      c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations',
+               '-fno-fast-math', '-ffp-contract=off',
+               '-fexcess-precision=standard', '-frounding-math'],
+      override_options: ['c_std=gnu11'],
+      link_args: fte3600_syscall_wrap,
+      install: false)
+    test('fte3600-linux-runtime', fte3600_linux_runtime_test, timeout: 180)
+
     # Public runtime entrypoints use the production runtime/session archive.
     # Only physical syscalls and monotonic time are synthetic; no runtime clone.
     fte3600_runtime_test = executable('test-fte3600-fw9369-runtime',

@@ -20,6 +20,7 @@ struct bus {
     uint32_t recovery_failure;
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
+    unsigned linux_policy_reads,linux_policy_writes;
 };
 static const struct event *event(struct bus *b,int kind)
 {
@@ -47,6 +48,26 @@ static uint16_t sample(struct bus *b,size_t i)
 static uint32_t spi(void *context,uint8_t *tx,size_t n)
 {
     struct bus *b=context;++b->calls;
+    /* Keep the original component transcript immutable. Hardware startup adds
+     * a separately specified Linux policy between direction and final ACK. */
+    if (b->fixture->model==FTE3600_MODEL_FW9369 && b->next<b->fixture->count) {
+        const struct event *next=&b->fixture->events[b->next];
+        if (next->kind==0 && next->length==8 && next->tx[0]==5 &&
+            next->tx[2]==0x9a && next->tx[3]==0x84 && next->tx[7]==0x2f &&
+            n>=8 && tx[2]==0x9a && tx[3]==0x83) {
+            if (n==12 && tx[0]==4) {
+                CHECK(b->linux_policy_reads==b->linux_policy_writes);
+                ++b->linux_policy_reads;
+                tx[6]=(uint8_t)(b->words[0x1a83]>>8);tx[7]=(uint8_t)b->words[0x1a83];
+            } else {
+                CHECK(n==8 && tx[0]==5 && b->linux_policy_reads==b->linux_policy_writes+1);
+                uint16_t expected=(uint16_t)((b->words[0x1a83]&0xff80)|0x16);
+                CHECK(tx[6]==(uint8_t)(expected>>8) && tx[7]==(uint8_t)expected);
+                ++b->linux_policy_writes;record_write(b,tx,n);
+            }
+            return 0;
+        }
+    }
     const struct event *e=event(b,0);
     if (e) {
         if (n!=e->length || memcmp(tx,e->tx,n)) {

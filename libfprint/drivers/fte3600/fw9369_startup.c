@@ -11,7 +11,7 @@ struct startup
   struct fte3600_image_state                   *search;
   enum fte3600_fw9369_startup_status error;
   const struct fte3600_fw9369_startup_observer *observer;
-  int                                           checked;
+  int                                           checked, linux_detection;
 };
 static void
 observe (struct startup *op, enum fte3600_fw9369_startup_phase phase,
@@ -81,13 +81,13 @@ read_byte (struct startup *op, uint8_t address)
   (void) transfer (op, bytes, sizeof (bytes));
   return bytes[4];
 }
-static void
+static int
 write_word (struct startup *op, uint16_t address, uint16_t value)
 {
   uint8_t bytes[8] = {5, 0xfa, (uint8_t) (0x80 | (address >> 8)),
                       (uint8_t) address, 0, 1, (uint8_t) (value >> 8), (uint8_t) value};
 
-  (void) transfer (op, bytes, sizeof (bytes));
+  return transfer (op, bytes, sizeof (bytes));
 }
 static int
 read_word (struct startup *op, uint16_t address, uint16_t *value)
@@ -406,6 +406,13 @@ arm (struct startup *op)
   if (!read_word (op, 0x1881, &value))
     return FTE3600_FW9369_STARTUP_WORD_READ_ERROR;
   write_word (op, 0x1881, (uint16_t) ((value & 0xff7c) | 0x81));
+  if (op->linux_detection)
+    {
+      if (!read_word (op, 0x1a83, &value))
+        return FTE3600_FW9369_STARTUP_WORD_READ_ERROR;
+      if (!write_word (op, 0x1a83, (uint16_t) ((value & 0xff80) | 0x16)))
+        return FTE3600_FW9369_STARTUP_TRANSPORT_ERROR;
+    }
   write_word (op, 0x1a84, 0x2f);
   command (op, 0xc2, 0x3d);
   wait_ms (op, 1);
@@ -419,11 +426,11 @@ run (
   struct fte3600_fw9369_startup_workspace *workspace, size_t capacity,
   const struct fte3600_capture_io *io,
   struct fte3600_fw9369_startup_diagnostics *diagnostics,
-  const struct fte3600_fw9369_startup_observer *observer, int checked)
+  const struct fte3600_fw9369_startup_observer *observer, int checked, int linux_detection)
 {
   struct fte3600_fw9369_startup_diagnostics local;
   struct startup op = {state, workspace, io, diagnostics ? diagnostics : &local,
-                       NULL, FTE3600_FW9369_STARTUP_OK, observer, checked};
+                       NULL, FTE3600_FW9369_STARTUP_OK, observer, checked, linux_detection};
   enum fte3600_fw9369_startup_status result = FTE3600_FW9369_STARTUP_OK;
   int failed = 0;
 
@@ -494,7 +501,7 @@ fte3600_fw9369_startup_run (
 {
   if (reset != 1)
     return FTE3600_FW9369_STARTUP_INVALID_ARGUMENT;
-  return run (operation, state, sample_limit, reset, workspace, capacity, io, diagnostics, NULL, 0);
+  return run (operation, state, sample_limit, reset, workspace, capacity, io, diagnostics, NULL, 0, 0);
 }
 
 enum fte3600_fw9369_startup_status
@@ -505,7 +512,7 @@ fte3600_fw9369_image_baseline_run (
   struct fte3600_fw9369_startup_diagnostics *diagnostics)
 {
   return run (FTE3600_FW9369_IMAGE_BASELINE, state, 10, reset,
-              workspace, capacity, io, diagnostics, NULL, 0);
+              workspace, capacity, io, diagnostics, NULL, 0, 0);
 }
 
 enum fte3600_fw9369_startup_status
@@ -517,7 +524,7 @@ fte3600_fw9369_startup_observed (
   struct fte3600_fw9369_startup_diagnostics *diagnostics)
 {
   return run (FTE3600_FW9369_STARTUP, state, 10, 1, workspace, capacity,
-              io, diagnostics, observer, 0);
+              io, diagnostics, observer, 0, 0);
 }
 
 enum fte3600_fw9369_startup_status
@@ -528,7 +535,7 @@ fte3600_fw9369_image_baseline_checked (
   struct fte3600_fw9369_startup_diagnostics *diagnostics)
 {
   return run (FTE3600_FW9369_IMAGE_BASELINE, state, 10, reset,
-              workspace, capacity, io, diagnostics, NULL, 1);
+              workspace, capacity, io, diagnostics, NULL, 1, 0);
 }
 
 enum fte3600_fw9369_startup_status
@@ -540,7 +547,19 @@ fte3600_fw9369_startup_checked (
   struct fte3600_fw9369_startup_diagnostics *diagnostics)
 {
   return run (FTE3600_FW9369_STARTUP, state, 10, 1, workspace, capacity,
-              io, diagnostics, observer, 1);
+              io, diagnostics, observer, 1, 0);
+}
+
+enum fte3600_fw9369_startup_status
+fte3600_fw9369_startup_linux (
+  struct fte3600_fw9369_startup_state *state,
+  struct fte3600_fw9369_startup_workspace *workspace, size_t capacity,
+  const struct fte3600_capture_io *io,
+  const struct fte3600_fw9369_startup_observer *observer,
+  struct fte3600_fw9369_startup_diagnostics *diagnostics)
+{
+  return run (FTE3600_FW9369_STARTUP, state, 10, 1, workspace, capacity,
+              io, diagnostics, observer, 1, 1);
 }
 
 /* Retained automatic detection after image acquisition; no calibration. */
@@ -557,7 +576,7 @@ fte3600_fw9369_startup_arm (
       !state->config.fast_rate)
     return FTE3600_FW9369_STARTUP_INVALID_ARGUMENT;
   struct startup op = {state, NULL, io, diagnostics ? diagnostics : &local,
-                       NULL, FTE3600_FW9369_STARTUP_OK, NULL, 1};
+                       NULL, FTE3600_FW9369_STARTUP_OK, NULL, 1, 0};
   memset (op.d, 0, sizeof (*op.d));
   enum fte3600_fw9369_startup_status status = arm (&op);
   if (status > FTE3600_FW9369_STARTUP_FAILED)

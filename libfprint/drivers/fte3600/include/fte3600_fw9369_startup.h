@@ -46,7 +46,8 @@ enum fte3600_fw9369_startup_status {
   FTE3600_FW9369_STARTUP_ADC_READ_ERROR,
   FTE3600_FW9369_STARTUP_UNDEFINED_BASELINE,
   FTE3600_FW9369_STARTUP_UNDEFINED_NEIGHBORHOOD,
-  FTE3600_FW9369_STARTUP_FIFO_READ_ERROR
+  FTE3600_FW9369_STARTUP_FIFO_READ_ERROR,
+  FTE3600_FW9369_STARTUP_TRANSPORT_ERROR
 };
 enum fte3600_fw9369_startup_warning {
   FTE3600_FW9369_SPI_MODE_EXHAUSTED = 1,
@@ -104,6 +105,17 @@ enum fte3600_fw9369_startup_status fte3600_fw9369_startup_checked (struct fte360
                                                                    const struct fte3600_capture_io              *io,
                                                                    const struct fte3600_fw9369_startup_observer *observer,
                                                                    struct fte3600_fw9369_startup_diagnostics    *diagnostics);
+
+/* Linux hardware policy: checked startup plus (1A83 & FF80) | 0016 after
+* automatic direction selection and before ACK/C2. A failed policy read/write
+* stops startup before arming. This is a local Linux integration requirement;
+* startup_run/observed/checked retain the original component contract. */
+enum fte3600_fw9369_startup_status fte3600_fw9369_startup_linux (struct fte3600_fw9369_startup_state *,
+                                                                 struct fte3600_fw9369_startup_workspace *,
+                                                                 size_t,
+                                                                 const struct fte3600_capture_io *,
+                                                                 const struct fte3600_fw9369_startup_observer *,
+                                                                 struct fte3600_fw9369_startup_diagnostics *);
 
 /* Bounded FW9369 startup after board/SPI initialization; no GPIO or IRQ setup.
  * All stages use physical SPI, with no high-level success provider. STARTUP

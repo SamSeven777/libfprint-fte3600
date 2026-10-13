@@ -53,7 +53,7 @@ struct fte3600_linux_board
   char                              names[3][64];
   int                               chip, reset, uio, spi, error, configured;
   uint8_t                           old_bits;
-  uint32_t                          old_mode, old_speed, mode, last_clock;
+  uint32_t                          old_mode, old_speed, mode, speed, last_clock;
   uint64_t                          last_monotonic;
   uint8_t                          *receive;
   struct fte3600_device_io          io;
@@ -427,7 +427,7 @@ spi_cb (void *context, uint8_t *buffer, size_t size)
   tr.tx_buf = (uintptr_t) buffer;
   tr.rx_buf = (uintptr_t) b->receive;
   tr.len = (uint32_t) size;
-  tr.speed_hz = b->id.info.acpi_speed_hz;
+  tr.speed_hz = b->speed;
   tr.bits_per_word = 8;
   r = checked_ioctl (b, b->spi, SPI_IOC_MESSAGE (1), &tr);
   if (r != (int) size)
@@ -551,7 +551,7 @@ boundary_cb (void *context, enum fte3600_factory_boundary which)
           checked_ioctl (b, b->spi, SPI_IOC_RD_BITS_PER_WORD, &bits) < 0 ||
           checked_ioctl (b, b->spi, SPI_IOC_RD_MAX_SPEED_HZ, &speed) < 0)
         return UINT32_C (0x80000000);
-      if (mode != b->mode || bits != 8 || speed != b->id.info.acpi_speed_hz)
+      if (mode != b->mode || bits != 8 || speed != b->speed)
         {
           latch (b, EPROTO);
           return UINT32_C (0x80000000);
@@ -648,6 +648,9 @@ fte3600_linux_board_open (const struct fte3600_linux_board_config *c,
       goto fail;
     }
   speed = b->id.info.acpi_speed_hz;
+  if(b->old_speed && b->old_speed < speed)
+    speed = b->old_speed;
+  b->speed = speed;
   if (checked_ioctl (b, b->spi, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
       checked_ioctl (b, b->spi, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0 ||
       boundary_cb (b, FTE3600_BOUNDARY_SETTINGS))
@@ -657,7 +660,8 @@ fte3600_linux_board_open (const struct fte3600_linux_board_config *c,
   return 0;
 fail:
   saved = errno ? errno : EIO;
-  fte3600_linux_board_close (b);
+  if(fte3600_linux_board_close (b))
+    saved = errno;
   return bad (saved);
 }
 const struct fte3600_device_io *
@@ -676,6 +680,14 @@ fte3600_linux_board_get_info (const struct fte3600_linux_board *b, struct fte360
   if(!b || !i)
     return bad (EINVAL);
   *i = b->id.info;
+  return 0;
+}
+int
+fte3600_linux_board_get_mode (const struct fte3600_linux_board *b, uint32_t *mode)
+{
+  if(!b || !mode || !b->configured)
+    return bad (EINVAL);
+  *mode = b->mode;
   return 0;
 }
 int
@@ -756,11 +768,33 @@ fte3600_linux_board_close (struct fte3600_linux_board *b)
     return 0;
   /* Do not perform recovery SPI after stale instance/removal. A prior
    * ordinary failure/cancel does not suppress restoration of a live lease. */
-  if (b->configured && !current (b, 1))
+  if (b->configured && current (b, 1))
+    {
+      saved = errno;
+    }
+  else if (b->configured)
     {
       uint32_t mode = b->id.info.acpi_mode;
-      if (b->id.info.cs_control && ioctl (b->spi, SPI_IOC_WR_MODE32, &mode) < 0)
-        saved = errno;
+      if (b->id.info.cs_control)
+        {
+          uint32_t readback = 0;
+          if(ioctl (b->spi, SPI_IOC_WR_MODE32, &mode) < 0)
+            saved = errno;
+          if(current (b, 1))
+            {
+              if(!saved)
+                saved = errno;
+            }
+          else if(ioctl (b->spi, SPI_IOC_RD_MODE32, &readback) < 0)
+            {
+              if(!saved)
+                saved = errno;
+            }
+          else if(readback != mode && !saved)
+            {
+              saved = EPROTO;
+            }
+        }
       if (!current (b, 1) && ioctl (b->spi, SPI_IOC_WR_BITS_PER_WORD, &b->old_bits) < 0 && !saved)
         saved = errno;
       if (!current (b, 1) && ioctl (b->spi, SPI_IOC_WR_MAX_SPEED_HZ, &b->old_speed) < 0 && !saved)

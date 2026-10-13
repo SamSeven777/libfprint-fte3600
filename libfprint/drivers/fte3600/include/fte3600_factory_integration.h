@@ -109,7 +109,9 @@ enum fte3600_factory_integration_error fte3600_factory_integration_run (const st
  * Unlike the strict compatibility entry, this hardware policy refuses the
  * round-3/4 forced FT9368 loader when no positive device identity was obtained:
  * UNCONFIRMED_IDENTITY is returned before that selection/binding or any load.
- * The original entry retains its strict all-payload preflight unchanged. */
+ * FW9369 startup uses the local Linux automatic detection policy (1A83 low
+ * seven bits 0016 before first automatic ACK/C2). The original entry retains
+ * its strict all-payload preflight and original component behavior unchanged. */
 enum fte3600_factory_integration_error fte3600_factory_integration_run_optional_firmware (const struct fte3600_factory_integration_input *,
                                                                                           enum fte3600_factory_model firmware_model,
                                                                                           struct fte3600_factory_integration_state *,

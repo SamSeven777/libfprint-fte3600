@@ -36,12 +36,18 @@ int fte3600_linux_board_validate (const struct fte3600_linux_board_config *,
  * every hardware operation. Sticky failures prevent further hardware I/O.
  * Configure native CS from ACPI; fixed CS NEVER writes mode. Preserve initial
  * bits/speed; native CS returns to ACPI mode on close (not stale trial mode).
+ * Effective speed is the lesser of ACPI maximum and saved nonzero spidev
+ * maximum; saved zero falls back to ACPI. Use it for every transfer.
  * No old fte3600_linux_create composition: reset uses active-low conversion. */
 int fte3600_linux_board_open (const struct fte3600_linux_board_config *,
                               struct fte3600_linux_board **);
 const struct fte3600_device_io *fte3600_linux_board_callbacks (struct fte3600_linux_board *);
 int fte3600_linux_board_get_info (const struct fte3600_linux_board *,
                                   struct fte3600_linux_board_info *);
+/* Cached last configured/readback-verified mode; no I/O. After a failed mode
+ * change this is the previous mode, not a new electrical-state measurement. */
+int fte3600_linux_board_get_mode (const struct fte3600_linux_board *,
+                                  uint32_t *);
 /* Native CS only; fixed CS returns ENOTSUP without issuing a mode write. */
 int fte3600_linux_board_set_cs (struct fte3600_linux_board *,
                                 int active_high);
@@ -51,7 +57,8 @@ int fte3600_linux_board_wait_irq (struct fte3600_linux_board *,
                                   uint32_t  timeout_ms,
                                   uint32_t *counter);
 /* Close UIO before reset. Restore settings only while identity/generation
- * remains valid; never retry failed close. Frees even after failure. */
+ * remains valid; verify restored ACPI mode. Report restoration/lease errors;
+ * never retry failed close. Frees even after failure. */
 int fte3600_linux_board_close (struct fte3600_linux_board *);
 #ifdef __cplusplus
 }

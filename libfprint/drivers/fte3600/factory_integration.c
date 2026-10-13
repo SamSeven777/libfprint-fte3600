@@ -373,7 +373,8 @@ startup (struct operation *op)
       const struct fte3600_fw9369_startup_observer observer = {op, fw_phase};
       op->r->fw_ran = 1;
       phase (op, FTE3600_FI_FW_STARTUP, 1, 0, 0);
-      op->r->child_status = fte3600_fw9369_startup_checked (&op->s->word.fw, &op->w->fw, sizeof op->w->fw, &io, &observer, &op->r->word.fw);
+      op->r->child_status = (op->optional_firmware ? fte3600_fw9369_startup_linux :
+                             fte3600_fw9369_startup_checked)(&op->s->word.fw, &op->w->fw, sizeof op->w->fw, &io, &observer, &op->r->word.fw);
       phase (op, FTE3600_FI_FW_STARTUP, 0, op->r->child_status <= 1, op->r->child_status == 1 ? UINT32_MAX : 0);
       if (op->r->child_status > 1)
         return FTE3600_FACTORY_INTEGRATION_FW_ERROR;

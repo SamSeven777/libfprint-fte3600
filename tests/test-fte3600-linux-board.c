@@ -40,12 +40,15 @@ static void (*bus_gpio)(int);
 static void (*bus_sleep)(uint64_t);
 static int (*bus_poll)(int);
 static void (*after_spi)(void);
+static void (*after_mode)(void);
 static int count_calls;
 static struct {
     unsigned realpaths, stats, lstats, metadata_opens, metadata_reads, metadata_closes;
 } calls;
 static struct {
     int reset_fd,uid,mode_writes,spi_calls,gpio_calls,ioctls,fail_ioctl;
+    int fail_mode_write,fail_mode_error,ignore_mode_write;
+    uint32_t written_modes[8];
     int short_spi,stale_spi,stale_request,stale_gpio,clock_error,sleep_error;
     int poll_event,poll_hup,short_uio,stale_uio,closed[8],closes;
     unsigned long long clock_ms;
@@ -178,7 +181,14 @@ int __wrap_ioctl(int fd,unsigned long command,...)
         return 0;
     }
     case SPI_IOC_RD_MODE32: *(uint32_t *)arg=fake.mode; return 0;
-    case SPI_IOC_WR_MODE32: ++fake.mode_writes; fake.mode=*(uint32_t *)arg; return 0;
+    case SPI_IOC_WR_MODE32:
+        ++fake.mode_writes;
+        CHECK(fake.mode_writes<=(int)(sizeof(fake.written_modes)/sizeof(fake.written_modes[0])));
+        fake.written_modes[fake.mode_writes-1]=*(uint32_t *)arg;
+        if(fake.mode_writes==fake.fail_mode_write) { errno=fake.fail_mode_error?fake.fail_mode_error:EIO;return -1; }
+        if(fake.mode_writes!=fake.ignore_mode_write) fake.mode=*(uint32_t *)arg;
+        if(after_mode) after_mode();
+        return 0;
     case SPI_IOC_RD_MAX_SPEED_HZ: *(uint32_t *)arg=fake.speed; return 0;
     case SPI_IOC_WR_MAX_SPEED_HZ: fake.speed=*(uint32_t *)arg; return 0;
     case SPI_IOC_RD_BITS_PER_WORD: *(uint8_t *)arg=fake.bits; return 0;
@@ -186,7 +196,7 @@ int __wrap_ioctl(int fd,unsigned long command,...)
     default: {
         struct spi_ioc_transfer *tr=arg;
         CHECK(command==SPI_IOC_MESSAGE(1)&&fd_kind(fd)==1); ++fake.spi_calls;
-        CHECK(tr->tx_buf!=tr->rx_buf&&tr->speed_hz==12000000&&tr->bits_per_word==8);
+        CHECK(tr->tx_buf!=tr->rx_buf&&tr->speed_hz==fake.speed&&tr->bits_per_word==8);
         if(bus_spi) {
             memcpy((void *)(uintptr_t)tr->rx_buf,(void *)(uintptr_t)tr->tx_buf,tr->len);
             if(bus_spi((void *)(uintptr_t)tr->rx_buf,tr->len)>>31) { errno=EIO;return -1; }
@@ -288,7 +298,7 @@ static void rejected_spi(struct fte3600_linux_board *b,int post)
     CHECK(io->spi(io->context,data,sizeof(data))&&io->error(io->context)==ESTALE);
     CHECK(fake.spi_calls==post&&!memcmp(data,original,sizeof(data)));
     io->clear_error(io->context);CHECK(io->spi(io->context,data,sizeof(data))&&fake.spi_calls==post);
-    int prior=fake.ioctls;(void)fte3600_linux_board_close(b);CHECK(fake.ioctls==prior);
+    int prior=fake.ioctls;CHECK(fte3600_linux_board_close(b)==-1&&errno==ESTALE);CHECK(fake.ioctls==prior);
     after_spi=NULL;
 }
 static void metadata_changes(void)
@@ -409,7 +419,7 @@ int main(void)
     c.gpio="../gpiochip7"; CHECK(fte3600_linux_board_validate(&c,&info)==-1); c=config();
     write_value(glue,"fte3600_glue_abi","1\n"); CHECK(fte3600_linux_board_validate(&c,&info)==-1);
     write_value(glue,"fte3600_glue_abi","2\n");
-    b=start(1); io=fte3600_linux_board_callbacks(b); CHECK(fake.mode==0&&fake.bits==8&&fake.speed==12000000);
+    b=start(1); io=fte3600_linux_board_callbacks(b); CHECK(fake.mode==0&&fake.bits==8&&fake.speed==1000000);
     CHECK(!io->gpio(io->context,0)&&!io->gpio(io->context,1));
     memset(data,0x12,sizeof(data));memset(&calls,0,sizeof(calls));count_calls=1;
     CHECK(!io->spi(io->context,data,sizeof(data))&&data[0]==0xa7&&fake.spi_calls==1);count_calls=0;
@@ -420,6 +430,28 @@ int main(void)
     CHECK(!fte3600_linux_board_close(b)); CHECK(fake.mode==0&&fake.bits==16&&fake.speed==1000000);
     CHECK(fake.closes==4&&fake.closed[0]==3&&fake.closed[1]==4&&fake.closed[2]==1&&fake.closed[3]==2);
     CHECK(fd_count()==before);
+    /* Preserve an existing lower speed ceiling, also on fixed-CS devices.
+     * Zero is unspecified; higher settings are capped by ACPI. */
+    static const uint32_t saved_speeds[]={1000000,12000000,20000000,0};
+    for(unsigned native=0;native<2;++native) for(unsigned n=0;n<4;++n) {
+        reset_fake((int)native);fake.speed=saved_speeds[n];
+        uint32_t expected=n==0?1000000:12000000;
+        CHECK(!fte3600_linux_board_open(&c,&b));io=fte3600_linux_board_callbacks(b);
+        CHECK(fake.speed==expected);
+        CHECK(!io->boundary(io->context,FTE3600_BOUNDARY_SETTINGS));
+        CHECK(!io->spi(io->context,data,sizeof(data)));
+        CHECK(!fte3600_linux_board_close(b)&&fake.speed==saved_speeds[n]&&fd_count()==before);
+        CHECK(fake.mode_writes==(native?2:0));
+    }
+    /* A successful ioctl is insufficient when restoration did not take.
+     * Failed restore still releases every descriptor and is observable. */
+    for(int failure=0;failure<2;++failure) {
+        b=start(1);CHECK(!fte3600_linux_board_set_cs(b,1));
+        if(failure) { fake.fail_mode_write=3;fake.fail_mode_error=EBUSY; }
+        else fake.ignore_mode_write=3;
+        CHECK(fte3600_linux_board_close(b)==-1&&errno==(failure?EBUSY:EPROTO));
+        CHECK(fake.mode==SPI_CS_HIGH&&fake.bits==16&&fake.speed==1000000&&fd_count()==before);
+    }
     b=start(0); CHECK(fte3600_linux_board_set_cs(b,1)==-1&&errno==ENOTSUP);
     CHECK(!fte3600_linux_board_close(b)&&fake.mode_writes==0&&fake.mode==3);
     reset_fake(1); write_value(sysroot,"module/spidev/parameters/bufsiz","8\n");
@@ -430,6 +462,8 @@ int main(void)
         reset_fake(1); fake.fail_ioctl=failure;
         CHECK(fte3600_linux_board_open(&c,&b)==-1&&b==NULL); CHECK(fd_count()==before);
     }
+    reset_fake(1);fake.fail_ioctl=8;fake.fail_mode_write=2;fake.fail_mode_error=EBUSY;
+    CHECK(fte3600_linux_board_open(&c,&b)==-1&&errno==EBUSY&&!b&&fd_count()==before);
     reset_fake(1); fake.stale_request=1; CHECK(fte3600_linux_board_open(&c,&b)==-1&&b==NULL); CHECK(fd_count()==before);
     for(int stale=0;stale<2;++stale) {
         b=start(1); io=fte3600_linux_board_callbacks(b); fake.short_spi=!stale; fake.stale_spi=stale;

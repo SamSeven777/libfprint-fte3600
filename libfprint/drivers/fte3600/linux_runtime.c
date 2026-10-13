@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/spi/spidev.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,7 @@ struct fte3600_linux_runtime
   gint64                         deadline;
   int                            timed_out;
   int                            needs_reopen;
+  int                            cs_retried;
   unsigned                       recoveries;
 };
 static enum fte3600_linux_runtime_error
@@ -190,6 +192,31 @@ end (struct fte3600_linux_runtime *r)
   g_clear_object (&r->cancellable);
   r->deadline = 0;
 }
+static void
+diagnostic_context (struct fte3600_linux_runtime            *r,
+                    struct fte3600_linux_runtime_diagnostic *d)
+{
+  struct fte3600_device_status s;
+  struct fte3600_linux_board_info info;
+
+  if(!d)
+    return;
+  if(r->session && !fte3600_device_get_status (r->session, &s))
+    {
+      d->has_session_status = 1;
+      d->component_error = s.component_error;
+      d->model = s.model;
+      d->raw_id = s.raw_id;
+      d->chip_id = s.chip_id;
+    }
+  if(r->board && !fte3600_linux_board_get_info (r->board, &info))
+    {
+      d->acpi_mode = info.acpi_mode;
+      d->cs_control = info.cs_control;
+      (void) fte3600_linux_board_get_mode (r->board, &d->last_configured_mode);
+    }
+  d->cs_retry_attempted = (unsigned) r->cs_retried;
+}
 static enum fte3600_linux_runtime_error
 session_error (struct fte3600_linux_runtime *r,
                enum fte3600_device_error e, struct fte3600_linux_runtime_diagnostic *d)
@@ -197,6 +224,7 @@ session_error (struct fte3600_linux_runtime *r,
   struct fte3600_device_status s = {0};
   int error = 0;
 
+  diagnostic_context (r, d);
   if(r->session)
     {
       fte3600_device_get_status (r->session, &s);
@@ -238,6 +266,32 @@ fte3600_linux_runtime_start (struct fte3600_linux_runtime *r,
     e = FTE3600_DEVICE_OK;
   if(!e)
     e = fte3600_device_start (r->session);
+  if(e == FTE3600_DEVICE_UNSUPPORTED && !r->cs_retried)
+    {
+      struct fte3600_linux_board_info info;
+      fte3600_device_get_status (r->session, &s);
+      if(s.component_error == FTE3600_FACTORY_INTEGRATION_UNCONFIRMED_IDENTITY &&
+         !s.platform_error && !s.failed_spi_calls &&
+         !r->device.io.error (r->device.io.context) && !cancelled (r) &&
+         !fte3600_linux_board_get_info (r->board, &info) && info.cs_control)
+        {
+          /* Completed SPI transfers with an unidentified response may be a
+           * polarity mismatch. One new cold session at the other permitted
+           * polarity; never reuse the failed factory/session state. */
+          r->cs_retried = 1;
+          diagnostic_context (r, d);
+          fte3600_device_close (r->session);
+          r->session = NULL;
+          if(fte3600_linux_board_set_cs (r->board, !(info.acpi_mode & SPI_CS_HIGH)))
+            {
+              rc = session_error (r, FTE3600_DEVICE_PLATFORM_ERROR, d);
+              goto done;
+            }
+          e = fte3600_device_create (&r->device, &r->session);
+          if(!e)
+            e = fte3600_device_start (r->session);
+        }
+    }
   if(e == FTE3600_DEVICE_MISSING_FIRMWARE)
     {
       fte3600_device_get_status (r->session, &s);
@@ -252,6 +306,10 @@ fte3600_linux_runtime_start (struct fte3600_linux_runtime *r,
     }
   rc = e ? session_error (r, e, d) : FTE3600_RUNTIME_OK;
 done:
+  if(rc)
+    diagnostic_context (r, d);
+  else
+    diagnostic_clear (d);
   end (r);
   return rc;
 }
@@ -308,8 +366,15 @@ fte3600_linux_runtime_open (
   *out = r;
   return FTE3600_RUNTIME_OK;
 fail:
-  fte3600_linux_runtime_close (r, NULL);
-  return rc;
+  {
+    struct fte3600_linux_runtime_diagnostic closed;
+    enum fte3600_linux_runtime_error close_rc = fte3600_linux_runtime_close (r, &closed);
+    /* Keep the operation's identity/CS snapshot, including when a mode
+     * change failed between sessions, while reporting cleanup failure. */
+    if(close_rc)
+      return result (d, close_rc, closed.system_error, closed.device_error);
+    return rc;
+  }
 }
 static enum fte3600_linux_runtime_error
 wait_error (struct fte3600_linux_runtime *r, int error,
@@ -317,6 +382,7 @@ wait_error (struct fte3600_linux_runtime *r, int error,
 {
   int stopped = cancelled (r);
 
+  diagnostic_context (r, d);
   if(r->timed_out || error == ETIMEDOUT)
     return result (d, FTE3600_RUNTIME_TIMEOUT, ETIMEDOUT, FTE3600_DEVICE_OK);
   if(error == ECANCELED || stopped)
@@ -631,6 +697,7 @@ fte3600_linux_runtime_close (struct fte3600_linux_runtime            *r,
   diagnostic_clear (d);
   if(!r)
     return FTE3600_RUNTIME_OK;
+  diagnostic_context (r, d);
   fte3600_device_close (r->session);
   if(fte3600_linux_board_close (r->board))
     saved = errno;

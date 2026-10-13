@@ -63,7 +63,9 @@ build() {
 check() {
   meson test -C "$srcdir/build" --print-errorlogs --no-rebuild \
     fpi-device fp-device fp-context-udev fte3600-auth \
-    fte3600-install-firmware fte3600-setup fte3600-pair
+    fte3600-install-firmware fte3600-setup fte3600-pair \
+    fte3600-linux-board fte3600-linux-runtime fte3600-device-session \
+    fte3600-fw9369-release fte3600-fw9369-runtime
 }
 
 package() {

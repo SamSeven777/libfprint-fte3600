@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "independent_source_commit": "f076601c74eddf6b0f727a018ad46ccbf6654513",
+  "independent_source_commit": "130116d4091a3bb621cd719d6b6374a274880ec1",
   "runtime_release": "0.2.1",
   "official_libfprint_commit": "6f9479c3d55f847c1b3769f28ceb99227f9858cf",
   "sam7_dependency_commit": "7e12c09abbd53516076b6d67a480003dc272cc8e",
