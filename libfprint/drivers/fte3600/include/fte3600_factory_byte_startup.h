@@ -21,6 +21,12 @@ struct fte3600_factory_byte_io
                    int level);
   uint32_t (*boundary)(void *,
                        enum fte3600_factory_boundary);
+  /* Optional final physical H + SPI 55 aa after H/10ms/L/20ms. Writes the
+   * GPIO status, returns overall high-bit failure status. A successful GPIO
+   * means SPI was attempted; no callbacks may interrupt the pair.
+   * NULL uses ordinary callbacks. Private source ABI: rebuild consumers. */
+  uint32_t (*release_and_sync)(void *,
+                               uint32_t *gpio_status);
 };
 struct fte3600_factory_byte_identity { size_t      length;
                                        const char *sha256;

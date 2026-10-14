@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "fte3600_legacy_boot.h"
+#include "fte3600_reset_sync.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,15 @@ observed_spi (void *context, const uint8_t *tx, uint8_t *rx, size_t n)
   struct observed_io *o = context;
 
   o->last_result = o->source->spi (o->source->context, tx, rx, n);
+  return o->last_result;
+}
+
+static int
+observed_release_and_sync (void *context, int *gpio_status)
+{
+  struct observed_io *o = context;
+
+  o->last_result = o->source->release_and_sync (o->source->context, gpio_status);
   return o->last_result;
 }
 
@@ -176,7 +186,8 @@ upload_a8 (
   size_t n, const struct fte3600_recovery_io *io,
   const struct fte3600_legacy_boot_observer *o)
 {
-  const uint8_t sync[2] = {0x55, 0xaa}, idle = 0x70;
+  const uint8_t idle = 0x70;
+  const struct fte3600_reset_observer ro = {(void *) o, reset_observation};
   uint8_t small_rx[2] = {0}, reply[2] = {0};
 
   uint8_t *tx = calloc (n + 7, 1), *rx = calloc (n + 7, 1);
@@ -190,10 +201,7 @@ upload_a8 (
   tx[4] = (uint8_t) (n >> 8);
   tx[5] = (uint8_t) n;
   memcpy (tx + 6, firmware, n);
-  error = reset (io, o);
-  if (error)
-    goto transport_error;
-  error = io->spi (io->context, sync, small_rx, sizeof sync);
+  error = fte3600_reset_and_sync (io, o ? &ro : NULL);
   if (error)
     goto transport_error;
   error = io->spi (io->context, tx, rx, n + 7);
@@ -339,7 +347,8 @@ fte3600_legacy_boot_run_observed (
 {
   struct observed_io observed = {source, 0};
   const struct fte3600_recovery_io io = {
-    &observed, observed_gpio, observed_spi, observed_wait, observed_clock
+    &observed, observed_gpio, observed_spi, observed_wait, observed_clock,
+    source && source->release_and_sync ? observed_release_and_sync : NULL
   };
   enum fte3600_legacy_boot_status status;
   enum fte3600_legacy_status runtime;

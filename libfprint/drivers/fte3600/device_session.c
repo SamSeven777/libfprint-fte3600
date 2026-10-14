@@ -78,6 +78,30 @@ gpio (void *context, int level)
   return value;
 }
 static uint32_t
+release_and_sync (void *context, uint32_t *gpio_status)
+{
+  struct fte3600_device_session *s = context;
+  uint32_t status = s->config.io.release_and_sync (s->config.io.context, gpio_status);
+
+  if (failed (*gpio_status))
+    {
+      s->io_failed = 1;
+      s->status.last_gpio_status = *gpio_status;
+    }
+  else
+    {
+      ++s->status.spi_calls;
+      if (failed (status))
+        {
+          s->io_failed = 1;
+          if (s->status.failed_spi_calls != UINT32_MAX)
+            ++s->status.failed_spi_calls;
+          s->status.last_spi_status = status;
+        }
+    }
+  return status;
+}
+static uint32_t
 boundary (void *context, enum fte3600_factory_boundary which)
 {
   struct fte3600_device_session *s = context;
@@ -114,6 +138,15 @@ legacy_spi (void *context, const uint8_t *tx, uint8_t *rx, size_t length)
 {
   memcpy (rx, tx, length);
   return legacy_raw_status (spi (context, rx, length));
+}
+static int
+legacy_release_and_sync (void *context, int *gpio_status)
+{
+  uint32_t gpio_result;
+  uint32_t status = release_and_sync (context, &gpio_result);
+
+  *gpio_status = legacy_raw_status (gpio_result);
+  return legacy_raw_status (status);
 }
 static enum fte3600_sensor
 legacy_sensor (enum fte3600_factory_model model)
@@ -243,11 +276,13 @@ fte3600_device_create (
   if (!s)
     return FTE3600_DEVICE_NO_MEMORY;
   s->config = *config;
-  s->factory_io = (fte3600_factory_integration_io){s, spi, wait_ms, wait_us, gpio, boundary};
+  s->factory_io = (fte3600_factory_integration_io){s, spi, wait_ms, wait_us, gpio, boundary,
+                                                   config->io.release_and_sync ? release_and_sync : NULL};
   s->fw_io = (struct fte3600_capture_io){s, spi, wait_ms};
   s->modern_io = (struct fte3600_ft93xx_io){s, spi, wait_ms};
   s->byte_io = (struct fte3600_ft9368_io){s, spi, wait_ms};
-  s->legacy_io = (struct fte3600_recovery_io){s, legacy_gpio, legacy_spi, wait_ms, clock_ms};
+  s->legacy_io = (struct fte3600_recovery_io){s, legacy_gpio, legacy_spi, wait_ms, clock_ms,
+                                              config->io.release_and_sync ? legacy_release_and_sync : NULL};
   (void) fte3600_factory_integration_state_defaults (&s->factory);
   s->status.state = FTE3600_DEVICE_CREATED;
   *output = s;
@@ -433,8 +468,8 @@ fte3600_device_arm (struct fte3600_device_session *s)
       if (!s->fw_down_armed)
         {
           struct fte3600_fw9369_release_diagnostics d;
-          s->status.component_error = fte3600_fw9369_arm_detection (&s->factory.word.fw,
-                                                                    FTE3600_FW9369_DOWN, &s->fw_io, &d);
+          s->status.component_error = fte3600_fw9369_arm_detection_linux (&s->factory.word.fw,
+                                                                          FTE3600_FW9369_DOWN, &s->fw_io, &d);
           if (s->status.component_error)
             error = FTE3600_DEVICE_ACQUISITION_ERROR;
           else
@@ -494,8 +529,8 @@ acquire (struct fte3600_device_session *s)
       struct fte3600_fw9369_release_diagnostics rd;
       enum fte3600_fw9369_event event;
       fw_next = s->factory.word.fw;
-      s->status.component_error = fte3600_fw9369_event_run (&fw_next, 0, &s->fw_release_rejections,
-                                                            &s->startup_storage.fw, sizeof (s->startup_storage.fw), &event, &s->fw_io, &rd);
+      s->status.component_error = fte3600_fw9369_event_run_linux (&fw_next, 0, &s->fw_release_rejections,
+                                                                  &s->startup_storage.fw, sizeof (s->startup_storage.fw), &event, &s->fw_io, &rd);
       if (s->status.component_error)
         {
           error = FTE3600_DEVICE_ACQUISITION_ERROR;
@@ -510,8 +545,8 @@ acquire (struct fte3600_device_session *s)
         {
           if (event == FTE3600_FW9369_EVENT_RELEASED)
             {
-              s->status.component_error = fte3600_fw9369_arm_detection (&fw_next,
-                                                                        FTE3600_FW9369_DOWN, &s->fw_io, &rd);
+              s->status.component_error = fte3600_fw9369_arm_detection_linux (&fw_next,
+                                                                              FTE3600_FW9369_DOWN, &s->fw_io, &rd);
               if (s->status.component_error)
                 {
                   error = FTE3600_DEVICE_ACQUISITION_ERROR;
@@ -532,8 +567,8 @@ acquire (struct fte3600_device_session *s)
       if (!error)
         {
           /* Preserve an UP arriving while the caller processes the image. */
-          s->status.component_error = fte3600_fw9369_arm_detection (&fw_next,
-                                                                    FTE3600_FW9369_UP, &s->fw_io, &rd);
+          s->status.component_error = fte3600_fw9369_arm_detection_linux (&fw_next,
+                                                                          FTE3600_FW9369_UP, &s->fw_io, &rd);
           if (s->status.component_error)
             error = FTE3600_DEVICE_ACQUISITION_ERROR;
         }
@@ -596,8 +631,8 @@ fte3600_device_release_step (struct fte3600_device_session *s,
   struct fte3600_fw9369_release_diagnostics d;
   enum fte3600_fw9369_event outcome = FTE3600_FW9369_EVENT_PENDING;
   enum fte3600_device_error error = FTE3600_DEVICE_OK;
-  s->status.component_error = fte3600_fw9369_event_run (&next, 1, &s->fw_release_rejections,
-                                                        &s->startup_storage.fw, sizeof (s->startup_storage.fw), &outcome, &s->fw_io, &d);
+  s->status.component_error = fte3600_fw9369_event_run_linux (&next, 1, &s->fw_release_rejections,
+                                                              &s->startup_storage.fw, sizeof (s->startup_storage.fw), &outcome, &s->fw_io, &d);
   if (s->status.component_error)
     {
       error = FTE3600_DEVICE_CALIBRATION_ERROR;
@@ -610,9 +645,9 @@ fte3600_device_release_step (struct fte3600_device_session *s,
     }
   if (outcome != FTE3600_FW9369_EVENT_PENDING)
     {
-      s->status.component_error = fte3600_fw9369_arm_detection (&next,
-                                                                outcome == FTE3600_FW9369_EVENT_RELEASED ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP,
-                                                                &s->fw_io, &d);
+      s->status.component_error = fte3600_fw9369_arm_detection_linux (&next,
+                                                                      outcome == FTE3600_FW9369_EVENT_RELEASED ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP,
+                                                                      &s->fw_io, &d);
       if (s->status.component_error)
         error = FTE3600_DEVICE_ACQUISITION_ERROR;
     }
@@ -660,8 +695,8 @@ fte3600_device_recover_fw9369 (struct fte3600_device_session *s,
   wait_ms (s, 5);
   if (s->config.io.error (s->config.io.context))
     goto done;
-  s->status.component_error = fte3600_fw9369_startup_checked (&next, &s->startup_storage.fw,
-                                                              sizeof (s->startup_storage.fw), &s->fw_io, NULL, &d);
+  s->status.component_error = fte3600_fw9369_startup_linux (&next, &s->startup_storage.fw,
+                                                            sizeof (s->startup_storage.fw), &s->fw_io, NULL, &d);
   if (s->status.component_error || d.completed != 7 || d.fdt_status || d.image_status || d.warnings ||
       d.transport.exhausted_transactions || d.transport.ready_timeout ||
       !next.baseline_flag_1 || !next.baseline_flag_2)
@@ -672,7 +707,7 @@ fte3600_device_recover_fw9369 (struct fte3600_device_session *s,
   if (waiting_release)
     {
       struct fte3600_fw9369_release_diagnostics rd;
-      s->status.component_error = fte3600_fw9369_arm_detection (&next, FTE3600_FW9369_UP, &s->fw_io, &rd);
+      s->status.component_error = fte3600_fw9369_arm_detection_linux (&next, FTE3600_FW9369_UP, &s->fw_io, &rd);
       if (s->status.component_error)
         {
           error = FTE3600_DEVICE_ACQUISITION_ERROR;

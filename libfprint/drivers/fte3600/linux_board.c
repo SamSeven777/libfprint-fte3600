@@ -53,7 +53,7 @@ struct fte3600_linux_board
   char                              names[3][64];
   int                               chip, reset, uio, spi, error, configured;
   uint8_t                           old_bits;
-  uint32_t                          old_mode, old_speed, mode, last_clock;
+  uint32_t                          old_mode, old_speed, mode, speed, last_clock;
   uint64_t                          last_monotonic;
   uint8_t                          *receive;
   struct fte3600_device_io          io;
@@ -427,7 +427,7 @@ spi_cb (void *context, uint8_t *buffer, size_t size)
   tr.tx_buf = (uintptr_t) buffer;
   tr.rx_buf = (uintptr_t) b->receive;
   tr.len = (uint32_t) size;
-  tr.speed_hz = b->id.info.acpi_speed_hz;
+  tr.speed_hz = b->speed;
   tr.bits_per_word = 8;
   r = checked_ioctl (b, b->spi, SPI_IOC_MESSAGE (1), &tr);
   if (r != (int) size)
@@ -451,6 +451,56 @@ gpio_cb (void *context, int physical)
       return UINT32_C (0x80000000);
     }
   return checked_ioctl (b, b->reset, GPIO_V2_LINE_SET_VALUES_IOCTL, &v) < 0 ? UINT32_C (0x80000000) : 0;
+}
+/* The complete transaction is checked before release and after sync. There is
+ * deliberately no general "unchecked" state: every other operation continues
+ * to use checked_ioctl(), including the first two GPIOs and both pulse waits. */
+static int
+finish_release_and_sync (struct fte3600_linux_board *b, int io_error)
+{
+  int checked = current (b, 0);
+
+  /* Entry validation established a clean latch. A syscall failure happened
+   * before the trailing validation: retain that first meaningful error even
+   * if cancellation/removal is also observed. Close still checks the lease. */
+  if (io_error)
+    {
+      b->error = io_error;
+      return bad (io_error);
+    }
+  return checked;
+}
+static uint32_t
+release_and_sync_cb (void *context, uint32_t *gpio_status)
+{
+  struct fte3600_linux_board *b = context;
+  struct gpio_v2_line_values release = {.mask = 1, .bits = 0};
+  const uint8_t tx[2] = {0x55, 0xaa};
+  uint8_t rx[2];
+  struct spi_ioc_transfer tr = {.tx_buf = (uintptr_t) tx, .rx_buf = (uintptr_t) rx,
+                                .len = sizeof (tx), .speed_hz = b->speed, .bits_per_word = 8};
+  int transferred, saved;
+
+  *gpio_status = UINT32_C (0x80000000);
+  if (b->config.transfer_capacity < sizeof (tx))
+    {
+      latch (b, EMSGSIZE);
+      return UINT32_C (0x80000000);
+    }
+  if (current (b, 0))
+    return UINT32_C (0x80000000);
+  if (ioctl (b->reset, GPIO_V2_LINE_SET_VALUES_IOCTL, &release) < 0)
+    {
+      saved = errno;
+      (void) finish_release_and_sync (b, saved);
+      return UINT32_C (0x80000000);
+    }
+  /* Successful physical release: the next system operation is the prepared
+   * SPI message. No callback, clock, allocation, logging or metadata I/O. */
+  transferred = ioctl (b->spi, SPI_IOC_MESSAGE (1), &tr);
+  saved = transferred < 0 ? errno : transferred != (int) sizeof (tx) ? EIO : 0;
+  *gpio_status = 0;
+  return finish_release_and_sync (b, saved) ? UINT32_C (0x80000000) : 0;
 }
 static int
 now_ms (struct fte3600_linux_board *b, uint64_t *ms)
@@ -551,7 +601,7 @@ boundary_cb (void *context, enum fte3600_factory_boundary which)
           checked_ioctl (b, b->spi, SPI_IOC_RD_BITS_PER_WORD, &bits) < 0 ||
           checked_ioctl (b, b->spi, SPI_IOC_RD_MAX_SPEED_HZ, &speed) < 0)
         return UINT32_C (0x80000000);
-      if (mode != b->mode || bits != 8 || speed != b->id.info.acpi_speed_hz)
+      if (mode != b->mode || bits != 8 || speed != b->speed)
         {
           latch (b, EPROTO);
           return UINT32_C (0x80000000);
@@ -648,16 +698,20 @@ fte3600_linux_board_open (const struct fte3600_linux_board_config *c,
       goto fail;
     }
   speed = b->id.info.acpi_speed_hz;
+  if(b->old_speed && b->old_speed < speed)
+    speed = b->old_speed;
+  b->speed = speed;
   if (checked_ioctl (b, b->spi, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
       checked_ioctl (b, b->spi, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0 ||
       boundary_cb (b, FTE3600_BOUNDARY_SETTINGS))
     goto fail;
-  b->io = (struct fte3600_device_io){b, spi_cb, wait_ms_cb, wait_us_cb, gpio_cb, boundary_cb, clock_cb, error_cb, clear_cb};
+  b->io = (struct fte3600_device_io){b, spi_cb, wait_ms_cb, wait_us_cb, gpio_cb, boundary_cb, clock_cb, error_cb, clear_cb, release_and_sync_cb};
   *out = b;
   return 0;
 fail:
   saved = errno ? errno : EIO;
-  fte3600_linux_board_close (b);
+  if(fte3600_linux_board_close (b))
+    saved = errno;
   return bad (saved);
 }
 const struct fte3600_device_io *
@@ -676,6 +730,14 @@ fte3600_linux_board_get_info (const struct fte3600_linux_board *b, struct fte360
   if(!b || !i)
     return bad (EINVAL);
   *i = b->id.info;
+  return 0;
+}
+int
+fte3600_linux_board_get_mode (const struct fte3600_linux_board *b, uint32_t *mode)
+{
+  if(!b || !mode || !b->configured)
+    return bad (EINVAL);
+  *mode = b->mode;
   return 0;
 }
 int
@@ -756,11 +818,33 @@ fte3600_linux_board_close (struct fte3600_linux_board *b)
     return 0;
   /* Do not perform recovery SPI after stale instance/removal. A prior
    * ordinary failure/cancel does not suppress restoration of a live lease. */
-  if (b->configured && !current (b, 1))
+  if (b->configured && current (b, 1))
+    {
+      saved = errno;
+    }
+  else if (b->configured)
     {
       uint32_t mode = b->id.info.acpi_mode;
-      if (b->id.info.cs_control && ioctl (b->spi, SPI_IOC_WR_MODE32, &mode) < 0)
-        saved = errno;
+      if (b->id.info.cs_control)
+        {
+          uint32_t readback = 0;
+          if(ioctl (b->spi, SPI_IOC_WR_MODE32, &mode) < 0)
+            saved = errno;
+          if(current (b, 1))
+            {
+              if(!saved)
+                saved = errno;
+            }
+          else if(ioctl (b->spi, SPI_IOC_RD_MODE32, &readback) < 0)
+            {
+              if(!saved)
+                saved = errno;
+            }
+          else if(readback != mode && !saved)
+            {
+              saved = EPROTO;
+            }
+        }
       if (!current (b, 1) && ioctl (b->spi, SPI_IOC_WR_BITS_PER_WORD, &b->old_bits) < 0 && !saved)
         saved = errno;
       if (!current (b, 1) && ioctl (b->spi, SPI_IOC_WR_MAX_SPEED_HZ, &b->old_speed) < 0 && !saved)

@@ -13,6 +13,7 @@ struct bus {
     unsigned adc_count, adc_reads, frames, calls, n_events;
     unsigned fail_adc, fail_fifo, fail_word, not_ready, last_row_spike;
     unsigned irq_count, irq_reads, manual_ready, id_reads, id_failures, negotiation_mismatch;
+    unsigned fail_policy_read, fail_policy_write;
     uint8_t mode;
     struct event events[4096];
 };
@@ -39,6 +40,7 @@ static uint32_t spi(void *context, uint8_t *data, size_t length)
     if (data[0] == 9 && length == 4) return 0;
     if (data[0] == 5 && length >= 8) {
         size_t at = ((size_t)(data[2] & 127) << 8) | data[3];
+        if (at == 0x1a83 && b->fail_policy_write) return UINT32_C(0xc0000185);
         if (at == 0x1885) b->manual_ready = 1;
         for (size_t i = 6; i + 1 < length; i += 2)
             b->words[at++] = (uint16_t)((uint16_t)data[i] << 8 | data[i+1]);
@@ -46,6 +48,7 @@ static uint32_t spi(void *context, uint8_t *data, size_t length)
     }
     if (data[0] == 4 && length >= 10) {
         size_t at = ((size_t)(data[2] & 127) << 8) | data[3];
+        if (at == 0x1a83 && b->fail_policy_read) return UINT32_C(0xc0000185);
         if (at == 0xb8 || at == 0xe8) {
             if (b->fail_adc) return UINT32_C(0xc0000185);
             CHECK(length == 14 || length == 22);
@@ -263,6 +266,63 @@ static void arm_and_errors(void)
     CHECK(!b->calls && !memcmp(&saved, &d, sizeof(d)));
     free(b);
 }
+static unsigned command_count(const struct bus *b,uint8_t command)
+{
+    unsigned count=0;
+    for (unsigned i=0;i<b->n_events;++i)
+        count+=b->events[i].length==3 && b->events[i].data[0]==command;
+    return count;
+}
+static void linux_detection(void)
+{
+    struct bus *b=calloc(1,sizeof(*b));CHECK(b);
+    struct fte3600_fw9369_startup_workspace *w=calloc(1,sizeof(*w));CHECK(w);
+    const struct fte3600_capture_io io={b,spi,wait_ms};
+    struct fte3600_fw9369_release_diagnostics d;
+    for (unsigned choice=1;choice<=2;++choice) for (unsigned fault=0;fault<3;++fault) {
+        struct fte3600_fw9369_startup_state s=state();init_bus(b);
+        b->words[0x1a83]=0xa5ff;b->fail_policy_read=fault==1;b->fail_policy_write=fault==2;
+        enum fte3600_fw9369_release_status rc=fte3600_fw9369_arm_detection_linux(
+            &s,(enum fte3600_fw9369_detection)choice,&io,&d);
+        if (fault) {
+            CHECK(rc==(fault==1?FTE3600_FW9369_RELEASE_WORD_READ_ERROR:FTE3600_FW9369_RELEASE_TRANSPORT_ERROR));
+            CHECK(!command_count(b,0xc2) && d.transport.exhausted_transactions==1);
+            CHECK(b->words[0x1a83]==0xa5ff);
+        } else {
+            CHECK(!rc && b->words[0x1a83]==0xa596 && command_count(b,0xc2)==1);
+            CHECK(b->n_events>=10);struct event *tail=b->events+b->n_events-10;
+            CHECK(tail[4].data[0]==5 && tail[4].data[3]==0x81);
+            CHECK(tail[5].data[0]==4 && tail[5].data[3]==0x83);
+            CHECK(tail[6].data[0]==5 && tail[6].data[3]==0x83);
+            CHECK(tail[7].data[0]==5 && tail[7].data[3]==0x84 && tail[7].data[7]==0x2f);
+            CHECK(tail[8].data[0]==0xc2 && tail[9].delay==1);
+            /* Repeated timer invocations leave both directions completely
+             * unchanged, including diagnostics, retained samples and mode. */
+            struct fte3600_fw9369_startup_state before=s;
+            b->irq_count=1;b->irq[0]=0;b->n_events=b->calls=0;
+            unsigned rejected=7;enum fte3600_fw9369_event event=99;
+            for (unsigned i=0;i<5;++i)
+                CHECK(!fte3600_fw9369_event_run_linux(&s,choice==2,&rejected,w,sizeof(*w),&event,&io,&d));
+            CHECK(event==FTE3600_FW9369_EVENT_PENDING && rejected==7 && b->calls==5 && b->n_events==5);
+            CHECK(!memcmp(&s,&before,sizeof(s)));
+        }
+    }
+    for (unsigned reset=0;reset<2;++reset) {
+        struct fte3600_fw9369_startup_state s=state();init_bus(b);
+        b->irq_count=3;b->irq[0]=2;b->irq[1]=reset?0x10:0;b->irq[2]=0;
+        b->id_failures=1;unsigned rejected=0;enum fte3600_fw9369_event event=99;
+        CHECK(!fte3600_fw9369_event_run_linux(&s,0,&rejected,w,sizeof(*w),&event,&io,&d));
+        CHECK(event==(reset?FTE3600_FW9369_EVENT_RECOVERY:FTE3600_FW9369_EVENT_PENDING));
+        CHECK(!command_count(b,0xc2) && !b->frames && !b->adc_reads);
+        CHECK(b->irq_reads==(reset?3u:2u)); /* old Down was not consumed after idle */
+    }
+    struct fte3600_fw9369_startup_state s=state();init_bus(b);
+    b->irq_count=3;b->irq[0]=b->irq[1]=1;b->irq[2]=0;b->words[0x1a83]=0xa5ff;
+    unsigned rejected=0;enum fte3600_fw9369_event event=99;
+    CHECK(!fte3600_fw9369_event_run_linux(&s,0,&rejected,w,sizeof(*w),&event,&io,&d));
+    CHECK(event==FTE3600_FW9369_EVENT_PENDING && command_count(b,0xc2)==1 && b->words[0x1a83]==0xa596);
+    free(w);free(b);
+}
 static void composed(void)
 {
     struct bus *b = calloc(1, sizeof(*b)); CHECK(b);
@@ -369,7 +429,7 @@ static void event_queries(void)
 }
 int main(void)
 {
-    classifications(); confirmation(); maintenance(); baseline_checks(); arm_and_errors(); composed(); event_queries();
+    classifications(); confirmation(); maintenance(); baseline_checks(); arm_and_errors(); composed(); event_queries(); linux_detection();
     puts("FW9369 release: independent physical transactions, strict boundaries, finite-width statistics, confirmed maintenance and failure guards passed");
     return 0;
 }

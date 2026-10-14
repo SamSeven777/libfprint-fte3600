@@ -201,6 +201,34 @@ legacy_gpio (void *c, int level)
 {
   return raw (gpio (c, (unsigned int) level));
 }
+static int
+legacy_release_and_sync (void *c, int *gpio_status)
+{
+  struct operation *op = c;
+  uint32_t gpio_result;
+
+  op->last_status = op->io->release_and_sync (op->io->context, &gpio_result);
+  ++op->r->event_count;
+  if (negative (gpio_result))
+    {
+      ++op->r->gpio_failures;
+      op->r->last_gpio_failure = gpio_result;
+    }
+  else
+    {
+      ++op->r->physical_calls;
+      ++op->r->event_count;
+      if (negative (op->last_status))
+        {
+          ++op->r->transport_failures;
+          op->r->last_transport_failure = op->last_status;
+          if (op->last_status == FTE3600_FACTORY_LEGACY_UNAVAILABLE)
+            op->unavailable = 1;
+        }
+    }
+  *gpio_status = raw (gpio_result);
+  return raw (op->last_status);
+}
 static uint32_t
 clock_ms (void *c)
 {
@@ -272,7 +300,7 @@ static enum fte3600_factory_legacy_error
 word (struct operation *op,
       enum fte3600_factory_word_operation which, uint32_t settle, uint16_t *id)
 {
-  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, gpio, op->io->boundary};
+  const struct fte3600_factory_startup_io io = {op, spi, wait_ms, gpio, op->io->boundary, NULL};
   const struct fte3600_factory_startup_observer o = {op, word_observation};
   enum fte3600_factory_startup_error error = fte3600_factory_word_operation (which, settle, &io, &o, &op->word, id);
 
@@ -443,7 +471,8 @@ fte3600_factory_legacy_startup_run (
   r->model = in->initial_model;
   struct operation op = {.io = io, .observer = o, .r = r};
   const struct fte3600_ft9368_io byte_io = {&op, byte_spi, wait_ms};
-  const struct fte3600_recovery_io legacy_io = {&op, legacy_gpio, legacy_spi, wait_ms, clock_ms};
+  const struct fte3600_recovery_io legacy_io = {&op, legacy_gpio, legacy_spi, wait_ms, clock_ms,
+                                                io->release_and_sync ? legacy_release_and_sync : NULL};
   for (int b = FTE3600_BOUNDARY_PLATFORM; b <= FTE3600_BOUNDARY_RESOURCES; ++b)
     {
       uint32_t status = io->boundary (io->context, (enum fte3600_factory_boundary) b);
@@ -587,7 +616,8 @@ child_run (
       (which >= FTE3600_FL_CHILD_ARM && !sensor (r->model)))
     return FTE3600_FACTORY_LEGACY_INVALID_ARGUMENT;
   struct operation op = {.io = io, .observer = o, .r = r};
-  const struct fte3600_recovery_io legacy_io = {&op, legacy_gpio, legacy_spi, wait_ms, clock_ms};
+  const struct fte3600_recovery_io legacy_io = {&op, legacy_gpio, legacy_spi, wait_ms, clock_ms,
+                                                io->release_and_sync ? legacy_release_and_sync : NULL};
   if (which == FTE3600_FL_CHILD_PING)
     {
       r->status = ping (&op);

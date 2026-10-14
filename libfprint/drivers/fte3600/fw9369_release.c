@@ -240,10 +240,11 @@ fte3600_fw9369_baseline_needs_reset (
             ((int) work.median < (int) s->image_median - 30 && spread < 150);
   return FTE3600_FW9369_RELEASE_OK;
 }
-enum fte3600_fw9369_release_status
-fte3600_fw9369_arm_detection (
+static enum fte3600_fw9369_release_status
+arm_detection (
   struct fte3600_fw9369_startup_state *s, enum fte3600_fw9369_detection selection,
-  const struct fte3600_capture_io *io, struct fte3600_fw9369_release_diagnostics *diagnostics)
+  const struct fte3600_capture_io *io, struct fte3600_fw9369_release_diagnostics *diagnostics,
+  int linux_detection)
 {
   struct fte3600_fw9369_release_diagnostics local, *d = diagnostics ? diagnostics : &local;
 
@@ -276,10 +277,33 @@ fte3600_fw9369_arm_detection (
     return FTE3600_FW9369_RELEASE_WORD_READ_ERROR;
   value = (uint16_t) ((value & 0xff7c) | (selection == FTE3600_FW9369_DOWN ? 0x81 : 0));
   uint8_t trigger[3] = {0xc2, 0x3d, 0};
-  if (!write_word (0x1881, value, io, d) || !write_word (0x1a84, 0x2f, io, d) || !transfer (trigger, sizeof (trigger), io, d))
+  if (!write_word (0x1881, value, io, d))
+    return FTE3600_FW9369_RELEASE_TRANSPORT_ERROR;
+  if (linux_detection)
+    {
+      if (!word (0x1a83, &value, io, d))
+        return FTE3600_FW9369_RELEASE_WORD_READ_ERROR;
+      if (!write_word (0x1a83, (uint16_t) ((value & 0xff80) | 0x16), io, d))
+        return FTE3600_FW9369_RELEASE_TRANSPORT_ERROR;
+    }
+  if (!write_word (0x1a84, 0x2f, io, d) || !transfer (trigger, sizeof (trigger), io, d))
     return FTE3600_FW9369_RELEASE_TRANSPORT_ERROR;
   io->wait_ms (io->context, 1);
   return FTE3600_FW9369_RELEASE_OK;
+}
+enum fte3600_fw9369_release_status
+fte3600_fw9369_arm_detection (
+  struct fte3600_fw9369_startup_state *s, enum fte3600_fw9369_detection selection,
+  const struct fte3600_capture_io *io, struct fte3600_fw9369_release_diagnostics *d)
+{
+  return arm_detection (s, selection, io, d, 0);
+}
+enum fte3600_fw9369_release_status
+fte3600_fw9369_arm_detection_linux (
+  struct fte3600_fw9369_startup_state *s, enum fte3600_fw9369_detection selection,
+  const struct fte3600_capture_io *io, struct fte3600_fw9369_release_diagnostics *d)
+{
+  return arm_detection (s, selection, io, d, 1);
 }
 enum fte3600_fw9369_release_status
 fte3600_fw9369_read_irq (uint16_t *status,
@@ -444,7 +468,7 @@ handle_up (
   struct fte3600_fw9369_startup_state *s, int maintenance, unsigned *rejections, int late,
   struct fte3600_fw9369_startup_workspace *w, size_t capacity,
   enum fte3600_fw9369_event *event, const struct fte3600_capture_io *io,
-  struct fte3600_fw9369_release_diagnostics *d)
+  struct fte3600_fw9369_release_diagnostics *d, int linux_detection)
 {
   struct fte3600_fw9369_release_diagnostics child;
   enum fte3600_fw9369_release_outcome outcome;
@@ -464,7 +488,7 @@ handle_up (
         }
       else
         {
-          status = fte3600_fw9369_arm_detection (s, FTE3600_FW9369_UP, io, &child);
+          status = arm_detection (s, FTE3600_FW9369_UP, io, &child, linux_detection);
           merge (d, &child);
           if (status)
             return status;
@@ -477,12 +501,12 @@ handle_up (
     }
   return FTE3600_FW9369_RELEASE_OK;
 }
-enum fte3600_fw9369_release_status
-fte3600_fw9369_event_run (
+static enum fte3600_fw9369_release_status
+event_run (
   struct fte3600_fw9369_startup_state *s, int maintenance, unsigned *rejections,
   struct fte3600_fw9369_startup_workspace *w, size_t capacity,
   enum fte3600_fw9369_event *out, const struct fte3600_capture_io *io,
-  struct fte3600_fw9369_release_diagnostics *diagnostics)
+  struct fte3600_fw9369_release_diagnostics *diagnostics, int linux_detection)
 {
   struct fte3600_fw9369_release_diagnostics local, *d = diagnostics ? diagnostics : &local;
 
@@ -490,6 +514,19 @@ fte3600_fw9369_event_run (
       !w || capacity < sizeof (*w) || !out)
     return FTE3600_FW9369_RELEASE_INVALID_ARGUMENT;
   memset (d, 0, sizeof (*d));
+  uint16_t initial = 0, late;
+  if (linux_detection)
+    {
+      /* Deadline wakeups and lost-notification fallback are passive. The
+       * compatibility operation below is an event handler, not a timer. */
+      if (!word (0x1a82, &initial, io, d))
+        return FTE3600_FW9369_RELEASE_WORD_READ_ERROR;
+      if (!initial)
+        {
+          *out = FTE3600_FW9369_EVENT_PENDING;
+          return FTE3600_FW9369_RELEASE_OK;
+        }
+    }
   int ready = communication (io, d);
   for (unsigned retry = 0; ready == 0 && retry < 10; ++retry)
     {
@@ -505,9 +542,15 @@ fte3600_fw9369_event_run (
       *out = FTE3600_FW9369_EVENT_RECOVERY;
       return FTE3600_FW9369_RELEASE_OK;
     }
-  uint16_t initial, late;
+  /* Communication retries can enter idle; re-read rather than consuming a
+  * stale precheck. A cleared status is still no reason to restart FDT. */
   if (!word (0x1a82, &initial, io, d))
     return FTE3600_FW9369_RELEASE_WORD_READ_ERROR;
+  if (linux_detection && !initial)
+    {
+      *out = FTE3600_FW9369_EVENT_PENDING;
+      return FTE3600_FW9369_RELEASE_OK;
+    }
   if (!write_word (0x1a84, initial, io, d))
     return FTE3600_FW9369_RELEASE_TRANSPORT_ERROR;
   enum fte3600_fw9369_event event = FTE3600_FW9369_EVENT_PENDING;
@@ -527,7 +570,7 @@ fte3600_fw9369_event_run (
     }
   else if (initial & 4)
     {
-      status = handle_up (s, maintenance, rejections, 0, w, capacity, &event, io, d);
+      status = handle_up (s, maintenance, rejections, 0, w, capacity, &event, io, d, linux_detection);
       if (status)
         return status;
     }
@@ -542,7 +585,7 @@ fte3600_fw9369_event_run (
   else
     {
       struct fte3600_fw9369_release_diagnostics child;
-      status = fte3600_fw9369_arm_detection (s, s->arm_mode ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP, io, &child);
+      status = arm_detection (s, s->arm_mode ? FTE3600_FW9369_DOWN : FTE3600_FW9369_UP, io, &child, linux_detection);
       merge (d, &child);
       if (status)
         return status;
@@ -557,10 +600,28 @@ fte3600_fw9369_event_run (
     {
       if (!write_word (0x1a84, late, io, d))
         return FTE3600_FW9369_RELEASE_TRANSPORT_ERROR;
-      status = handle_up (s, 1, rejections, 1, w, capacity, &event, io, d);
+      status = handle_up (s, 1, rejections, 1, w, capacity, &event, io, d, linux_detection);
       if (status)
         return status;
     }
   *out = event;
   return FTE3600_FW9369_RELEASE_OK;
+}
+enum fte3600_fw9369_release_status
+fte3600_fw9369_event_run (
+  struct fte3600_fw9369_startup_state *s, int maintenance, unsigned *rejections,
+  struct fte3600_fw9369_startup_workspace *w, size_t capacity,
+  enum fte3600_fw9369_event *out, const struct fte3600_capture_io *io,
+  struct fte3600_fw9369_release_diagnostics *d)
+{
+  return event_run (s, maintenance, rejections, w, capacity, out, io, d, 0);
+}
+enum fte3600_fw9369_release_status
+fte3600_fw9369_event_run_linux (
+  struct fte3600_fw9369_startup_state *s, int maintenance, unsigned *rejections,
+  struct fte3600_fw9369_startup_workspace *w, size_t capacity,
+  enum fte3600_fw9369_event *out, const struct fte3600_capture_io *io,
+  struct fte3600_fw9369_release_diagnostics *d)
+{
+  return event_run (s, maintenance, rejections, w, capacity, out, io, d, 1);
 }

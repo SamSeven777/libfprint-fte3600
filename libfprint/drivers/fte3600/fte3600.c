@@ -159,19 +159,26 @@ auth_error (GError *error)
 static GError *
 runtime_error (const struct fte3600_linux_runtime_diagnostic *diag)
 {
+  FpDeviceError code = FP_DEVICE_ERROR_GENERAL;
+
   if (diag->code == FTE3600_RUNTIME_CANCELLED)
     return g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint operation cancelled");
   if (diag->code == FTE3600_RUNTIME_TIMEOUT)
     return g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Fingerprint capture timed out");
   if (diag->code == FTE3600_RUNTIME_RELEASE_UNSUPPORTED ||
       diag->device_error == FTE3600_DEVICE_UNSUPPORTED)
-    return fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED, "%s",
-                                     fte3600_linux_runtime_error_string (diag->code));
-  if (diag->system_error == ENODEV || diag->system_error == ENXIO)
+    code = FP_DEVICE_ERROR_NOT_SUPPORTED;
+  else if (diag->system_error == ENODEV || diag->system_error == ENXIO)
     return fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
-  return fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "%s (OS error %d, session %u)",
+  return fpi_device_error_new_msg (code, "%s (OS=%d session=%u status=%u component=%u%s "
+                                         "model=%u raw=%04x chip=%04x SPI-last=%u ACPI=%u CS-control=%u CS-retry=%u)",
                                    fte3600_linux_runtime_error_string (diag->code),
-                                   diag->system_error, diag->device_error);
+                                   diag->system_error, diag->device_error, diag->has_session_status,
+                                   diag->component_error,
+                                   diag->has_session_status && diag->device_error == FTE3600_DEVICE_UNSUPPORTED &&
+                                   diag->component_error == FTE3600_FACTORY_INTEGRATION_UNCONFIRMED_IDENTITY ?
+                                   "[unconfirmed identity]" : "", diag->model, diag->raw_id, diag->chip_id,
+                                   diag->last_configured_mode, diag->acpi_mode, diag->cs_control, diag->cs_retry_attempted);
 }
 
 static void

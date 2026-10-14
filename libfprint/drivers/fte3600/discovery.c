@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "fte3600_discovery.h"
+#include "fte3600_reset_sync.h"
 
 static struct fte3600_identity_result
 failed (enum fte3600_status status)
@@ -44,40 +45,12 @@ write_register (const struct fte3600_recovery_io *io,
   return send_frame (io, tx, extra_byte ? 5 : 4);
 }
 
-static int
-reset_raw (const struct fte3600_recovery_io *io)
-{
-  int error = io->gpio (io->context, 1);
-
-  if (error)
-    return error;
-  io->wait_ms (io->context, 10);
-  error = io->gpio (io->context, 0);
-  if (error)
-    return error;
-  io->wait_ms (io->context, 20);
-  return io->gpio (io->context, 1);
-}
-static int
-reset_and_sync (const struct fte3600_recovery_io    *io,
-                const struct fte3600_reset_observer *o)
-{
-  static const uint8_t sync[] = {0x55, 0xaa};
-
-  if (o)
-    o->reset (o->context, 1, 0);
-  int error = reset_raw (io);
-  if (o)
-    o->reset (o->context, 0, error);
-  return error ? error : send_frame (io, sync, sizeof sync);
-}
-
 static struct fte3600_identity_result
 discover_fe (const struct fte3600_recovery_io *io, const struct fte3600_reset_observer *o)
 {
   uint8_t cb, fe;
 
-  if (reset_and_sync (io, o) != 0 ||
+  if (fte3600_reset_and_sync (io, o) != 0 ||
       read_register (io, 0xcb, 0, &cb) != 0 ||
       write_register (io, 0xcb, (uint8_t) (cb | 0x20), 0) != 0 ||
       write_register (io, 0xfd, 0x11, 0) != 0 ||
@@ -95,7 +68,7 @@ discover_otp (const struct fte3600_recovery_io *io, uint16_t family,
                  FTE3600_FAMILY_A8;
   uint8_t c8, f4, otp;
 
-  if ((!a8 && reset_and_sync (io, o) != 0) ||
+  if ((!a8 && fte3600_reset_and_sync (io, o) != 0) ||
       read_register (io, 0xc8, a8, &c8) != 0 ||
       write_register (io, 0xc8, a8 ? 0xdf : (uint8_t) (c8 | 1), a8) != 0 ||
       write_register (io, 0xf1, 0x1d, a8) != 0 ||

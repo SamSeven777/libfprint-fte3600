@@ -29,6 +29,14 @@ struct fte3600_linux_runtime_diagnostic
   int                              system_error;
   enum fte3600_device_error        device_error;
   char                             firmware_file[64];
+  /* Error-time scalar snapshot. No frame, template or firmware bytes.
+   * last_configured_mode is cached, not an electrical measurement after a
+   * failed mode change; cs_retry_attempted also records unsuccessful trials. */
+  unsigned has_session_status, component_error;
+  enum fte3600_factory_model model;
+  uint16_t raw_id, chip_id;
+  uint32_t acpi_mode, last_configured_mode;
+  unsigned cs_control, cs_retry_attempted;
 };
 struct fte3600_linux_runtime_config
 {
@@ -53,8 +61,11 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_discover (const struct ft
                                                                  struct fte3600_linux_runtime_pair *,
                                                                  struct fte3600_linux_runtime_diagnostic *);
 /* Synchronous, single serialized owner (e.g. a GTask worker). open claims and
- * performs actual cold startup, returning measured identity/geometry. Calls
- * retain a cancellable reference only for their duration; cancellation may be
+ * performs actual cold startup, returning measured identity/geometry. It
+ * tries the opposite CS polarity once only when native CS control is advertised
+ * and startup reports unconfirmed identity without a transport failure. The
+ * retry uses a fresh session; close restores the original ACPI mode.
+ * Calls retain a cancellable reference only for their duration; cancellation may be
  * signalled safely from any thread. Failed open always releases resources.
  * Cancelled/failed I/O requires close+open before reuse. */
 enum fte3600_linux_runtime_error fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *,

@@ -20,6 +20,7 @@ struct bus {
     uint32_t recovery_failure;
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
+    unsigned linux_policy_reads,linux_policy_writes;
 };
 static const struct event *event(struct bus *b,int kind)
 {
@@ -47,6 +48,26 @@ static uint16_t sample(struct bus *b,size_t i)
 static uint32_t spi(void *context,uint8_t *tx,size_t n)
 {
     struct bus *b=context;++b->calls;
+    /* Keep the original component transcript immutable. Hardware startup adds
+     * a separately specified Linux policy between direction and final ACK. */
+    if (b->fixture->model==FTE3600_MODEL_FW9369 && b->next<b->fixture->count) {
+        const struct event *next=&b->fixture->events[b->next];
+        if (next->kind==0 && next->length==8 && next->tx[0]==5 &&
+            next->tx[2]==0x9a && next->tx[3]==0x84 && next->tx[7]==0x2f &&
+            n>=8 && tx[2]==0x9a && tx[3]==0x83) {
+            if (n==12 && tx[0]==4) {
+                CHECK(b->linux_policy_reads==b->linux_policy_writes);
+                ++b->linux_policy_reads;
+                tx[6]=(uint8_t)(b->words[0x1a83]>>8);tx[7]=(uint8_t)b->words[0x1a83];
+            } else {
+                CHECK(n==8 && tx[0]==5 && b->linux_policy_reads==b->linux_policy_writes+1);
+                uint16_t expected=(uint16_t)((b->words[0x1a83]&0xff80)|0x16);
+                CHECK(tx[6]==(uint8_t)(expected>>8) && tx[7]==(uint8_t)expected);
+                ++b->linux_policy_writes;record_write(b,tx,n);
+            }
+            return 0;
+        }
+    }
     const struct event *e=event(b,0);
     if (e) {
         if (n!=e->length || memcmp(tx,e->tx,n)) {
@@ -131,7 +152,7 @@ static int error(void *context) {return ((struct bus *)context)->latched;}
 static void clear(void *context) {((struct bus *)context)->latched=0;}
 static struct fte3600_device_config config(struct bus *b,int firmware)
 {
-    struct fte3600_device_config c={.io={b,spi,ms,us,gpio,boundary,now,error,clear}};
+    struct fte3600_device_config c={.io={b,spi,ms,us,gpio,boundary,now,error,clear,NULL}};
     if (firmware && b->fixture->model==4) {
         c.startup.pram=(struct fte3600_ft9368_boot_image){b->fixture->pram,b->fixture->pram_length,(b->fixture->pram_length+127)/128*128};
         c.startup.application=(struct fte3600_ft9368_boot_image){b->fixture->app,b->fixture->app_length,b->fixture->app_length};
@@ -274,14 +295,22 @@ static void refuse_guessed_firmware(void)
         }
     }
 }
+static uint32_t simulated_release_and_sync(void *context,uint32_t *gpio_status)
+{
+    uint8_t sync[2]={0x55,0xaa};
+    *gpio_status=gpio(context,1);
+    return *gpio_status?*gpio_status:spi(context,sync,sizeof(sync));
+}
 static void legacy_terminal_recovery_errors(void)
 {
     test_name="legacy recovery preserves terminal absence";
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         const struct fixture *f=&fixtures[i];if(f->unconfirmed_stop || !is_legacy(f))continue;
+        for(int compound=0;compound<=1;++compound)
         for(int absent=0;absent<=1;++absent) for(int gpio_error=0;gpio_error<=1;++gpio_error) {
             struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
             struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+            c.io.release_and_sync=compound?simulated_release_and_sync:NULL;
             success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
             success(fte3600_device_arm(s),s);
             b->unhealthy=1;b->recovery_failure=absent?UINT32_C(0xc000000e):UINT32_C(0xc0000185);

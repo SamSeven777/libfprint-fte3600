@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "fte3600_recovery.h"
+#include "fte3600_reset_sync.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -91,12 +92,9 @@ prepare_boot_a (const struct fte3600_recovery_io *io, const struct fte3600_reset
   static const uint8_t writes[][2] = {
     {0xc8, 0xff}, {0xca, 0xff}, {0xcb, 0xff}, {0xb9, 0xbf}, {0xb9, 0xff}
   };
-  const uint8_t sync_tx[2] = {0x55, 0xaa};
-  uint8_t sync_rx[2] = {0};
   size_t i;
 
-  if (reset_pulse (io, o) ||
-      io->spi (io->context, sync_tx, sync_rx, sizeof (sync_tx)))
+  if (fte3600_reset_and_sync (io, o))
     return FTE3600_RECOVERY_IO_ERROR;
   for (i = 0; i < sizeof (writes) / sizeof (writes[0]); ++i)
     if (write_register (io, FTE3600_RECOVERY_BOOT_A,

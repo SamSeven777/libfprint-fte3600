@@ -33,6 +33,12 @@ struct fte3600_device_io
   uint32_t (*clock_ms)(void *);
   int      (*error)(void *);
   void     (*clear_error)(void *);
+  /* Optional final physical H + SPI 55 aa after H/10ms/L/20ms. Writes the
+   * GPIO status, returns overall high-bit failure status. A successful GPIO
+   * means SPI was attempted; no callbacks may interrupt the pair.
+   * NULL uses ordinary callbacks. Private source ABI: rebuild consumers. */
+  uint32_t (*release_and_sync)(void *,
+                               uint32_t *gpio_status);
 };
 struct fte3600_device_config
 {
@@ -109,7 +115,9 @@ enum fte3600_device_error fte3600_device_capture (struct fte3600_device_session 
  * Capture arms Up before publishing pixels and requires this operation to
  * complete before the next arm. Completed release is idempotent. State is
  * staged until all maintenance/rearm I/O succeeds; errors fault the session.
- * A queued Down after release is preserved by the next arm. */
+ * A queued Down after release is preserved by the next arm. Empty FW9369
+ * status checks during capture/release are passive: no ACK or reconfiguration.
+ * All automatic arms use the separate Linux event-register policy. */
 enum fte3600_device_error fte3600_device_release_step (struct fte3600_device_session *,
                                                        int *released);
 /* Reviewed FW9369 SPI recovery after RECOVERY_REQUIRED: physical reset pulse,

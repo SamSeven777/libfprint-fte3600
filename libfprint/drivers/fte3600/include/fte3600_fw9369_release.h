@@ -61,6 +61,12 @@ enum fte3600_fw9369_release_status fte3600_fw9369_arm_detection (struct fte3600_
                                                                  enum fte3600_fw9369_detection,
                                                                  const struct fte3600_capture_io *,
                                                                  struct fte3600_fw9369_release_diagnostics *);
+/* Linux automatic-entry policy: preserve upper bits of 1A83 and select low
+ * seven bits 0016 before ACK/C2. Original arm_detection is unchanged. */
+enum fte3600_fw9369_release_status fte3600_fw9369_arm_detection_linux (struct fte3600_fw9369_startup_state *,
+                                                                       enum fte3600_fw9369_detection,
+                                                                       const struct fte3600_capture_io *,
+                                                                       struct fte3600_fw9369_release_diagnostics *);
 /* Read status then acknowledge that exact value. Does not classify combined
  * flags or claim contact/release from an IRQ notification alone. */
 enum fte3600_fw9369_release_status fte3600_fw9369_read_irq (uint16_t *status,
@@ -91,6 +97,19 @@ enum fte3600_fw9369_release_status fte3600_fw9369_event_run (struct fte3600_fw93
                                                              enum fte3600_fw9369_event *,
                                                              const struct fte3600_capture_io *,
                                                              struct fte3600_fw9369_release_diagnostics *);
+/* Linux notification / latched-status fallback entry: first read status
+ * without acknowledgment; zero returns PENDING without any writes, commands
+ * or detector restart. Nonzero follows the reviewed event handling, with
+ * Linux policy for every automatic rearm (including explicit IDLE events).
+ * The original event_run retains its component compatibility behavior. */
+enum fte3600_fw9369_release_status fte3600_fw9369_event_run_linux (struct fte3600_fw9369_startup_state *,
+                                                                   int       maintenance_pending,
+                                                                   unsigned *rejections,
+                                                                   struct fte3600_fw9369_startup_workspace *,
+                                                                   size_t,
+                                                                   enum fte3600_fw9369_event *,
+                                                                   const struct fte3600_capture_io *,
+                                                                   struct fte3600_fw9369_release_diagnostics *);
 #ifdef __cplusplus
 }
 #endif
