@@ -11,6 +11,8 @@ fte3600_sources = files(
     'ft9368_lifecycle.c',
     'ft9368.c',
     'ft93xx.c',
+    'ft93xx_wire.c',
+    'ft93xx_registers.c',
     'fw9369_startup.c',
     'fw9369_fdt.c',
     'fw9369_grayscale.c',
