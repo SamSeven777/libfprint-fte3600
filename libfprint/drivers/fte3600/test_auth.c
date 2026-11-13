@@ -284,6 +284,53 @@ test_persist_identify (void)
 }
 
 static void
+test_strip_coverage (void)
+{
+  Fte3600AuthIdentity identity = identity_for (&identities[10]);
+  g_autoptr(Fte3600AuthEnrollment) enrollment = fte3600_auth_enrollment_new (&identity, NULL);
+  guint8 image[40 * 196];
+  /* Independent fields stand for non-overlapping skin. This deliberately
+   * demonstrates that coverage enrollment cannot enforce one finger. */
+  for (guint i = 0; i < 8; i++)
+    {
+      fte3600_auth_test_image (image, 40, 196,
+                               i < 4 ? FTE3600_AUTH_TEST_SEED : FTE3600_AUTH_TEST_OTHER_SEED, i);
+      g_assert_true (fte3600_auth_enrollment_add (enrollment, image, sizeof image, 40, NULL, NULL));
+    }
+  g_autoptr(Fte3600AuthTemplate) mixed = fte3600_auth_enrollment_finish (enrollment, NULL);
+  g_autoptr(GBytes) bytes = fte3600_auth_template_encode (mixed);
+  g_autoptr(Fte3600AuthTemplate) loaded = fte3600_auth_template_decode (bytes, NULL);
+  g_assert_nonnull (loaded);
+  for (guint i = 0; i < 2; i++)
+    {
+      fte3600_auth_test_image (image, 40, 196,
+                               i ? FTE3600_AUTH_TEST_OTHER_SEED : FTE3600_AUTH_TEST_SEED, 8);
+      g_autoptr(Fte3600AuthProbe) probe = fte3600_auth_probe_new (&identity, image, sizeof image, 40, NULL);
+      Fte3600AuthMatch match;
+      g_assert_true (fte3600_auth_match (probe, loaded, &match, NULL));
+      g_assert_true (match.matched);
+    }
+  fte3600_auth_test_image (image, 40, 196, FTE3600_AUTH_TEST_OTHER_SEED, 8);
+  g_autoptr(Fte3600AuthProbe) probe = fte3600_auth_probe_new (&identity, image, sizeof image, 40, NULL);
+  g_autoptr(Fte3600AuthTemplate) original = enroll (&identity, FTE3600_AUTH_TEST_SEED);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  Fte3600AuthMatch match;
+  gint best;
+  g_assert_true (fte3600_auth_identify (probe, gallery, &best, &match, NULL));
+  g_assert_false (match.uninformative);
+  g_assert_cmpint (best, ==, -1);
+  g_ptr_array_add (gallery, original);
+  g_assert_true (fte3600_auth_identify (probe, gallery, &best, &match, NULL));
+  g_assert_false (match.matched);
+  g_assert_true (match.uninformative);
+  g_ptr_array_add (gallery, loaded);
+  g_assert_true (fte3600_auth_identify (probe, gallery, &best, &match, NULL));
+  g_assert_true (match.matched);
+  g_assert_false (match.uninformative);
+  g_assert_cmpint (best, ==, 1);
+}
+
+static void
 test_best_match (void)
 {
   Fte3600AuthIdentity identity = identity_for (&identities[2]);
@@ -786,6 +833,7 @@ main (int argc, char **argv)
   g_test_add_func ("/auth/identity", test_identity);
   g_test_add_func ("/auth/persist-identify", test_persist_identify);
   g_test_add_func ("/auth/best-match", test_best_match);
+  g_test_add_func ("/auth/strip-coverage", test_strip_coverage);
   g_test_add_func ("/auth/codec", test_codec);
   g_test_add_func ("/auth/golden-0.2.0", test_golden_020);
   g_test_add_func ("/auth/feature-multisets", test_feature_multisets);

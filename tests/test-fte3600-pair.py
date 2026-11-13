@@ -90,6 +90,19 @@ class PairTests(unittest.TestCase):
             ("irq", str(self.dev / "uio4"), str(self.dev / "fte3600-irq-FTE3600:00")),
         ])
 
+    def test_fte6600_pair_and_dynamic_aliases(self):
+        acpi = self.acpi.with_name("FTE6600:00")
+        self.acpi.rename(acpi)
+        (self.spi / "firmware_node").unlink()
+        self.link(self.spi / "firmware_node", acpi)
+        self.write(acpi, "hid", "FTE6600")
+        for role, node in (("spi", "spidev1.0"), ("gpio", "gpiochip7"), ("irq", "uio4")):
+            self.link(self.dev / f"fte3600-{role}-FTE6600:00", self.dev / node)
+        self.assertEqual(self.found(), [
+            (role, str(self.dev / node), str(self.dev / f"fte3600-{role}-FTE6600:00"))
+            for role, node in (("spi", "spidev1.0"), ("gpio", "gpiochip7"), ("irq", "uio4"))
+        ])
+
     def test_duplicate_class_view_is_one_gpio(self):
         self.link(self.sys / "class/gpio/gpiochip7", self.gpio)
         self.assertEqual(len(self.found()), 3)
