@@ -404,12 +404,9 @@ remaining (struct fte3600_linux_runtime *r)
 static void
 trace (struct fte3600_linux_runtime *r, const char *what, int e)
 {
-  static int enabled = -1;
   struct fte3600_device_status st;
 
-  if (enabled < 0)
-    enabled = getenv ("FTE3600_DEBUG") != NULL;
-  if (!enabled || fte3600_device_get_status (r->session, &st))
+  if (!getenv ("FTE3600_DEBUG") || fte3600_device_get_status (r->session, &st))
     return;
   fprintf (stderr, "fte3600: %s e=%d state=%d seq=%llu dac=%u level=%d shift=%d contact=%d\n",
            what, e, (int) st.state, (unsigned long long) st.image_sequence,
