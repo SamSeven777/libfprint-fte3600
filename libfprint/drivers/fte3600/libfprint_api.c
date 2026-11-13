@@ -226,6 +226,126 @@ fw9369_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer da
     }
 }
 
+static void
+recalibration_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  (void) data;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, progress_count);
+      g_assert_cmpuint (stage, ==, 3);
+      if (retry_count == 0)
+        {
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+          mode ("fw9369");
+        }
+      else
+        {
+          g_assert_cmpuint (retry_count, ==, 1);
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+          mode ("enroll-resume");
+        }
+      retry_count++;
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+      if (stage == 3)
+        mode ("calibration-fail");
+    }
+}
+
+static void
+test_enroll_recalibration_progress (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  mode ("enroll");
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                   recalibration_progress, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, 2);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("open"), ==, 1);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
+calibration_failure_progress (FpDevice *device, gint stage, FpPrint *print,
+                              gpointer data, GError *error)
+{
+  guint allowed_retries = GPOINTER_TO_UINT (data);
+  (void) device;
+  (void) print;
+  g_assert_true (g_thread_self () == main_thread);
+  g_assert_cmpuint (stage, ==, 0);
+  g_assert_cmpuint (retry_count, <, allowed_retries);
+  if (retry_count % 2 == 0)
+    {
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      mode ("fw9369");
+    }
+  else
+    {
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+      mode ("calibration-fail");
+    }
+  retry_count++;
+}
+
+static void
+test_calibration_failure_policy (gconstpointer data)
+{
+  gboolean fw9369 = GPOINTER_TO_INT (data);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode (fw9369 ? "fw9369" : "other-profile");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  mode ("calibration-fail");
+  retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                   calibration_failure_progress,
+                                                   GUINT_TO_POINTER (fw9369 ? 6 : 0), &error);
+  g_assert_null (print);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_assert_nonnull (strstr (error->message, "session=7"));
+  g_assert_nonnull (strstr (error->message, "component="));
+  g_clear_error (&error);
+  g_assert_cmpuint (retry_count, ==, fw9369 ? 6 : 0);
+  g_assert_cmpuint (trace_count ("open"), ==, fw9369 ? 3 : 0);
+  g_assert_cmpuint (trace_count ("close"), ==, fw9369 ? 4 : 1);
+  if (fw9369)
+    {
+      /* A terminal failure must not leave a retry prompt for a later action. */
+      mode ("fw9369");
+      g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+    }
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
 /* Adapter path proof only: the distinct production-object runtime test checks
  * real FW9369 FDT observations and maintenance. This backend supplies images. */
 static void
@@ -802,6 +922,11 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
+  g_test_add_func ("/fte3600/enroll-recalibration-progress", test_enroll_recalibration_progress);
+  g_test_add_data_func ("/fte3600/calibration-failure/other-profile", GINT_TO_POINTER (FALSE),
+                         test_calibration_failure_policy);
+  g_test_add_data_func ("/fte3600/calibration-failure/fw9369-limit", GINT_TO_POINTER (TRUE),
+                         test_calibration_failure_policy);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
   int result = g_test_run ();
