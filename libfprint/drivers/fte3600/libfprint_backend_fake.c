@@ -182,6 +182,9 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
   if (g_str_equal (mode, "release-timeout"))
     {
       trace (runtime->control, "release-timeout");
+      /* The production polling runtime requires cold recovery after timeout. */
+      if (runtime->status.model == FTE3600_MODEL_FW9369)
+        runtime->failed = TRUE;
       return failure (diag, FTE3600_RUNTIME_TIMEOUT);
     }
   if (g_cancellable_is_cancelled (cancel))

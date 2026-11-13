@@ -293,9 +293,11 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         fte3600_linux_runtime_wait_release (self->runtime, cancel, RELEASE_PROMPT_MS, &diag);
       if (release == FTE3600_RUNTIME_TIMEOUT)
         {
-          /* The finger is still on the sensor long after its frame was taken.
-           * Say so through the retry channel, which every front end displays,
-           * instead of waiting silently; the next attempt waits again. */
+          /* Polling release may time out during maintenance or a raw scan.
+           * Those runtimes require a fresh owner before another operation;
+           * FT9368's contact-only timeout can keep waiting on this owner. */
+          hardware_failed = self->identity.backend_model == 0x9369 ||
+                            self->identity.backend_model == 0x9769;
           error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
                                             "Lift your finger from the sensor");
           goto out;

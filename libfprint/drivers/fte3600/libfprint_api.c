@@ -257,6 +257,37 @@ test_enroll_release_progress (void)
 }
 
 static void
+test_release_timeout_recovery (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+  reset_trace ();
+  mode ("release-timeout");
+  gboolean matched = FALSE;
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+  g_assert_false (matched);
+  g_clear_error (&error);
+  mode ("fw9369");
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                       &matched, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (matched);
+  g_assert_cmpuint (trace_count ("release-timeout"), ==, 1);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+  g_assert_cmpuint (trace_count ("open"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 1);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
 fw9369_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
 {
   (void) device;
@@ -851,6 +882,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
   g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);
+  g_test_add_func ("/fte3600/release-timeout-recovery", test_release_timeout_recovery);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
