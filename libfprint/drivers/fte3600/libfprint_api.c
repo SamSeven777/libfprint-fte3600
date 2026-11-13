@@ -3,6 +3,7 @@
  * Hardware replacement is linked into the separate test library only. */
 #include "fprint.h"
 #include <glib/gstdio.h>
+#include <sys/stat.h>
 
 static gchar *control;
 static GThread *main_thread;
@@ -868,6 +869,38 @@ test_public_api (void)
   g_assert_no_error (error);
 }
 
+static void
+test_private_frame_dump (void)
+{
+  if (!g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 10 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-dump-XXXXXX", NULL);
+  g_assert_cmpint (g_chmod (directory, 0755), ==, 0);
+  umask (0022);
+  g_setenv ("FTE3600_DUMP_DIR", directory, TRUE);
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("positive");
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+  g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, NULL, NULL);
+  g_assert_nonnull (image);
+  g_assert_true (fp_device_close_sync (device, NULL, NULL));
+  g_autoptr(GDir) dir = g_dir_open (directory, 0, NULL);
+  const gchar *name = g_dir_read_name (dir);
+  g_assert_nonnull (name);
+  g_autofree gchar *path = g_build_filename (directory, name, NULL);
+  GStatBuf st;
+  g_assert_cmpint (g_stat (path, &st), ==, 0);
+  g_assert_cmpuint (st.st_mode & 0777, ==, 0600);
+  g_assert_null (g_dir_read_name (dir));
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -879,6 +912,7 @@ main (int argc, char **argv)
   mode ("enroll");
   g_setenv ("FP_FTE3600_TEST_CONTROL", control, TRUE);
   g_test_add_func ("/fte3600/public-api", test_public_api);
+  g_test_add_func ("/fte3600/private-frame-dump", test_private_frame_dump);
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
   g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);

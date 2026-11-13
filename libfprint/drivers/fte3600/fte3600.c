@@ -208,11 +208,13 @@ dump_frame (const struct fte3600_linux_runtime_frame *frame)
   g_byte_array_append (pgm, (const guint8 *) header, strlen (header));
   for (guint y = 0; y < rows; y++)
     g_byte_array_append (pgm, frame->pixels + y * frame->stride, MIN (width, frame->stride));
-  g_autofree gchar *path = g_strdup_printf ("%s/frame-%" G_GINT64_FORMAT "-%03" G_GUINT64_FORMAT ".pgm", dir,
+  g_autofree gchar *unique = g_uuid_string_random ();
+  g_autofree gchar *path = g_strdup_printf ("%s/frame-%" G_GINT64_FORMAT "-%03" G_GUINT64_FORMAT "-%s.pgm", dir,
                                             g_get_real_time () / G_USEC_PER_SEC,
-                                            (guint64) frame->status.image_sequence);
+                                            (guint64) frame->status.image_sequence, unique);
   if (g_mkdir_with_parents (dir, 0700) != 0 ||
-      !g_file_set_contents (path, (const gchar *) pgm->data, pgm->len, &error))
+      !g_file_set_contents_full (path, (const gchar *) pgm->data, pgm->len,
+                                G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
     fp_dbg ("Frame dump to %s failed: %s", path, error ? error->message : g_strerror (errno));
 }
 
