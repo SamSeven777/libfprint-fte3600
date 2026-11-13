@@ -471,7 +471,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
       if (!error)
         {
           fpi_device_get_enroll_data (device, &print);
-          fpi_device_enroll_progress (device, work->completed, NULL,
+          fpi_device_enroll_progress (device, fte3600_auth_enrollment_count (self->enrollment), NULL,
                                       g_steal_pointer (&work->retry));
           if (!work->encoded)
             {

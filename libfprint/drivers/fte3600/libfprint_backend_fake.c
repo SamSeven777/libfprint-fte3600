@@ -179,6 +179,11 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
   if (g_str_equal (mode, "release-block"))
     while (!g_cancellable_is_cancelled (cancel))
       g_usleep (1000);
+  if (g_str_equal (mode, "release-timeout"))
+    {
+      trace (runtime->control, "release-timeout");
+      return failure (diag, FTE3600_RUNTIME_TIMEOUT);
+    }
   if (g_cancellable_is_cancelled (cancel))
     {
       runtime->failed = TRUE;

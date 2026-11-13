@@ -208,6 +208,55 @@ test_release_observations (void)
 }
 
 static void
+release_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  (void) data;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, 3);
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      g_assert_cmpuint (++retry_count, ==, 1);
+      mode ("enroll");
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+      if (stage == 3)
+        mode ("release-timeout");
+    }
+}
+
+static void
+test_enroll_release_progress (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("enroll");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                  release_retry_progress, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, 1);
+  g_assert_cmpuint (trace_count ("release-timeout"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("open"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
 fw9369_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
 {
   (void) device;
@@ -801,6 +850,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/public-api", test_public_api);
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
+  g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
