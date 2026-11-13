@@ -697,13 +697,14 @@ raw_reference (struct fte3600_device_session *s)
       int level = raw_median (s, s->reference, NULL);
       int clean = level >= s->status.raw_level - RAW_TOUCH_SHIFT &&
                   (!s->raw_clean_valid || level >= s->raw_clean_level - RAW_TOUCH_SHIFT);
-      if (clean || i == RAW_CLEAN_WAITS)
+      if (clean)
         {
           s->raw_clean_level = level;
           s->raw_clean_valid = 1;
           return FTE3600_DEVICE_OK;
         }
-      wait_ms (s, 50);
+      if (i < RAW_CLEAN_WAITS)
+        wait_ms (s, 50);
     }
   return FTE3600_DEVICE_CALIBRATION_ERROR;
 }

@@ -22,6 +22,7 @@ struct bus {
     size_t frame_position;unsigned pattern;
     int fail_fifo,wait_failure,latched,frame_absent,unhealthy,finger,irq_finger,hold_finger;
     unsigned contact_percent;
+    int contaminate_reference;
     uint32_t recovery_failure;
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
@@ -98,6 +99,7 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
         ++b->frames;return 0;
     }
     if (tx[0]==6 && n>=8 && tx[1]==0xf9) {
+        if(b->contaminate_reference)b->finger=b->frames%2;
         size_t count=(n-8)/2;
         for (size_t i=0;i<count;++i) {size_t at=b->frame_position+i;uint16_t v=sample(b,at);if (b->finger && (!b->contact_percent || at/b->fixture->width < (size_t)b->fixture->height*b->contact_percent/100)) v-=(uint16_t)(300+at*7%60+b->pattern*20);tx[6+2*i]=(uint8_t)(v>>8);tx[7+2*i]=(uint8_t)v;}
         tx[n-2]=tx[n-1]=0;b->frame_position+=count;
@@ -377,6 +379,23 @@ static void raw_array_edges(void)
     }
     puts("PASS raw-array held/lift, partial contact and stale interrupt on both silicon IDs and remap");
 }
+static void raw_reference_contamination(void)
+{
+    test_name="raw-array never accepts a repeatedly contaminated reference";
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *f=&fixtures[i];if(!raw_array(f))continue;
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+        struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        /* A touch lands after each clean centering scan, before the reference
+         * scan, then lifts. Even the last retry must reject that reference. */
+        b->contaminate_reference=1;
+        CHECK(fte3600_device_arm(s)==FTE3600_DEVICE_CALIBRATION_ERROR);
+        CHECK(status(s).state==FTE3600_DEVICE_FAULT && !status(s).image_sequence);
+        fte3600_device_close(s);free(b);
+    }
+    puts("PASS contaminated raw references fail instead of becoming the baseline");
+}
 int main(void)
 {
     /* FW9369 now requires physical contact/release event scripts. Its full
@@ -385,5 +404,5 @@ int main(void)
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         if(!fixtures[i].unconfirmed_stop && fixtures[i].model!=FTE3600_MODEL_FW9369)scenario(&fixtures[i]);
     }
-    raw_array_edges();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
+    raw_array_edges();raw_reference_contamination();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
 }
