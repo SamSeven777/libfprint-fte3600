@@ -20,7 +20,8 @@ struct bus {
     uint16_t words[32768];uint8_t bytes[256],mode;
     uint64_t clock,calls;unsigned frames,measurements,version_reads,uploads;
     size_t frame_position;unsigned pattern;
-    int fail_fifo,wait_failure,latched,frame_absent,unhealthy,finger,irq_finger;
+    int fail_fifo,wait_failure,latched,frame_absent,unhealthy,finger,irq_finger,hold_finger;
+    unsigned contact_percent;
     uint32_t recovery_failure;
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
@@ -98,10 +99,10 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
     }
     if (tx[0]==6 && n>=8 && tx[1]==0xf9) {
         size_t count=(n-8)/2;
-        for (size_t i=0;i<count;++i) {uint16_t v=sample(b,b->frame_position+i);if (b->finger) v-=(uint16_t)(300+(b->frame_position+i)*7%60+b->pattern*20);tx[6+2*i]=(uint8_t)(v>>8);tx[7+2*i]=(uint8_t)v;}
+        for (size_t i=0;i<count;++i) {size_t at=b->frame_position+i;uint16_t v=sample(b,at);if (b->finger && (!b->contact_percent || at/b->fixture->width < (size_t)b->fixture->height*b->contact_percent/100)) v-=(uint16_t)(300+at*7%60+b->pattern*20);tx[6+2*i]=(uint8_t)(v>>8);tx[7+2*i]=(uint8_t)v;}
         tx[n-2]=tx[n-1]=0;b->frame_position+=count;
         size_t samples=(size_t)b->fixture->width*(b->fixture->height+b->fixture->extra);
-        if (b->frame_position==samples) {++b->frames;b->finger=0;}
+        if (b->frame_position==samples) {++b->frames;if(!b->hold_finger)b->finger=0;}
         return 0;
     }
     if (n>=4 && (tx[0]==0xff || tx[0]==0x91 || tx[0]==0x90)) {
@@ -345,6 +346,37 @@ static void legacy_terminal_recovery_errors(void)
     }
     puts("PASS terminal legacy SPI/GPIO absence stops recovery; ordinary errors retain five attempts");
 }
+static void raw_array_edges(void)
+{
+    test_name="raw-array held contact, lift, partial contact and stale interrupt";
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *f=&fixtures[i];if(!raw_array(f))continue;
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+        struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        success(fte3600_device_arm(s),s);
+        int pending=0,released=1;
+        success(fte3600_device_pending(s,&pending),s);CHECK(pending);
+        b->hold_finger=1;
+        success(fte3600_device_irq(s),s);CHECK(status(s).raw_contact==100);
+        for(unsigned j=0;j<2;++j) {
+            success(fte3600_device_release_step(s,&released),s);CHECK(!released);
+        }
+        b->finger=0;
+        success(fte3600_device_release_step(s,&released),s);CHECK(released);
+        b->irq_finger=1;
+        success(fte3600_device_arm(s),s);
+        success(fte3600_device_pending(s,&pending),s);CHECK(!pending);
+        CHECK(fte3600_device_irq(s)==FTE3600_DEVICE_NO_FRAME);
+        CHECK(status(s).state==FTE3600_DEVICE_ARMED && status(s).image_sequence==1);
+        b->finger=1;b->contact_percent=60;
+        success(fte3600_device_irq(s),s);
+        CHECK(status(s).raw_contact>=59 && status(s).raw_contact<=60);
+        CHECK(status(s).image_sequence==2);
+        fte3600_device_close(s);free(b);
+    }
+    puts("PASS raw-array held/lift, partial contact and stale interrupt on both silicon IDs and remap");
+}
 int main(void)
 {
     /* FW9369 now requires physical contact/release event scripts. Its full
@@ -353,5 +385,5 @@ int main(void)
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         if(!fixtures[i].unconfirmed_stop && fixtures[i].model!=FTE3600_MODEL_FW9369)scenario(&fixtures[i]);
     }
-    missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
+    raw_array_edges();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
 }
