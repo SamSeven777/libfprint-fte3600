@@ -399,6 +399,19 @@ remaining (struct fte3600_linux_runtime *r)
   return us <= 0 ? 0 : (uint32_t) ((us + 999) / 1000);
 }
 /* Bounded drain excludes already pending notifications before a new arm. */
+/* Opt-in stderr trace (FTE3600_DEBUG=1) of the session's decisions, for
+ * bring-up on real hardware where fprintd's journal is the only output. */
+static void
+trace (struct fte3600_linux_runtime *r, const char *what, int e)
+{
+  struct fte3600_device_status st;
+
+  if (!getenv ("FTE3600_DEBUG") || fte3600_device_get_status (r->session, &st))
+    return;
+  fprintf (stderr, "fte3600: %s e=%d state=%d seq=%llu dac=%u level=%d shift=%d contact=%d\n",
+           what, e, (int) st.state, (unsigned long long) st.image_sequence,
+           st.calibrated_image_dac, st.raw_level, st.raw_shift, st.raw_contact);
+}
 static int
 drain (struct fte3600_linux_runtime *r)
 {
@@ -412,6 +425,18 @@ drain (struct fte3600_linux_runtime *r)
     }
   errno = EOVERFLOW;
   return -1;
+}
+/* FT9769 arming resets the part, which raises the interrupt line, so those
+ * edges are drained. Finger detection is one-shot until the next arm, so a
+ * touch that landed meanwhile is only visible in the part's latched status. */
+static enum fte3600_linux_runtime_error
+settle_ft9769 (struct fte3600_linux_runtime *r, int *pending, struct fte3600_linux_runtime_diagnostic *d)
+{
+  if(drain (r) < 0)
+    return wait_error (r, errno, d);
+  enum fte3600_device_error e = fte3600_device_pending (r->session, pending);
+  trace (r, *pending ? "touch during arm" : "armed", e);
+  return e ? session_error (r, e, d) : FTE3600_RUNTIME_OK;
 }
 static int
 contact (struct fte3600_linux_runtime *r)
@@ -453,6 +478,7 @@ wait_fw_release (struct fte3600_linux_runtime            *r,
         }
       int released = 0;
       enum fte3600_device_error e = fte3600_device_release_step (r->session, &released);
+      trace (r, released ? "released" : "held", e);
       if (e == FTE3600_DEVICE_RECOVERY_REQUIRED && r->recoveries < 3)
         {
           ++r->recoveries;
@@ -516,11 +542,15 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
       goto done;
     }
   e = fte3600_device_arm (r->session);
+  trace (r, "arm", e);
   if(e)
     {
       rc = session_error (r, e, d);
       goto done;
     }
+  int pending = 0;
+  if(next.status.model == FTE3600_MODEL_FT9769 && (rc = settle_ft9769 (r, &pending, d)) != FTE3600_RUNTIME_OK)
+    goto done;
   for(;;)
     {
       uint32_t ms = remaining (r);
@@ -564,12 +594,16 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
             }
           continue;
         }
-      n = fte3600_linux_board_wait_irq (r->board, ms, &counter);
-      if(n <= 0)
+      if(!pending)
         {
-          rc = wait_error (r, n < 0 ? errno : ETIMEDOUT, d);
-          goto done;
+          n = fte3600_linux_board_wait_irq (r->board, ms, &counter);
+          if(n <= 0)
+            {
+              rc = wait_error (r, n < 0 ? errno : ETIMEDOUT, d);
+              goto done;
+            }
         }
+      pending = 0;
       fte3600_device_get_status (r->session, &next.status);
       if(next.status.model == FTE3600_MODEL_FT9368)
         {
@@ -583,8 +617,13 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
             continue;
         }
       e = fte3600_device_irq (r->session);
+      trace (r, "irq", e);
       if(e == FTE3600_DEVICE_NO_FRAME)
-        continue;
+        {
+          if(next.status.model == FTE3600_MODEL_FT9769 && (rc = settle_ft9769 (r, &pending, d)) != FTE3600_RUNTIME_OK)
+            goto done;
+          continue;
+        }
       if(e)
         {
           rc = session_error (r, e, d);
@@ -639,13 +678,15 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *r,
   if(r->needs_reopen)
     return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   fte3600_device_get_status (r->session, &status);
-  if(status.model != FTE3600_MODEL_FT9368 && status.model != FTE3600_MODEL_FW9369)
+  if(status.model != FTE3600_MODEL_FT9368 && status.model != FTE3600_MODEL_FW9369 &&
+     status.model != FTE3600_MODEL_FT9769)
     return result (d, FTE3600_RUNTIME_RELEASE_UNSUPPORTED, ENOTSUP, FTE3600_DEVICE_UNSUPPORTED);
   if(status.state != FTE3600_DEVICE_IDLE)
     return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
   begin (r, cancel, timeout);
-  if(status.model == FTE3600_MODEL_FW9369)
+  if(status.model == FTE3600_MODEL_FW9369 || status.model == FTE3600_MODEL_FT9769)
     {
+      /* Both poll the session's release step; only FW9369 can ask for recovery. */
       rc = wait_fw_release (r, d);
       end (r);
       return rc;

@@ -3,6 +3,7 @@
  * Hardware replacement is linked into the separate test library only. */
 #include "fprint.h"
 #include <glib/gstdio.h>
+#include <sys/stat.h>
 
 static gchar *control;
 static GThread *main_thread;
@@ -205,6 +206,86 @@ test_release_observations (void)
       g_assert_no_error (error);
       g_signal_handlers_disconnect_by_data (device, states);
     }
+}
+
+static void
+release_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  (void) data;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, 3);
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      g_assert_cmpuint (++retry_count, ==, 1);
+      mode ("enroll");
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+      if (stage == 3)
+        mode ("release-timeout");
+    }
+}
+
+static void
+test_enroll_release_progress (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("enroll");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                  release_retry_progress, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, 1);
+  g_assert_cmpuint (trace_count ("release-timeout"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("open"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
+test_release_timeout_recovery (gconstpointer profile)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode (profile);
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+  reset_trace ();
+  mode ("release-timeout");
+  gboolean matched = FALSE;
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+  g_assert_false (matched);
+  g_clear_error (&error);
+  mode (profile);
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                       &matched, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (matched);
+  g_assert_cmpuint (trace_count ("release-timeout"), ==, 1);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+  g_assert_cmpuint (trace_count ("open"), ==, 1);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 1);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
 }
 
 static void
@@ -788,6 +869,87 @@ test_public_api (void)
   g_assert_no_error (error);
 }
 
+static void
+test_strip_retries (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("ft9769");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+  gboolean matched = TRUE;
+  mode ("partial");
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+  g_clear_error (&error);
+  mode ("negative");
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  g_ptr_array_add (gallery, print);
+  for (guint action = 0; action < 2; action++)
+  for (guint i = 0; i < 4; i++)
+    {
+      g_autoptr(FpPrint) identified = NULL;
+      gboolean ok = action ?
+        fp_device_identify_sync (device, gallery, NULL, NULL, NULL, &identified, NULL, &error) :
+        fp_device_verify_sync (device, print, NULL, NULL, NULL, &matched, NULL, &error);
+      g_assert_false (matched);
+      g_assert_null (identified);
+      if (i < 3)
+        {
+          g_assert_false (ok);
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+          g_clear_error (&error);
+        }
+      else
+        {
+          g_assert_true (ok);
+          g_assert_no_error (error);
+        }
+    }
+  mode ("positive");
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                       &matched, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (matched);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
+test_private_frame_dump (void)
+{
+  if (!g_test_subprocess ())
+    {
+      g_test_trap_subprocess (NULL, 10 * G_USEC_PER_SEC, 0);
+      g_test_trap_assert_passed ();
+      return;
+    }
+  g_autofree gchar *directory = g_dir_make_tmp ("fte3600-dump-XXXXXX", NULL);
+  g_assert_cmpint (g_chmod (directory, 0755), ==, 0);
+  umask (0022);
+  g_setenv ("FTE3600_DUMP_DIR", directory, TRUE);
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("positive");
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+  g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, NULL, NULL);
+  g_assert_nonnull (image);
+  g_assert_true (fp_device_close_sync (device, NULL, NULL));
+  g_autoptr(GDir) dir = g_dir_open (directory, 0, NULL);
+  const gchar *name = g_dir_read_name (dir);
+  g_assert_nonnull (name);
+  g_autofree gchar *path = g_build_filename (directory, name, NULL);
+  GStatBuf st;
+  g_assert_cmpint (g_stat (path, &st), ==, 0);
+  g_assert_cmpuint (st.st_mode & 0777, ==, 0600);
+  g_assert_null (g_dir_read_name (dir));
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -799,8 +961,13 @@ main (int argc, char **argv)
   mode ("enroll");
   g_setenv ("FP_FTE3600_TEST_CONTROL", control, TRUE);
   g_test_add_func ("/fte3600/public-api", test_public_api);
+  g_test_add_func ("/fte3600/private-frame-dump", test_private_frame_dump);
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
+  g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);
+  g_test_add_data_func ("/fte3600/release-timeout-recovery", "fw9369", test_release_timeout_recovery);
+  g_test_add_data_func ("/fte3600/strip-release-timeout-recovery", "ft9769", test_release_timeout_recovery);
+  g_test_add_func ("/fte3600/strip-retries", test_strip_retries);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);

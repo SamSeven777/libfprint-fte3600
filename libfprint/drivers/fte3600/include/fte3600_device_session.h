@@ -89,6 +89,13 @@ struct fte3600_device_status
   uint32_t compatibility_status;
   uint32_t baseline_crc;
   uint16_t calibrated_image_dac;
+  /* Raw-array flow (FT9769): median of the last scan, and its shift against
+   * the no-finger reference for the last touch or release decision. */
+  int      raw_level, raw_shift;
+  /* Percentage of image rows whose mean sat at least RAW_TOUCH_SHIFT below
+   * the reference in the last accepted raw frame: how much of the strip the
+   * finger actually covered. */
+  int      raw_contact;
 };
 struct fte3600_device_session;
 /* create copies configuration/callback tables, owns all mutable family state
@@ -108,6 +115,10 @@ enum fte3600_device_error fte3600_device_start (struct fte3600_device_session *)
  * stale images being mistaken for a new request result. */
 enum fte3600_device_error fte3600_device_arm (struct fte3600_device_session *);
 enum fte3600_device_error fte3600_device_irq (struct fte3600_device_session *);
+/* While ARMED: whether the part already latched a touch, so the caller
+ * should proceed to irq without waiting for an interrupt edge. Families
+ * without such a latch report 0. */
+enum fte3600_device_error fte3600_device_pending (struct fte3600_device_session *, int *pending);
 enum fte3600_device_error fte3600_device_capture (struct fte3600_device_session *);
 /* FW9369 only: poll one physical status and, on UP, confirm/maintain/rearm.
  * released is written only on success; false means still held/unknown. The

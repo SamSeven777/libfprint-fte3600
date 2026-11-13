@@ -61,6 +61,7 @@ static void fte3600_last_reference(struct kref *ref);
 
 static const struct acpi_device_id fte3600_acpi_ids[] = {
 	{ "FTE3600", 0 },
+	{ "FTE6600", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, fte3600_acpi_ids);

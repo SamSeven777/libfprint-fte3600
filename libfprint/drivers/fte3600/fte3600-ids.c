@@ -3,6 +3,7 @@
 #include <stdlib.h>
 const FpIdEntry fte3600_driver_ids[] = {
   { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_SPIDEV, .spi_acpi_hid = "FTE3600" },
+  { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_SPIDEV, .spi_acpi_hid = "FTE6600" },
   { .udev_types = 0 }
 };
 const FpDeviceType fte3600_driver_device_type = FP_DEVICE_TYPE_UDEV;
@@ -30,7 +31,7 @@ fte3600_driver_probe_id (FpDevice *device, GError **error)
       g_autofree gchar *hid_path = g_build_filename (path, "firmware_node/hid", NULL);
       g_autofree gchar *hid = NULL;
       if (g_file_get_contents (hid_path, &hid, NULL, NULL) &&
-          g_str_equal (g_strstrip (hid), "FTE3600"))
+          (g_str_equal (g_strstrip (hid), "FTE3600") || g_str_equal (hid, "FTE6600")))
         {
           g_autofree gchar *node = g_build_filename (path, "firmware_node", NULL);
           g_autofree gchar *physical = realpath (node, NULL);

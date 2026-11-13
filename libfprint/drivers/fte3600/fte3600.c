@@ -8,6 +8,17 @@
 #include <errno.h>
 #include <string.h>
 
+/* How long a finger may rest on the sensor after its frame was captured before
+ * the user is asked to lift it. Users get no other cue that a touch is done. */
+#define RELEASE_PROMPT_MS 2500
+/* Consecutive verify/identify touches that overlapped no enrolled skin before
+ * the driver stops asking for another spot and reports a plain non-match. */
+#define OVERLAP_RETRIES 3
+/* Least share of the strip's rows a raw-array touch must cover before it is
+ * matched. Full touches leave only a few edge rows clear (95%+); the partial
+ * touches that never match cover 50-75%. */
+#define CONTACT_MIN_PERCENT 80
+
 struct _FpiDeviceFte3600
 {
   FpDevice                      parent;
@@ -17,6 +28,7 @@ struct _FpiDeviceFte3600
   GCancellable                 *worker_cancel;
   gboolean                      worker_active;
   gboolean                      needs_release;
+  guint                         overlap_retries; /* Uninformative touches since the last decisive result. */
   GHashTable                   *template_cache; /* Worker-owned; immutable values, exact byte keys. */
   GQueue                        cache_order;
 };
@@ -181,6 +193,31 @@ runtime_error (const struct fte3600_linux_runtime_diagnostic *diag)
                                    diag->last_configured_mode, diag->acpi_mode, diag->cs_control, diag->cs_retry_attempted);
 }
 
+/* Debug aid: with FTE3600_DUMP_DIR set, every accepted capture is written as
+ * an 8-bit PGM so matcher behaviour can be studied offline. Never on by default. */
+static void
+dump_frame (const struct fte3600_linux_runtime_frame *frame)
+{
+  const gchar *dir = g_getenv ("FTE3600_DUMP_DIR");
+  if (!dir || !*dir || !frame->pixels || !frame->stride || !frame->status.width)
+    return;
+  g_autoptr(GError) error = NULL;
+  const guint width = frame->status.width, rows = frame->length / frame->stride;
+  g_autoptr(GByteArray) pgm = g_byte_array_new ();
+  g_autofree gchar *header = g_strdup_printf ("P5\n%u %u\n255\n", width, rows);
+  g_byte_array_append (pgm, (const guint8 *) header, strlen (header));
+  for (guint y = 0; y < rows; y++)
+    g_byte_array_append (pgm, frame->pixels + y * frame->stride, MIN (width, frame->stride));
+  g_autofree gchar *unique = g_uuid_string_random ();
+  g_autofree gchar *path = g_strdup_printf ("%s/frame-%" G_GINT64_FORMAT "-%03" G_GUINT64_FORMAT "-%s.pgm", dir,
+                                            g_get_real_time () / G_USEC_PER_SEC,
+                                            (guint64) frame->status.image_sequence, unique);
+  if (g_mkdir_with_parents (dir, 0700) != 0 ||
+      !g_file_set_contents_full (path, (const gchar *) pgm->data, pgm->len,
+                                G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+    fp_dbg ("Frame dump to %s failed: %s", path, error ? error->message : g_strerror (errno));
+}
+
 static void
 worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
 {
@@ -203,6 +240,7 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         error = runtime_error (&diag);
       self->runtime = NULL;
       self->needs_release = FALSE;
+      self->overlap_retries = 0;
       goto out;
     }
   if (g_cancellable_set_error_if_cancelled (cancel, &error))
@@ -225,7 +263,10 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
                                           "Sensor profile changed during recovery; reopen the device");
       if (!error)
-        self->identity = opened_identity;
+        {
+          self->identity = opened_identity;
+          self->overlap_retries = 0;
+        }
       if (error && self->runtime)
         {
           fte3600_linux_runtime_close (self->runtime, &diag);
@@ -251,7 +292,18 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
   if (self->needs_release)
     {
       enum fte3600_linux_runtime_error release =
-        fte3600_linux_runtime_wait_release (self->runtime, cancel, 30000, &diag);
+        fte3600_linux_runtime_wait_release (self->runtime, cancel, RELEASE_PROMPT_MS, &diag);
+      if (release == FTE3600_RUNTIME_TIMEOUT)
+        {
+          /* Polling release may time out during maintenance or a raw scan.
+           * Those runtimes require a fresh owner before another operation;
+           * FT9368's contact-only timeout can keep waiting on this owner. */
+          hardware_failed = self->identity.backend_model == 0x9369 ||
+                            self->identity.backend_model == 0x9769;
+          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
+                                            "Lift your finger from the sensor");
+          goto out;
+        }
       if (release && release != FTE3600_RUNTIME_RELEASE_UNSUPPORTED)
         {
           error = runtime_error (&diag);
@@ -269,6 +321,12 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
       goto out;
     }
   self->needs_release = TRUE;
+  fp_dbg ("Captured frame %" G_GUINT64_FORMAT ": model %u chip %04x %ux%u (+%u rows) image DAC %u contact %d%%",
+          (guint64) work->frame.status.image_sequence, work->frame.status.model,
+          work->frame.status.chip_id, work->frame.status.width, work->frame.status.height,
+          work->frame.status.extra_rows, work->frame.status.calibrated_image_dac,
+          work->frame.status.raw_contact);
+  dump_frame (&work->frame);
   Fte3600AuthIdentity frame_identity;
   if (!fte3600_auth_identity_from_status (&work->frame.status, &frame_identity, &error) ||
       !fte3600_auth_identity_equal (&self->identity, &frame_identity))
@@ -285,6 +343,17 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
     observe_finger (task, FP_FINGER_STATUS_PRESENT);
   if (work->action == FPI_DEVICE_ACTION_CAPTURE)
     goto out;
+  /* A strip touch that leaves part of the array uncovered has too little skin
+   * to match and is the one placement fault the user can correct on the next
+   * touch, so say so before the matcher turns it into a silent rejection. */
+  if (work->frame.status.model == FTE3600_MODEL_FT9769 &&
+      work->frame.status.raw_contact < CONTACT_MIN_PERCENT)
+    {
+      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_CENTER_FINGER,
+                                        "Finger covers %d%% of the sensor; press flat over the whole button",
+                                        work->frame.status.raw_contact);
+      goto out;
+    }
 
   if (work->action == FPI_DEVICE_ACTION_ENROLL)
     {
@@ -318,8 +387,26 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
     fte3600_auth_identify_full (probe, templates, &work->best, &match,
                                 auth_cancelled, cancel, &error);
   work->matched = match.matched;
+  fp_dbg ("Frame %" G_GUINT64_FORMAT " %s: mutual %u inliers %u hamming %.1f rms %.2f%s",
+          (guint64) work->frame.status.image_sequence, match.matched ? "matched" : "no match",
+          match.mutual_matches, match.inliers, match.mean_hamming, match.rms_error,
+          match.uninformative ? " (no overlap with enrolled skin)" : "");
   if (!error && !work->matched)
     work->encoded = fte3600_auth_probe_encode (probe);
+  /* A strip touch that overlapped none of the enrolled skin says nothing
+   * about the finger. The retry channel is the only path that reaches the
+   * user mid-verification, so ask for another spot instead of failing;
+   * the cap keeps an unknown finger from retrying forever. */
+  if (!error && !work->matched && match.uninformative && self->overlap_retries < OVERLAP_RETRIES)
+    {
+      self->overlap_retries++;
+      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_CENTER_FINGER,
+                                        "Touch did not overlap the enrolled area; try a slightly different spot");
+    }
+  else if (!error)
+    {
+      self->overlap_retries = 0;
+    }
 
 out:
   error = auth_error (g_steal_pointer (&error));
@@ -343,6 +430,8 @@ out:
     }
   if (error && error->domain == FP_DEVICE_RETRY)
     {
+      fp_dbg ("Retry %d after frame %" G_GUINT64_FORMAT ": %s", error->code,
+              (guint64) work->frame.status.image_sequence, error->message);
       work->retry = g_steal_pointer (&error);
       g_task_return_boolean (task, TRUE);
     }
@@ -386,7 +475,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
       if (!error)
         {
           fpi_device_get_enroll_data (device, &print);
-          fpi_device_enroll_progress (device, work->completed, NULL,
+          fpi_device_enroll_progress (device, fte3600_auth_enrollment_count (self->enrollment), NULL,
                                       g_steal_pointer (&work->retry));
           if (!work->encoded)
             {
@@ -414,7 +503,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
           * a separate object avoids copying the user's stored metadata. */
           GBytes *scan_bytes = work->matched ?
                                g_ptr_array_index (work->inputs, 0) : work->encoded;
-          if (scan_bytes)
+          if (scan_bytes && !work->retry)
             {
               scan = fp_print_new (device);
               fpi_print_set_type (scan, FPI_PRINT_RAW);
@@ -434,7 +523,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
           FpPrint *scan = NULL;
           GBytes *scan_bytes = work->matched ?
                                g_ptr_array_index (work->inputs, work->best) : work->encoded;
-          if (scan_bytes)
+          if (scan_bytes && !work->retry)
             {
               scan = fp_print_new (device);
               fpi_print_set_type (scan, FPI_PRINT_RAW);
@@ -523,7 +612,8 @@ start_work (FpDevice *device)
   self->worker_active = TRUE;
   if (work->action != FPI_DEVICE_ACTION_OPEN && work->action != FPI_DEVICE_ACTION_CLOSE)
     fpi_device_report_finger_status (device, self->needs_release &&
-                                     self->identity.backend_model == 0x9368 ?
+                                     (self->identity.backend_model == 0x9368 ||
+                                      self->identity.backend_model == 0x9769) ?
                                      FP_FINGER_STATUS_PRESENT : FP_FINGER_STATUS_NEEDED);
   task = g_task_new (device, self->worker_cancel, complete, NULL);
   /* Never publish cancellation while a worker still owns hardware. */

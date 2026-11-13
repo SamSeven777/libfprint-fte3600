@@ -11,12 +11,18 @@ struct event { int kind;uint32_t status,value;size_t length;const uint8_t *tx,*r
 struct fixture { const char *name;const struct event *events;size_t count;enum fte3600_factory_model model;uint16_t chip,raw,width,height,extra;
     const uint8_t *pram;size_t pram_length;const uint8_t *app;size_t app_length;const uint8_t *firmware;size_t firmware_length;const struct event *negative;size_t negative_count,unconfirmed_stop; };
 #include "device_session_fixtures.h"
+/* FT9769 raw-array flow: every arm resets the part and captures a DAC-centering
+ * frame plus a no-finger reference frame; the finger frame follows on IRQ. */
+static int raw_array(const struct fixture *f) { return f->model==FTE3600_MODEL_FT9769; }
+static inline unsigned per_request(const struct fixture *f) { return raw_array(f)?3:1; }
 struct bus {
     const struct fixture *fixture;size_t next;
     uint16_t words[32768];uint8_t bytes[256],mode;
     uint64_t clock,calls;unsigned frames,measurements,version_reads,uploads;
     size_t frame_position;unsigned pattern;
-    int fail_fifo,wait_failure,latched,frame_absent,unhealthy;
+    int fail_fifo,wait_failure,latched,frame_absent,unhealthy,finger,irq_finger,hold_finger;
+    unsigned contact_percent;
+    int contaminate_reference;
     uint32_t recovery_failure;
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
@@ -38,6 +44,9 @@ static void record_write(struct bus *b,const uint8_t *tx,size_t n)
     if (n==3) {
         if (tx[0]==0x5a || tx[0]==0xc0) b->mode=0x50;
         if (tx[0]==0xc4 || tx[0]==0xc8) { b->mode=0x54;b->frame_position=0; }
+        /* Finger-detect armed: a finger lands at once, unless the runtime test
+         * delivers it with its fake interrupt instead (irq_finger). */
+        if (tx[0]==0xc2 && !b->irq_finger) b->finger=1;
     }
 }
 static uint16_t sample(struct bus *b,size_t i)
@@ -90,11 +99,12 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
         ++b->frames;return 0;
     }
     if (tx[0]==6 && n>=8 && tx[1]==0xf9) {
+        if(b->contaminate_reference)b->finger=b->frames%2;
         size_t count=(n-8)/2;
-        for (size_t i=0;i<count;++i) {uint16_t v=sample(b,b->frame_position+i);tx[6+2*i]=(uint8_t)(v>>8);tx[7+2*i]=(uint8_t)v;}
+        for (size_t i=0;i<count;++i) {size_t at=b->frame_position+i;uint16_t v=sample(b,at);if (b->finger && (!b->contact_percent || at/b->fixture->width < (size_t)b->fixture->height*b->contact_percent/100)) v-=(uint16_t)(300+at*7%60+b->pattern*20);tx[6+2*i]=(uint8_t)(v>>8);tx[7+2*i]=(uint8_t)v;}
         tx[n-2]=tx[n-1]=0;b->frame_position+=count;
         size_t samples=(size_t)b->fixture->width*(b->fixture->height+b->fixture->extra);
-        if (b->frame_position==samples) ++b->frames;
+        if (b->frame_position==samples) {++b->frames;if(!b->hold_finger)b->finger=0;}
         return 0;
     }
     if (n>=4 && (tx[0]==0xff || tx[0]==0x91 || tx[0]==0x90)) {
@@ -123,7 +133,12 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
     if (n==5 && tx[0]==8 && tx[1]==0xf7) {tx[4]=tx[2]==0x80?b->mode:b->bytes[tx[2]];return 0;}
     if (n>=10 && tx[0]==4 && tx[1]==0xfb) {
         size_t at=((size_t)(tx[2]&127)<<8)|tx[3];
-        uint16_t v=at==0x1a82?0x28:b->words[at];
+        /* Identification after the transcript: silicon id, and the 0x1816 window
+         * marker that remaps 0x9391 to 0x9395 for the remap fixture. */
+        /* 0x1a82 bit 3 is the latched finger-detect event: raw-array fixtures
+         * only report it while the synthetic finger is present. */
+        uint16_t v=at==0x1a82?((b->finger||!raw_array(b->fixture))?0x28:0x20):at==0x1a8b?b->fixture->raw:
+                   (at==0x1816 && b->fixture->chip==0x9395 && b->fixture->raw==0x9391)?0x0fff:b->words[at];
         memset(tx+6,0,n-6);tx[6]=(uint8_t)(v>>8);tx[7]=(uint8_t)v;
         if (n==14 || n==16) ++b->measurements;
         return 0;
@@ -211,8 +226,13 @@ static void scenario(const struct fixture *f)
     CHECK(fte3600_device_copy_image(s,2,untouched,sizeof(untouched))==FTE3600_DEVICE_NO_FRAME);CHECK(untouched[0]==0xaa);
     if(f->model==6)fw_baseline_expected(b,first);
     b->pattern=1;success(fte3600_device_arm(s),s);success(fte3600_device_irq(s),s);
-    r=status(s);if(r.image_sequence!=2 || b->frames!=2 || b->measurements!=measurements)fprintf(stderr,"seq=%llu frames=%u measurements=%u/%u\n",(unsigned long long)r.image_sequence,b->frames,b->measurements,measurements);
-    CHECK(r.image_sequence==2 && b->frames==2 && b->measurements==measurements);
+    /* The cancelled arm and the explicit one take two frames each (DAC centre
+     * and reference); capture's own arm finds the finger left by the cancelled
+     * arm's detect still on the array, keeps the previous reference after its
+     * single centring frame and reports the touch pending; plus two finger frames. */
+    unsigned expected_frames=raw_array(f)?2+1+2+2:2;
+    r=status(s);if(r.image_sequence!=2 || b->frames!=expected_frames || b->measurements!=measurements)fprintf(stderr,"seq=%llu frames=%u/%u measurements=%u/%u\n",(unsigned long long)r.image_sequence,b->frames,expected_frames,b->measurements,measurements);
+    CHECK(r.image_sequence==2 && b->frames==expected_frames && b->measurements==measurements);
     success(fte3600_device_copy_image(s,2,second,sizeof(second)),s);
     CHECK(memcmp(first,second,(size_t)f->width*f->height));
     CHECK(r.width==f->width && r.height==f->height && r.extra_rows==f->extra);
@@ -328,6 +348,54 @@ static void legacy_terminal_recovery_errors(void)
     }
     puts("PASS terminal legacy SPI/GPIO absence stops recovery; ordinary errors retain five attempts");
 }
+static void raw_array_edges(void)
+{
+    test_name="raw-array held contact, lift, partial contact and stale interrupt";
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *f=&fixtures[i];if(!raw_array(f))continue;
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+        struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        success(fte3600_device_arm(s),s);
+        int pending=0,released=1;
+        success(fte3600_device_pending(s,&pending),s);CHECK(pending);
+        b->hold_finger=1;
+        success(fte3600_device_irq(s),s);CHECK(status(s).raw_contact==100);
+        for(unsigned j=0;j<2;++j) {
+            success(fte3600_device_release_step(s,&released),s);CHECK(!released);
+        }
+        b->finger=0;
+        success(fte3600_device_release_step(s,&released),s);CHECK(released);
+        b->irq_finger=1;
+        success(fte3600_device_arm(s),s);
+        success(fte3600_device_pending(s,&pending),s);CHECK(!pending);
+        CHECK(fte3600_device_irq(s)==FTE3600_DEVICE_NO_FRAME);
+        CHECK(status(s).state==FTE3600_DEVICE_ARMED && status(s).image_sequence==1);
+        b->finger=1;b->contact_percent=60;
+        success(fte3600_device_irq(s),s);
+        CHECK(status(s).raw_contact>=59 && status(s).raw_contact<=60);
+        CHECK(status(s).image_sequence==2);
+        fte3600_device_close(s);free(b);
+    }
+    puts("PASS raw-array held/lift, partial contact and stale interrupt on both silicon IDs and remap");
+}
+static void raw_reference_contamination(void)
+{
+    test_name="raw-array never accepts a repeatedly contaminated reference";
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *f=&fixtures[i];if(!raw_array(f))continue;
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+        struct fte3600_device_config c=config(b,1);struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        /* A touch lands after each clean centering scan, before the reference
+         * scan, then lifts. Even the last retry must reject that reference. */
+        b->contaminate_reference=1;
+        CHECK(fte3600_device_arm(s)==FTE3600_DEVICE_CALIBRATION_ERROR);
+        CHECK(status(s).state==FTE3600_DEVICE_FAULT && !status(s).image_sequence);
+        fte3600_device_close(s);free(b);
+    }
+    puts("PASS contaminated raw references fail instead of becoming the baseline");
+}
 int main(void)
 {
     /* FW9369 now requires physical contact/release event scripts. Its full
@@ -336,5 +404,5 @@ int main(void)
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         if(!fixtures[i].unconfirmed_stop && fixtures[i].model!=FTE3600_MODEL_FW9369)scenario(&fixtures[i]);
     }
-    missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
+    raw_array_edges();raw_reference_contamination();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
 }

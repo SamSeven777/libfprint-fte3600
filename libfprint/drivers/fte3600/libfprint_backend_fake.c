@@ -92,6 +92,14 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
       runtime->status.chip_id = 0x9369;
       runtime->status.raw_id = 0x9362;
     }
+  if (g_str_equal (mode, "ft9769"))
+    {
+      runtime->status.model = FTE3600_MODEL_FT9769;
+      runtime->status.chip_id = runtime->status.raw_id = 0x9391;
+      runtime->status.width = 40;
+      runtime->status.height = 196;
+      runtime->status.raw_contact = 100;
+    }
   if (g_str_equal (mode, "release-unsupported"))
     {
       runtime->status.model = FTE3600_MODEL_FT9361;
@@ -158,6 +166,8 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
                              FTE3600_AUTH_TEST_OTHER_SEED : FTE3600_AUTH_TEST_SEED, sample);
   runtime->status.image_sequence = ++runtime->sequence;
   frame->status = runtime->status;
+  if (g_str_equal (mode, "partial"))
+    frame->status.raw_contact = 60;
   trace (runtime->control, "capture-ok");
   return failure (diag, FTE3600_RUNTIME_OK);
 }
@@ -171,7 +181,8 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
   (void) timeout;
   trace (runtime->control, "release-begin");
   if (runtime->status.model != FTE3600_MODEL_FT9368 &&
-      runtime->status.model != FTE3600_MODEL_FW9369)
+      runtime->status.model != FTE3600_MODEL_FW9369 &&
+      runtime->status.model != FTE3600_MODEL_FT9769)
     {
       trace (runtime->control, "release-unsupported");
       return failure (diag, FTE3600_RUNTIME_RELEASE_UNSUPPORTED);
@@ -179,6 +190,15 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
   if (g_str_equal (mode, "release-block"))
     while (!g_cancellable_is_cancelled (cancel))
       g_usleep (1000);
+  if (g_str_equal (mode, "release-timeout"))
+    {
+      trace (runtime->control, "release-timeout");
+      /* The production polling runtime requires cold recovery after timeout. */
+      if (runtime->status.model == FTE3600_MODEL_FW9369 ||
+          runtime->status.model == FTE3600_MODEL_FT9769)
+        runtime->failed = TRUE;
+      return failure (diag, FTE3600_RUNTIME_TIMEOUT);
+    }
   if (g_cancellable_is_cancelled (cancel))
     {
       runtime->failed = TRUE;

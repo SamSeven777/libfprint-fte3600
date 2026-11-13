@@ -52,9 +52,9 @@ def spi_identity(spi):
     if resolve(spi / "driver").name != "spidev":
         raise ValueError("SPI device is not bound to stock spidev")
     acpi = resolve(spi / "firmware_node")
-    if not re.fullmatch(r"FTE3600:[a-zA-Z0-9]+", acpi.name):
+    if not re.fullmatch(r"FTE[36]600:[a-zA-Z0-9]+", acpi.name):
         raise ValueError("unexpected ACPI instance name")
-    if read(acpi / "hid") != "FTE3600":
+    if read(acpi / "hid") not in ("FTE3600", "FTE6600"):
         raise ValueError("wrong ACPI HID")
     return acpi.name
 

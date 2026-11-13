@@ -91,8 +91,14 @@ ft93xx_configure_image (const struct ft93xx_operation *op, const struct ft93xx_p
       !checked_write (op, state, 0x180b, 0x0104) ||
       !ft93xx_read_word (op, 0x1812, &value))
     return 0;
-  value = (uint16_t) ((value & 0x8000) |
-                      ((unsigned int) state->subtract_baseline << 14) | 0x0100);
+  /* On FT9769-class parts (0x9391/0x9392) enabling on-chip baseline
+   * subtraction in image mode stalls the scan engine once the integration
+   * exceeds 16 units: the ready flag never rises, every register reads zero
+   * and the part watchdog-resets about 1.6 s later. Observed on a OneMix 4
+   * (ACPI FTE6600); finger-detect mode is unaffected. Capture raw frames and
+   * leave baseline handling to the host pipeline. */
+  unsigned int subtract = p->id == 0x9391 || p->id == 0x9392 ? 0u : state->subtract_baseline;
+  value = (uint16_t) ((value & 0x8000) | (subtract << 14) | 0x0100);
   if (!checked_write (op, state, 0x1812, value))
     return 0;
   state->mode = mode;
