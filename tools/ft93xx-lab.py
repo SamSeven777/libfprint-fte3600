@@ -509,6 +509,7 @@ def main():
         rst.pulse(); print("reset pulsed")
     w = Wire(cs_high=a.cs_high, speed=a.speed, trace=a.trace)
     s = Sensor(w)
+    s.startup()
     s.fdt_skip = {x if x in ("chan", "1a83") else int(x, 16) for x in filter(None, a.fdt_skip.split(","))}
     s.rate = a.rate; s.settle_ms = a.settle_ms; s.irq_wait = a.irq_wait
     s.state["integration"] = a.integration
@@ -517,7 +518,6 @@ def main():
     if a.no_baseline: s.state["subtract_baseline"] = 0
     if a.gain >= 0: s.state["gain"] = a.gain
     if a.dac >= 0: s.state["dac"] = a.dac
-    s.startup()
     print(f"startup done, 0x1816=0x{w.read_word(0x1816):04x}, {w.n} transfers")
     if a.cmd == "probe":
         dump_regs(w, "after-startup"); return
