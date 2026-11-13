@@ -503,7 +503,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
           * a separate object avoids copying the user's stored metadata. */
           GBytes *scan_bytes = work->matched ?
                                g_ptr_array_index (work->inputs, 0) : work->encoded;
-          if (scan_bytes)
+          if (scan_bytes && !work->retry)
             {
               scan = fp_print_new (device);
               fpi_print_set_type (scan, FPI_PRINT_RAW);
@@ -523,7 +523,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
           FpPrint *scan = NULL;
           GBytes *scan_bytes = work->matched ?
                                g_ptr_array_index (work->inputs, work->best) : work->encoded;
-          if (scan_bytes)
+          if (scan_bytes && !work->retry)
             {
               scan = fp_print_new (device);
               fpi_print_set_type (scan, FPI_PRINT_RAW);

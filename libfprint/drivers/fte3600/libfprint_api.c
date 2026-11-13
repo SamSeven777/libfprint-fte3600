@@ -258,12 +258,12 @@ test_enroll_release_progress (void)
 }
 
 static void
-test_release_timeout_recovery (void)
+test_release_timeout_recovery (gconstpointer profile)
 {
   g_autoptr(GError) error = NULL;
   g_autoptr(FpContext) context = fp_context_new ();
   FpDevice *device = only_device (context);
-  mode ("fw9369");
+  mode (profile);
   g_assert_true (fp_device_open_sync (device, NULL, &error));
   g_assert_no_error (error);
   g_autoptr(FpPrint) print = enroll (device, "enroll");
@@ -275,7 +275,7 @@ test_release_timeout_recovery (void)
   g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
   g_assert_false (matched);
   g_clear_error (&error);
-  mode ("fw9369");
+  mode (profile);
   g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
                                        &matched, NULL, &error));
   g_assert_no_error (error);
@@ -870,6 +870,55 @@ test_public_api (void)
 }
 
 static void
+test_strip_retries (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("ft9769");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+  gboolean matched = TRUE;
+  mode ("partial");
+  g_assert_false (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                        &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+  g_clear_error (&error);
+  mode ("negative");
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  g_ptr_array_add (gallery, print);
+  for (guint action = 0; action < 2; action++)
+  for (guint i = 0; i < 4; i++)
+    {
+      g_autoptr(FpPrint) identified = NULL;
+      gboolean ok = action ?
+        fp_device_identify_sync (device, gallery, NULL, NULL, NULL, &identified, NULL, &error) :
+        fp_device_verify_sync (device, print, NULL, NULL, NULL, &matched, NULL, &error);
+      g_assert_false (matched);
+      g_assert_null (identified);
+      if (i < 3)
+        {
+          g_assert_false (ok);
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+          g_clear_error (&error);
+        }
+      else
+        {
+          g_assert_true (ok);
+          g_assert_no_error (error);
+        }
+    }
+  mode ("positive");
+  g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                       &matched, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (matched);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
 test_private_frame_dump (void)
 {
   if (!g_test_subprocess ())
@@ -916,7 +965,9 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
   g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);
-  g_test_add_func ("/fte3600/release-timeout-recovery", test_release_timeout_recovery);
+  g_test_add_data_func ("/fte3600/release-timeout-recovery", "fw9369", test_release_timeout_recovery);
+  g_test_add_data_func ("/fte3600/strip-release-timeout-recovery", "ft9769", test_release_timeout_recovery);
+  g_test_add_func ("/fte3600/strip-retries", test_strip_retries);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
