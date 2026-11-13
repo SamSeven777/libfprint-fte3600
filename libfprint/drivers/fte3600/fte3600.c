@@ -2,6 +2,7 @@
  * Independent libfprint adapter. Accepted input: official libfprint 1.94.10,
  * local device/auth APIs, and the explicitly approved Sam7 BRISK dependency. */
 #define FP_COMPONENT "fte3600"
+#define FTE3600_MAX_RECALIBRATION_RETRIES 3
 #include "fte3600.h"
 #include "fte3600_auth.h"
 #include "fte3600_linux_runtime.h"
@@ -17,7 +18,9 @@ struct _FpiDeviceFte3600
   GCancellable                 *worker_cancel;
   gboolean                      worker_active;
   gboolean                      needs_release;
-  GHashTable                   *template_cache; /* Worker-owned; immutable values, exact byte keys. */
+  gboolean                      recalibration_prompt; /* Contact retired the handle; prompt after reopening. */
+  guint                         recalibration_retries;
+  GHashTable                  *template_cache; /* Worker-owned; immutable values, exact byte keys. */
   GQueue                        cache_order;
 };
 G_DEFINE_TYPE (FpiDeviceFte3600, fpi_device_fte3600, FP_TYPE_DEVICE)
@@ -181,6 +184,34 @@ runtime_error (const struct fte3600_linux_runtime_diagnostic *diag)
                                    diag->last_configured_mode, diag->acpi_mode, diag->cs_control, diag->cs_retry_attempted);
 }
 
+/* FW9369 calibration can fail under a resting finger, but these diagnostics
+ * do not prove contact was the cause. Permit a bounded cold recovery only for
+ * the already opened FW9369 profile, preserving the original diagnostic.
+ * The post-reopen prompt below runs after calibration, before capture. */
+static GError *
+runtime_error_for_action (FpiDeviceFte3600                              *self,
+                          const struct fte3600_linux_runtime_diagnostic *diag,
+                          FpiDeviceAction                                action)
+{
+  if ((action == FPI_DEVICE_ACTION_ENROLL || action == FPI_DEVICE_ACTION_VERIFY ||
+       action == FPI_DEVICE_ACTION_IDENTIFY) &&
+      diag->code == FTE3600_RUNTIME_SESSION &&
+      diag->has_session_status && diag->model == FTE3600_MODEL_FW9369 &&
+      self->identity.backend_model == 0x9369 &&
+      self->recalibration_retries < FTE3600_MAX_RECALIBRATION_RETRIES &&
+      (diag->device_error == FTE3600_DEVICE_CALIBRATION_ERROR ||
+       diag->device_error == FTE3600_DEVICE_RECOVERY_REQUIRED))
+    {
+      g_autoptr(GError) diagnostic = runtime_error (diag);
+      self->recalibration_retries++;
+      self->recalibration_prompt = TRUE;
+      return fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
+                                       "Sensor needs recalibration; remove the finger and try again: %s",
+                                       diagnostic->message);
+    }
+  return runtime_error (diag);
+}
+
 static void
 worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
 {
@@ -203,6 +234,8 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         error = runtime_error (&diag);
       self->runtime = NULL;
       self->needs_release = FALSE;
+      self->recalibration_prompt = FALSE;
+      self->recalibration_retries = 0;
       goto out;
     }
   if (g_cancellable_set_error_if_cancelled (cancel, &error))
@@ -213,7 +246,7 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
       struct fte3600_device_status status;
       Fte3600AuthIdentity opened_identity;
       if (fte3600_linux_runtime_open (&config, cancel, &self->runtime, &diag))
-        error = runtime_error (&diag);
+        error = runtime_error_for_action (self, &diag, work->action);
       else if (fte3600_linux_runtime_get_status (self->runtime, &status) ||
                !fte3600_auth_identity_from_status (&status, &opened_identity, &error))
         if (!error)
@@ -233,6 +266,16 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         }
       if (error || work->action == FPI_DEVICE_ACTION_OPEN)
         goto out;
+      if (self->recalibration_prompt)
+        {
+          /* The removal prompt was shown before this reopen started; prompt
+           * again only now that the sensor is calibrated, so the next touch
+           * does not land inside the calibration. The handle is kept. */
+          self->recalibration_prompt = FALSE;
+          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
+                                            "Sensor recalibrated; touch it again");
+          goto out;
+        }
     }
 
   if (work->action == FPI_DEVICE_ACTION_VERIFY || work->action == FPI_DEVICE_ACTION_IDENTIFY)
@@ -254,7 +297,7 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         fte3600_linux_runtime_wait_release (self->runtime, cancel, 30000, &diag);
       if (release && release != FTE3600_RUNTIME_RELEASE_UNSUPPORTED)
         {
-          error = runtime_error (&diag);
+          error = runtime_error_for_action (self, &diag, work->action);
           hardware_failed = TRUE;
           goto out;
         }
@@ -264,11 +307,12 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
     }
   if (fte3600_linux_runtime_capture (self->runtime, cancel, 30000, &work->frame, &diag))
     {
-      error = runtime_error (&diag);
+      error = runtime_error_for_action (self, &diag, work->action);
       hardware_failed = TRUE;
       goto out;
     }
   self->needs_release = TRUE;
+  self->recalibration_retries = 0;
   Fte3600AuthIdentity frame_identity;
   if (!fte3600_auth_identity_from_status (&work->frame.status, &frame_identity, &error) ||
       !fte3600_auth_identity_equal (&self->identity, &frame_identity))
@@ -325,6 +369,11 @@ out:
   error = auth_error (g_steal_pointer (&error));
   if (!error)
     g_cancellable_set_error_if_cancelled (cancel, &error);
+  if (error && error->domain != FP_DEVICE_RETRY)
+    {
+      self->recalibration_prompt = FALSE;
+      self->recalibration_retries = 0;
+    }
   if (error && work->action == FPI_DEVICE_ACTION_OPEN && self->runtime)
     {
       fte3600_linux_runtime_close (self->runtime, &diag);
@@ -386,7 +435,7 @@ complete (GObject *source, GAsyncResult *result, gpointer user_data)
       if (!error)
         {
           fpi_device_get_enroll_data (device, &print);
-          fpi_device_enroll_progress (device, work->completed, NULL,
+          fpi_device_enroll_progress (device, fte3600_auth_enrollment_count (self->enrollment), NULL,
                                       g_steal_pointer (&work->retry));
           if (!work->encoded)
             {

@@ -136,6 +136,19 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
     runtime->failed = TRUE;
   if (runtime->failed)
     return failure (diag, FTE3600_RUNTIME_IO);
+  if (g_str_equal (mode, "calibration-fail"))
+    {
+      runtime->failed = TRUE;
+      *diag = (struct fte3600_linux_runtime_diagnostic){
+        .code = FTE3600_RUNTIME_SESSION,
+        .device_error = FTE3600_DEVICE_CALIBRATION_ERROR,
+        .has_session_status = 1,
+        .model = runtime->status.model,
+        .raw_id = runtime->status.raw_id,
+        .chip_id = runtime->status.chip_id,
+      };
+      return FTE3600_RUNTIME_SESSION;
+    }
   if (g_strcmp0 (runtime->last_mode, mode))
     {
       g_free (runtime->last_mode);
@@ -150,6 +163,9 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
     sample = runtime->sample++ % 8;
   if (g_str_equal (mode, "enroll-retry") && runtime->sample > 1)
     sample = (runtime->sample - 2) % 8;
+  /* Continue the enrollment fixture after its first three accepted samples. */
+  if (g_str_equal (mode, "enroll-resume"))
+    sample = (sample + 3) % 8;
   if (g_str_equal (mode, "duplicate"))
     sample = 0;
   if (!g_str_equal (mode, "blank"))
