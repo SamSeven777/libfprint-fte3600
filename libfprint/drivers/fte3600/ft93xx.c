@@ -1,41 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "fte3600_ft93xx.h"
+#include "ft93xx_registers.h"
 
 #include <string.h>
-
-struct profile
-{
-  uint16_t id, width, height, window, extension;
-  uint8_t  dac, gain, polarity;
-};
-
-static const struct profile profiles[] = {
-  {0x9349, 80, 128, 0x7ffe, 0x003f, 122, 8, 0},
-  {0x9363, 64, 80, 0x4ffe, 0, 60, 7, 0},
-  {0x9365, 64, 80, 0x4ffe, 0, 72, 7, 0},
-  {0x9372, 56, 56, 0x06fe, 0, 62, 7, 0},
-  {0x9391, 40, 196, 0xc7fe, 0x7fff, 124, 5, 3},
-  {0x9392, 40, 196, 0xc7fe, 0x7fff, 124, 5, 3},
-  {0x9395, 36, 176, 0xaffe, 0x0fff, 120, 8, 0},
-  {0x9396, 36, 96, 0x5ffe, 0x0003, 128, 8, 0},
-  {0x9397, 32, 176, 0xaffe, 0x0fff, 97, 11, 3},
-  {0x9398, 36, 144, 0x8ffe, 0x00ff, 128, 8, 0}
-};
-
-static const struct profile *
-lookup (uint16_t id)
-{
-  for (size_t i = 0; i < sizeof (profiles) / sizeof (profiles[0]); ++i)
-    if (profiles[i].id == id)
-      return &profiles[i];
-  return NULL;
-}
 
 static void
 apply_area (uint16_t chip_id, uint16_t raw_id, uint8_t byte,
             struct fte3600_ft93xx_geometry *geometry, uint8_t *version)
 {
-  const struct profile *p = lookup (chip_id);
+  const struct ft93xx_profile *p = ft93xx_lookup_profile (chip_id);
 
   if (p != NULL)
     {
@@ -93,7 +66,7 @@ enum fte3600_ft93xx_status
 fte3600_ft93xx_configuration (
   uint16_t chip_id, uint8_t version, struct fte3600_ft93xx_state *state)
 {
-  const struct profile *p = lookup (chip_id);
+  const struct ft93xx_profile *p = ft93xx_lookup_profile (chip_id);
 
   if (p == NULL || state == NULL)
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -133,241 +106,6 @@ fte3600_ft93xx_payload_size (
   return FTE3600_FT93XX_OK;
 }
 
-struct operation
-{
-  const struct fte3600_ft93xx_io    *io;
-  struct fte3600_ft93xx_diagnostics *diagnostics;
-  enum fte3600_ft93xx_status *error;
-};
-
-static void
-wait_ms (const struct operation *op, uint32_t duration)
-{
-  op->io->wait_ms (op->io->context, duration);
-}
-
-static int
-transfer (const struct operation *op, uint8_t *buffer, size_t length)
-{
-  uint8_t original[FTE3600_FT93XX_MAX_TRANSFER];
-
-  memcpy (original, buffer, length);
-  for (unsigned int attempt = 0; attempt < 3; ++attempt)
-    {
-      uint32_t status;
-      memcpy (buffer, original, length);
-      status = op->io->spi (op->io->context, buffer, length);
-      if ((status & UINT32_C (0x80000000)) == 0)
-        return 1;
-      if (op->diagnostics != NULL)
-        {
-          ++op->diagnostics->failed_attempts;
-          op->diagnostics->last_failure = status;
-        }
-      wait_ms (op, 10);
-    }
-  if (op->diagnostics != NULL)
-    ++op->diagnostics->exhausted_transactions;
-  return 0;
-}
-
-static int
-command (const struct operation *op, uint8_t command_byte)
-{
-  uint8_t buffer[3] = {command_byte, (uint8_t) ~command_byte, 0};
-
-  return transfer (op, buffer, sizeof (buffer));
-}
-
-static int
-read_byte (const struct operation *op, uint8_t address, uint8_t *value)
-{
-  uint8_t buffer[5] = {0x08, 0xf7, address, 0, 0};
-
-  if (!transfer (op, buffer, sizeof (buffer)))
-    return 0;
-  *value = buffer[4];
-  return 1;
-}
-
-static int
-write_byte (const struct operation *op, uint8_t address, uint8_t value)
-{
-  uint8_t buffer[4] = {0x09, 0xf6, address, value};
-
-  return transfer (op, buffer, sizeof (buffer));
-}
-
-static int
-read_word (const struct operation *op, uint16_t address, uint16_t *value)
-{
-  uint8_t buffer[10] = {0x04, 0xfb, (uint8_t) (0x80 | (address >> 8)),
-                        (uint8_t) address, 0, 0, 0, 0, 0, 0};
-
-  if (!transfer (op, buffer, sizeof (buffer)))
-    return 0;
-  if (buffer[8] != 0 || buffer[9] != 0)
-    {
-      uint16_t crc = 0xffff;
-      for (size_t i = 6; i < 8; ++i)
-        {
-          crc = (uint16_t) (crc ^ ((unsigned int) buffer[i] << 8));
-          for (unsigned int bit = 0; bit < 8; ++bit)
-            crc = (uint16_t) (((unsigned int) crc << 1) ^
-                              ((crc & 0x8000) != 0 ? 0x1021u : 0u));
-        }
-      if (crc != (uint16_t) ((uint16_t) buffer[8] << 8 | buffer[9]))
-        {
-          *op->error = FTE3600_FT93XX_BAD_CRC;
-          return 0;
-        }
-    }
-  *value = (uint16_t) ((uint16_t) buffer[6] << 8 | buffer[7]);
-  return 1;
-}
-
-static int
-write_word (const struct operation *op, uint16_t address, uint16_t value)
-{
-  uint8_t buffer[8] = {0x05, 0xfa, (uint8_t) (0x80 | (address >> 8)),
-                       (uint8_t) address, 0, 0,
-                       (uint8_t) (value >> 8), (uint8_t) value};
-
-  return transfer (op, buffer, sizeof (buffer));
-}
-
-static int
-checked_write (const struct operation *op,
-               struct fte3600_ft93xx_state *state,
-               uint16_t address, uint16_t value)
-{
-  uint16_t observed;
-
-  if (!write_word (op, address, value))
-    return 0;
-  if (state->check_registers == 1)
-    {
-      if (!read_word (op, address, &observed))
-        return 0;
-      if (observed != value)
-        state->check_registers = 2;
-    }
-  return 1;
-}
-
-static int
-idle (const struct operation *op)
-{
-  uint8_t value;
-
-  if (!command (op, 0x5a))
-    return 0;
-  wait_ms (op, 1);
-  if (!read_byte (op, 0x80, &value))
-    return 0;
-  for (unsigned int i = 0; value != 0x50 && i < 5; ++i)
-    {
-      if (!command (op, 0xc0))
-        return 0;
-      wait_ms (op, 1);
-      if (!read_byte (op, 0x80, &value))
-        return 0;
-      if (value != 0x50)
-        wait_ms (op, 1);
-    }
-  if (op->diagnostics != NULL)
-    op->diagnostics->idle_unacknowledged |= value != 0x50;
-  return command (op, 0xa5);
-}
-
-static int
-configure (const struct operation *op, const struct profile *p,
-           struct fte3600_ft93xx_state *state, uint8_t mode)
-{
-  static const uint8_t byte_settings[][2] = {
-    {0x8e, 0xf4}, {0x8d, 0x61}, {0x8f, 0xff}, {0x90, 0},
-    {0x91, 7}, {0x92, 0xd0}, {0x90, 1}
-  };
-  uint16_t value;
-  uint16_t dac = (uint16_t) (0x3000u | ((unsigned int) state->dac_polarity << 14) |
-                             ((unsigned int) state->gain << 8) | state->dac);
-  uint16_t timing = (uint16_t) (((unsigned int) state->integration - 1u) << 5 |
-                                state->sample_time);
-  uint8_t prior_mode = state->mode;
-
-  if (!idle (op) || !checked_write (op, state, 0x1801, dac) ||
-      !checked_write (op, state, 0x1800, p->window) ||
-      !checked_write (op, state, 0x1816, p->extension) ||
-      !checked_write (op, state, 0x1807, timing) ||
-      !checked_write (op, state, 0x1806, 0x023b) ||
-      !checked_write (op, state, 0x180a, 1) ||
-      !checked_write (op, state, 0x180b, 0x0104) ||
-      !read_word (op, 0x1812, &value))
-    return 0;
-  value = (uint16_t) ((value & 0x8000) |
-                      ((unsigned int) state->subtract_baseline << 14) | 0x0100);
-  if (!checked_write (op, state, 0x1812, value))
-    return 0;
-  state->mode = mode;
-  if (prior_mode == 0xa3 || prior_mode == 0xa4)
-    return 1;
-  value = (uint16_t) (0x27c0 | state->sample_mode |
-                      (state->sample_mode > 1 ? 8 : 0));
-  if (!checked_write (op, state, 0x1804, value))
-    return 0;
-  if (state->configured == 1)
-    return 1;
-  if (!checked_write (op, state, 0x1811, 0x01fe))
-    return 0;
-  for (unsigned int bit = 0x20; bit <= 0x40; bit <<= 1)
-    {
-      if (!read_word (op, 0x1a83, &value))
-        return 0;
-      if ((value & bit) == 0 &&
-          !write_word (op, 0x1a83, (uint16_t) (value | bit)))
-        return 0;
-    }
-  state->configured = 1;
-  for (size_t i = 0; i < sizeof (byte_settings) / sizeof (byte_settings[0]); ++i)
-    if (!write_byte (op, byte_settings[i][0], byte_settings[i][1]))
-      return 0;
-  return write_word (op, 0x1a06, 1);
-}
-
-static int
-fifo (const struct operation *op, uint8_t *payload, size_t length)
-{
-  uint8_t buffer[FTE3600_FT93XX_MAX_TRANSFER];
-  size_t position = 0;
-
-  while (position < length)
-    {
-      size_t block = length - position;
-      if (block > 16384)
-        block = 16384;
-      while (block != 0)
-        {
-          size_t chunk = block > 1790 ? 1790 : block;
-          size_t word_count = chunk / 2 - 1;
-          memset (buffer, 0, chunk + 8);
-          buffer[0] = 0x06;
-          buffer[1] = 0xf9;
-          buffer[2] = 0x9a;
-          buffer[3] = 0x05;
-          buffer[4] = (uint8_t) (word_count >> 8);
-          buffer[5] = (uint8_t) word_count;
-          if (!transfer (op, buffer, chunk + 8))
-            return 0;
-          memcpy (payload + position, buffer + 6, chunk);
-          position += chunk;
-          block -= chunk;
-          if (op->diagnostics != NULL)
-            op->diagnostics->raw_bytes_completed = position;
-        }
-    }
-  return 1;
-}
-
 static int
 valid_output (const struct fte3600_ft93xx_geometry *geometry,
               uint8_t count, const uint8_t *payload, size_t capacity,
@@ -399,14 +137,14 @@ fte3600_ft93xx_image_read (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
   size_t length;
 
   if (!valid_output (geometry, count, payload, capacity, io, &length))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
   if (diagnostics != NULL)
     memset (diagnostics, 0, sizeof (*diagnostics));
-  return fifo (&op, payload, length) ? FTE3600_FT93XX_OK : error;
+  return ft93xx_read_fifo (&op, payload, length) ? FTE3600_FT93XX_OK : error;
 }
 
 static void
@@ -448,9 +186,9 @@ fte3600_ft93xx_capture_retained (
   uint8_t *payload, size_t capacity, const struct fte3600_ft93xx_io *io,
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
-  const struct profile *p = lookup (chip_id);
+  const struct ft93xx_profile *p = ft93xx_lookup_profile (chip_id);
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
   size_t length, samples;
   uint8_t byte = 0;
   uint16_t word = 0;
@@ -462,35 +200,35 @@ fte3600_ft93xx_capture_retained (
     return FTE3600_FT93XX_INVALID_ARGUMENT;
   if (diagnostics != NULL)
     memset (diagnostics, 0, sizeof (*diagnostics));
-  if (!configure (&op, p, state, 0xa3) || !command (&op, 0xc4))
+  if (!ft93xx_configure_image (&op, p, state, 0xa3) || !ft93xx_command (&op, 0xc4))
     return error;
-  wait_ms (&op, 1);
+  ft93xx_wait_ms (&op, 1);
   for (unsigned int i = 0; i < 10; ++i)
     {
-      if (!read_byte (&op, 0x80, &byte))
+      if (!ft93xx_read_byte (&op, 0x80, &byte))
         return error;
       if (byte == 0x54)
         break;
     }
   if (diagnostics != NULL)
     diagnostics->mode_unacknowledged = byte != 0x54;
-  if (!write_word (&op, 0x1800, (uint16_t) (p->window | 1)))
+  if (!ft93xx_write_word (&op, 0x1800, (uint16_t) (p->window | 1)))
     return error;
   for (unsigned int i = 0; i < 5; ++i)
     {
-      if (!read_word (&op, 0x1a82, &word))
+      if (!ft93xx_read_word (&op, 0x1a82, &word))
         return error;
       if ((word & 0x20) != 0)
         {
-          if (!write_word (&op, 0x1a84, word))
+          if (!ft93xx_write_word (&op, 0x1a84, word))
             return error;
           break;
         }
-      wait_ms (&op, 1);
+      ft93xx_wait_ms (&op, 1);
     }
   if (diagnostics != NULL)
     diagnostics->ready_unacknowledged = (word & 0x20) == 0;
-  if (!fifo (&op, payload, length) || !write_word (&op, 0x1a84, 0x20))
+  if (!ft93xx_read_fifo (&op, payload, length) || !ft93xx_write_word (&op, 0x1a84, 0x20))
     return error;
   samples = (size_t) geometry->width * geometry->height;
   decode_samples (payload, samples, raw_id);
@@ -498,27 +236,7 @@ fte3600_ft93xx_capture_retained (
 }
 
 static int
-spi_mode (const struct operation *op)
-{
-  uint8_t byte = 0;
-
-  for (unsigned int attempt = 0; attempt < 4; ++attempt)
-    {
-      if (!write_byte (op, 0xc6, 1))
-        return 0;
-      wait_ms (op, 4);
-      if (!read_byte (op, 0xc6, &byte))
-        return 0;
-      if (byte == 1)
-        break;
-    }
-  if (op->diagnostics != NULL)
-    op->diagnostics->spi_mode_unacknowledged |= byte != 1;
-  return 1;
-}
-
-static int
-probe_inner (const struct operation         *op,
+probe_inner (const struct ft93xx_operation  *op,
              struct fte3600_ft93xx_identity *identity)
 {
   uint8_t byte = 0;
@@ -526,38 +244,38 @@ probe_inner (const struct operation         *op,
 
   for (unsigned int attempt = 0; attempt < 5; ++attempt)
     {
-      if (!write_byte (op, 0xfd, 0x0a) || !write_byte (op, 0xfe, 0x7f))
+      if (!ft93xx_write_byte (op, 0xfd, 0x0a) || !ft93xx_write_byte (op, 0xfe, 0x7f))
         return 0;
-      wait_ms (op, 1);
-      if (!read_byte (op, 0xfe, &byte))
+      ft93xx_wait_ms (op, 1);
+      if (!ft93xx_read_byte (op, 0xfe, &byte))
         return 0;
       if (byte == 0x7f)
         break;
     }
   if (op->diagnostics != NULL)
     op->diagnostics->voltage_unacknowledged = byte != 0x7f;
-  if (!spi_mode (op))
+  if (!ft93xx_spi_mode (op))
     return 0;
   for (unsigned int attempt = 0; attempt < 3; ++attempt)
     {
-      if (!read_word (op, 0x1a8b, &word))
+      if (!ft93xx_read_word (op, 0x1a8b, &word))
         return 0;
       identity->chip_id = word;
       identity->raw_id = word;
-      if (!write_word (op, 0x1a84, 0xffff))
+      if (!ft93xx_write_word (op, 0x1a84, 0xffff))
         return 0;
-      if (lookup (word) != NULL)
+      if (ft93xx_lookup_profile (word) != NULL)
         {
           if (word == 0x9391)
             {
-              if (!read_word (op, 0x1816, &word))
+              if (!ft93xx_read_word (op, 0x1816, &word))
                 return 0;
               if (word == 0x0fff)
                 identity->chip_id = 0x9395;
             }
           return 1;
         }
-      if (!idle (op))
+      if (!ft93xx_idle (op))
         return 0;
       identity->chip_id = 0;
     }
@@ -584,7 +302,7 @@ fte3600_ft93xx_probe (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
 
   if (identity == NULL || !valid_io (io))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -594,47 +312,47 @@ fte3600_ft93xx_probe (
 }
 
 static int
-efuse_byte (const struct operation *op, uint16_t chip_id,
+efuse_byte (const struct ft93xx_operation *op, uint16_t chip_id,
             uint8_t foundry, uint8_t address, uint8_t *value)
 {
   if (foundry == 1)
-    return write_byte (op, 0xf6, (uint8_t) (address + 0x20u)) &&
-           read_byte (op, 0xf7, value);
+    return ft93xx_write_byte (op, 0xf6, (uint8_t) (address + 0x20u)) &&
+           ft93xx_read_byte (op, 0xf7, value);
   if (foundry == 2)
     {
       static const uint8_t control[] = {0xc0, 0xc1, 0xc0, 0x80};
-      if (!write_byte (op, 0xf1, address))
+      if (!ft93xx_write_byte (op, 0xf1, address))
         return 0;
       for (size_t i = 0; i < sizeof (control); ++i)
-        if (!write_byte (op, 0xf4, control[i]))
+        if (!ft93xx_write_byte (op, 0xf4, control[i]))
           return 0;
-      return read_byte (op, 0xf3, value);
+      return ft93xx_read_byte (op, 0xf3, value);
     }
   if (foundry == 3)
     {
       if (chip_id < 0x9398)
-        return write_byte (op, 0xf1, address) &&
-               write_byte (op, 0xf4, 0x81) &&
-               write_byte (op, 0xf4, 0x80) && read_byte (op, 0xf3, value);
+        return ft93xx_write_byte (op, 0xf1, address) &&
+               ft93xx_write_byte (op, 0xf4, 0x81) &&
+               ft93xx_write_byte (op, 0xf4, 0x80) && ft93xx_read_byte (op, 0xf3, value);
       uint8_t encoded = (uint8_t) (0x20u | (address & 0x1fu) |
                                    ((address & 0x20u) << 2));
-      if (!write_byte (op, 0xf6, encoded))
+      if (!ft93xx_write_byte (op, 0xf6, encoded))
         return 0;
-      wait_ms (op, 1);
-      return read_byte (op, 0xf7, value);
+      ft93xx_wait_ms (op, 1);
+      return ft93xx_read_byte (op, 0xf7, value);
     }
   *value = 0;
   return 1;
 }
 
 static int
-select_foundry (const struct operation *op, uint16_t chip_id,
+select_foundry (const struct ft93xx_operation *op, uint16_t chip_id,
                 uint16_t raw_id, uint8_t *foundry)
 {
   uint16_t word;
   uint8_t selected = 0;
 
-  if (!read_word (op, 0x1a8d, &word))
+  if (!ft93xx_read_word (op, 0x1a8d, &word))
     return 0;
   unsigned int marker = (word >> 2) & 0x3f;
   switch (chip_id)
@@ -697,7 +415,7 @@ select_foundry (const struct operation *op, uint16_t chip_id,
 }
 
 static int
-serial_bytes (const struct operation *op, uint16_t chip_id,
+serial_bytes (const struct ft93xx_operation *op, uint16_t chip_id,
               uint8_t foundry, uint8_t *serial)
 {
   static const uint8_t addresses[17] = {
@@ -718,7 +436,7 @@ fte3600_ft93xx_efuse_read (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
 
   if (value == NULL || !valid_io (io))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -733,7 +451,7 @@ fte3600_ft93xx_foundry (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
 
   if (foundry == NULL || !valid_io (io))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -748,7 +466,7 @@ fte3600_ft93xx_serial_read (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
 
   if (serial == NULL || capacity < FTE3600_FT93XX_SERIAL_SIZE || !valid_io (io))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -764,24 +482,24 @@ prepare_startup (
   struct fte3600_ft93xx_device      *device)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
   uint8_t version_byte;
   uint16_t word;
 
-  if (!idle (&op) || !probe_inner (&op, &output->identity))
+  if (!ft93xx_idle (&op) || !probe_inner (&op, &output->identity))
     return error;
   uint16_t chip = output->identity.chip_id, raw = output->identity.raw_id;
-  if (lookup (chip) == NULL)
+  if (ft93xx_lookup_profile (chip) == NULL)
     return FTE3600_FT93XX_UNSUPPORTED_DEVICE;
-  if (!spi_mode (&op) || !select_foundry (&op, chip, raw, &output->foundry) ||
+  if (!ft93xx_spi_mode (&op) || !select_foundry (&op, chip, raw, &output->foundry) ||
       !efuse_byte (&op, chip, output->foundry, 0x13, &version_byte))
     return error;
   apply_area (chip, raw, version_byte, &output->geometry, &output->version);
   output->features = fte3600_ft93xx_features (chip, raw, output->version, output->foundry);
   if ((output->features & 1) != 0)
     {
-      if (!read_word (&op, 0x1a8e, &word) ||
-          !write_word (&op, 0x1a8e, (uint16_t) ((word & 0xfff8) | 2)))
+      if (!ft93xx_read_word (&op, 0x1a8e, &word) ||
+          !ft93xx_write_word (&op, 0x1a8e, (uint16_t) ((word & 0xfff8) | 2)))
         return error;
     }
   if (!serial_bytes (&op, chip, output->foundry, output->serial))
@@ -794,7 +512,7 @@ prepare_startup (
       device->fdt.armed_direction = 0;
       device->image.nav_ready = 0;
     }
-  if (!write_word (&op, 0x1a84, 0xffff))
+  if (!ft93xx_write_word (&op, 0x1a84, 0xffff))
     return error;
   (void) fte3600_ft93xx_configuration (chip, output->version, &output->state);
   output->calibration_pending = 1;
@@ -857,136 +575,6 @@ fte3600_ft93xx_fdt_defaults (
   return FTE3600_FT93XX_OK;
 }
 
-static int
-masked_write (const struct operation *op,
-              struct fte3600_ft93xx_state *state,
-              uint16_t address, uint16_t mask, uint16_t bits)
-{
-  uint16_t value;
-
-  return read_word (op, address, &value) &&
-         checked_write (op, state, address, (uint16_t) ((value & mask) | bits));
-}
-
-static int
-analog_channels (const struct operation *op, uint16_t chip,
-                 struct fte3600_ft93xx_state *state)
-{
-  if (chip == 0x9349)
-    return checked_write (op, state, 0xc0, 0x0440) &&
-           checked_write (op, state, 0xc1, 0x00c0) &&
-           checked_write (op, state, 0xc2, 0x0044);
-  if (chip == 0x9363 || chip == 0x9365)
-    return masked_write (op, state, 0xc0, 0xe000, 0x0444) &&
-           masked_write (op, state, 0xc1, 0xffc0, 0x0021) &&
-           masked_write (op, state, 0xc2, 0xffff, 0x00c0);
-  if (chip == 0x9372)
-    return checked_write (op, state, 0xc0, 0x0920) &&
-           checked_write (op, state, 0xc1, 0x0c8e);
-  static const uint8_t channels[][4] = {
-    {3, 9, 15, 20}, {2, 8, 13, 19}, {0, 4, 7, 11}, {2, 6, 11, 15}
-  };
-  unsigned int row = chip == 0x9391 || chip == 0x9392 ? 0 :
-                     chip == 0x9396 ? 2 : chip == 0x9398 ? 3 : 1;
-  uint16_t bits = row == 0 ? 0x0103 : chip == 0x9395 ? 0x0083 : 0x0080;
-  for (size_t i = 0; i < 4; ++i)
-    {
-      uint16_t address = (uint16_t) (0xc0 + 2 * channels[row][i]);
-      if (!masked_write (op, state, address, 0xe000, bits) ||
-          !masked_write (op, state, (uint16_t) (address + 1), 0xe000, 0))
-        return 0;
-    }
-  return 1;
-}
-
-static int
-configure_fdt (const struct operation *operation,
-               uint16_t chip_id, uint8_t foundry,
-               struct fte3600_ft93xx_state *state,
-               struct fte3600_ft93xx_fdt_state *fdt, uint16_t replacement)
-{
-  const struct operation op = *operation;
-  uint16_t word;
-  unsigned int gain = chip_id == 0x9391 || chip_id == 0x9392 ? 7 :
-                      chip_id == 0x9397 ? 11 : 10;
-  uint16_t dac = (uint16_t) (0x3000u | ((unsigned int) state->dac_polarity << 14) |
-                             (gain << 8) | fdt->fdt_dac);
-
-  if (!idle (&op) || !checked_write (&op, state, 0x1801, dac))
-    return 0;
-  if (fdt->threshold_cached != fdt->threshold_mode)
-    {
-      if (!checked_write (&op, state, 0x180c, fdt->threshold_mode ? 0 : (uint16_t) (0x0400 | replacement)))
-        return 0;
-      fdt->threshold_cached = fdt->threshold_mode;
-    }
-  int newer = chip_id >= 0x9391;
-  if (!masked_write (&op, state, 0x1807, 0xfff0, 1) ||
-      !checked_write (&op, state, 0x1806, newer ? 0x09bb : 0x04bb) ||
-      !checked_write (&op, state, 0x180a, newer ? 0x0987 : 0x0482) ||
-      !checked_write (&op, state, 0x180b, newer ? 0x0491 : 0x0207) ||
-      !masked_write (&op, state, 0x1812, 0x8000,
-                     (uint16_t) (((unsigned int) state->subtract_baseline << 14) |
-                                 (newer ? 0x0493 : 0x0209))))
-    return 0;
-  if (!newer && !masked_write (&op, state, 0x1810, 0xffff, 0x0380))
-    return 0;
-  if (state->mode == 0xa1)
-    return 1;
-  int wide = chip_id == 0x9391 || chip_id == 0x9392 || chip_id == 0x9395;
-  if (!checked_write (&op, state, 0x1881, wide ? 0x20ce : 0x0fce))
-    return 0;
-  state->mode = 0xa1;
-  uint16_t window = 2, extension = 0;
-  switch (chip_id)
-    {
-    case 0x9391:
-    case 0x9392: window = 0x1c10;
-      extension = 0x0420;
-      break;
-
-    case 0x9395:
-    case 0x9397: window = 0x1a08;
-      extension = 0x0208;
-      break;
-
-    case 0x9396: window = 0x1922;
-      extension = 2;
-      break;
-
-    case 0x9398: window = 0x1888;
-      extension = 0x0022;
-      break;
-
-    default: break;
-    }
-  if (!checked_write (&op, state, 0x1800, window) ||
-      (newer && !checked_write (&op, state, 0x1816, extension)) ||
-      !checked_write (&op, state, 0x1804, 0x07c0))
-    return 0;
-  if (fdt->fdt_configured)
-    return 1;
-  uint16_t mode = wide ? 0x084b : chip_id == 0x9349 ? 0x0803 :
-                  chip_id == 0x9372 ? 0x080b : 0x0807;
-  uint16_t bias = chip_id != 0x9372 || foundry == 2 ? 0x5f64 :
-                  foundry == 3 ? 0x5055 : 0;
-  uint16_t routing = wide ? 0 : chip_id >= 0x9396 ? 4 : 1;
-  if (!checked_write (&op, state, 0x1808, mode) ||
-      !checked_write (&op, state, 0x1815, 0) ||
-      !checked_write (&op, state, 0x180d, 0x03e8) ||
-      !checked_write (&op, state, 0x1880, bias) ||
-      !checked_write (&op, state, 0x1884, 3) ||
-      !checked_write (&op, state, 0x1887, routing) ||
-      !checked_write (&op, state, 0x1888, 0) ||
-      !write_byte (&op, 0x9a, 0x5a) || !analog_channels (&op, chip_id, state) ||
-      !write_byte (&op, 0x9a, 0) || !read_word (&op, 0x1a83, &word))
-    return 0;
-  if ((word & 8) == 0 && !write_word (&op, 0x1a83, (uint16_t) (word | 8)))
-    return 0;
-  fdt->fdt_configured = 1;
-  return 1;
-}
-
 enum fte3600_ft93xx_status
 fte3600_ft93xx_fdt_configure (
   uint16_t chip_id, uint8_t foundry,
@@ -996,16 +584,16 @@ fte3600_ft93xx_fdt_configure (
   struct fte3600_ft93xx_diagnostics *diagnostics)
 {
   enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
-  struct operation op = {io, diagnostics, &error};
+  struct ft93xx_operation op = {io, diagnostics, &error};
 
   if (state == NULL || fdt == NULL || !valid_io (io) || foundry > 3 ||
       state->dac_polarity > 3 || state->subtract_baseline > 1 ||
       state->check_registers > 2 || fdt->fdt_configured > 1 || fdt->threshold_mode > 1)
     return FTE3600_FT93XX_INVALID_ARGUMENT;
-  if (lookup (chip_id) == NULL)
+  if (ft93xx_lookup_profile (chip_id) == NULL)
     return FTE3600_FT93XX_UNSUPPORTED_DEVICE;
   clear_diagnostics (diagnostics);
-  return configure_fdt (&op, chip_id, foundry, state, fdt, 700) ? FTE3600_FT93XX_OK : error;
+  return ft93xx_configure_fdt (&op, chip_id, foundry, state, fdt, 700) ? FTE3600_FT93XX_OK : error;
 }
 
 enum fte3600_ft93xx_status
@@ -1032,7 +620,7 @@ fte3600_ft93xx_fdt_controller_defaults (
 
 struct fdt_operation
 {
-  struct operation                       wire;
+  struct ft93xx_operation                wire;
   uint16_t                               chip;
   uint8_t                                foundry;
   struct fte3600_ft93xx_state           *state;
@@ -1040,28 +628,13 @@ struct fdt_operation
   struct fte3600_ft93xx_fdt_diagnostics *diagnostics;
 };
 
-static uint16_t
-fdt_crc (const uint8_t *bytes, size_t length)
-{
-  uint16_t crc = 0xffff;
-
-  for (size_t i = 0; i < length; ++i)
-    {
-      crc = (uint16_t) (crc ^ ((unsigned int) bytes[i] << 8));
-      for (unsigned int bit = 0; bit < 8; ++bit)
-        crc = (uint16_t) (((unsigned int) crc << 1) ^
-                          ((crc & 0x8000) ? 0x1021u : 0));
-    }
-  return crc;
-}
-
 static int
 fdt_prepare (const struct fdt_operation *op)
 {
   uint8_t previous_idle_timeout = op->diagnostics == NULL ? 0 :
                                   op->diagnostics->transport.idle_unacknowledged;
-  int result = configure_fdt (&op->wire, op->chip, op->foundry, op->state,
-                              &op->control->analog, op->control->replacement);
+  int result = ft93xx_configure_fdt (&op->wire, op->chip, op->foundry, op->state,
+                                     &op->control->analog, op->control->replacement);
 
   if (op->diagnostics != NULL)
     op->diagnostics->transport.idle_unacknowledged |= previous_idle_timeout;
@@ -1079,20 +652,20 @@ fdt_measure (const struct fdt_operation *op)
     ++op->diagnostics->measurements;
   for (unsigned int attempt = 0; attempt < 5; ++attempt)
     {
-      if (!read_word (&op->wire, 0x1881, &word) ||
-          (!(word & 2) && !write_word (&op->wire, 0x1881, (uint16_t) (word | 2))) ||
-          !command (&op->wire, 0xc2))
+      if (!ft93xx_read_word (&op->wire, 0x1881, &word) ||
+          (!(word & 2) && !ft93xx_write_word (&op->wire, 0x1881, (uint16_t) (word | 2))) ||
+          !ft93xx_command (&op->wire, 0xc2))
         return 0;
-      wait_ms (&op->wire, 1);
-      if (!write_word (&op->wire, 0x1885, 1))
+      ft93xx_wait_ms (&op->wire, 1);
+      if (!ft93xx_write_word (&op->wire, 0x1885, 1))
         return 0;
       for (unsigned int poll = 0; poll < 5; ++poll)
         {
-          if (!read_word (&op->wire, 0x1a82, &word))
+          if (!ft93xx_read_word (&op->wire, 0x1a82, &word))
             return 0;
           if (word & 8)
-            return write_word (&op->wire, 0x1a84, 8);
-          wait_ms (&op->wire, 1);
+            return ft93xx_write_word (&op->wire, 0x1a84, 8);
+          ft93xx_wait_ms (&op->wire, 1);
         }
     }
   if (op->diagnostics != NULL)
@@ -1106,19 +679,7 @@ fdt_measure (const struct fdt_operation *op)
 static int
 fdt_read (const struct fdt_operation *op, uint16_t values[4])
 {
-  uint8_t buffer[16] = {0x04, 0xfb, 0x80, op->chip == 0x9363 ? 0xe8 : 0xb8, 0, 3};
-
-  if (!transfer (&op->wire, buffer, sizeof (buffer)))
-    return 0;
-  uint16_t crc = (uint16_t) ((uint16_t) buffer[14] << 8 | buffer[15]);
-  if (crc != 0 && crc != fdt_crc (buffer + 6, 8))
-    {
-      *op->wire.error = FTE3600_FT93XX_BAD_CRC;
-      return 0;
-    }
-  for (size_t i = 0; i < 4; ++i)
-    values[i] = (uint16_t) ((uint16_t) buffer[6 + 2 * i] << 8 | buffer[7 + 2 * i]);
-  return 1;
+  return ft93xx_read_fdt_values (&op->wire, op->chip == 0x9363 ? 0xe8 : 0xb8, values);
 }
 
 static int
@@ -1274,7 +835,7 @@ fdt_adjust (const struct fdt_operation *op, uint16_t values[4])
       bytes[2 * i] = (uint8_t) value;
       bytes[2 * i + 1] = (uint8_t) (value >> 8);
     }
-  op->control->base_up_checksum = op->control->base_down_checksum = fdt_crc (bytes, 8);
+  op->control->base_up_checksum = op->control->base_down_checksum = ft93xx_crc16 (bytes, 8);
   return 1;
 }
 
@@ -1326,15 +887,13 @@ fdt_baseline (const struct fdt_operation *op, unsigned int count)
 static int
 fdt_write_base (const struct fdt_operation *op, const uint16_t values[8])
 {
-  uint8_t buffer[22] = {0x05, 0xfa, 0x80, op->chip == 0x9363 ? 0xe0 : 0xb0, 0, 7};
+  /* Snapshot before the first callback, as the original frame construction did. */
+  uint16_t baseline[8];
 
-  for (size_t i = 0; i < 8; ++i)
-    {
-      buffer[6 + 2 * i] = (uint8_t) (values[i] >> 8);
-      buffer[7 + 2 * i] = (uint8_t) values[i];
-    }
-  return write_byte (&op->wire, 0x9a, 0x5a) && transfer (&op->wire, buffer, sizeof (buffer)) &&
-         write_byte (&op->wire, 0x9a, 0);
+  memcpy (baseline, values, sizeof (baseline));
+  return ft93xx_write_byte (&op->wire, 0x9a, 0x5a) &&
+         ft93xx_write_fdt_baseline (&op->wire, op->chip == 0x9363 ? 0xe0 : 0xb0, baseline) &&
+         ft93xx_write_byte (&op->wire, 0x9a, 0);
 }
 
 static int
@@ -1344,19 +903,19 @@ fdt_arm (const struct fdt_operation *op, uint32_t features, unsigned int directi
 
   if (!fdt_prepare (op))
     return 0;
-  if ((features & 2) && (!read_word (&op->wire, 0x1817, &word) ||
-                         !write_word (&op->wire, 0x1817, (uint16_t) (word & 0xfffc)) ||
-                         !write_word (&op->wire, 0x1889, 4)))
+  if ((features & 2) && (!ft93xx_read_word (&op->wire, 0x1817, &word) ||
+                         !ft93xx_write_word (&op->wire, 0x1817, (uint16_t) (word & 0xfffc)) ||
+                         !ft93xx_write_word (&op->wire, 0x1889, 4)))
     return 0;
-  if (!write_word (&op->wire, 0x1a84, 0x002f))
+  if (!ft93xx_write_word (&op->wire, 0x1a84, 0x002f))
     return 0;
   op->control->armed_direction = (uint8_t) direction;
   if (!fdt_write_base (op, direction ? op->control->base_down : op->control->base_up) ||
-      !read_word (&op->wire, 0x1881, &word) ||
-      !write_word (&op->wire, 0x1881, (uint16_t) ((word & 0xff7c) | (direction ? 0x81 : 0))) ||
-      !command (&op->wire, 0xc2))
+      !ft93xx_read_word (&op->wire, 0x1881, &word) ||
+      !ft93xx_write_word (&op->wire, 0x1881, (uint16_t) ((word & 0xff7c) | (direction ? 0x81 : 0))) ||
+      !ft93xx_command (&op->wire, 0xc2))
     return 0;
-  wait_ms (&op->wire, 1);
+  ft93xx_wait_ms (&op->wire, 1);
   return 1;
 }
 
@@ -1385,7 +944,7 @@ fte3600_ft93xx_fdt_run (
                     action == FTE3600_FT93XX_FDT_VALIDATE_BASE || action == FTE3600_FT93XX_FDT_ADJUST_BASE ? 4 : 0;
   if (required != 0 && (values == NULL || value_count < required))
     return FTE3600_FT93XX_INVALID_ARGUMENT;
-  if (lookup (chip_id) == NULL)
+  if (ft93xx_lookup_profile (chip_id) == NULL)
     return FTE3600_FT93XX_UNSUPPORTED_DEVICE;
   if (diagnostics != NULL)
     memset (diagnostics, 0, sizeof (*diagnostics));
@@ -1456,7 +1015,7 @@ enum fte3600_ft93xx_status
 fte3600_ft93xx_navigation_geometry (
   uint16_t chip_id, struct fte3600_ft93xx_geometry *geometry)
 {
-  const struct profile *p = lookup (chip_id);
+  const struct ft93xx_profile *p = ft93xx_lookup_profile (chip_id);
 
   if (geometry == NULL)
     return FTE3600_FT93XX_INVALID_ARGUMENT;
@@ -1475,7 +1034,7 @@ fte3600_ft93xx_image_controller_defaults (
 
   if (controller == NULL)
     return FTE3600_FT93XX_INVALID_ARGUMENT;
-  if (lookup (chip_id) == NULL)
+  if (ft93xx_lookup_profile (chip_id) == NULL)
     return FTE3600_FT93XX_UNSUPPORTED_DEVICE;
   (void) fte3600_ft93xx_configuration (chip_id, version, &initial);
   *controller = (struct fte3600_ft93xx_image_controller){
@@ -1488,8 +1047,8 @@ fte3600_ft93xx_image_controller_defaults (
 
 struct navigation_operation
 {
-  struct operation                         wire;
-  const struct profile                    *profile;
+  struct ft93xx_operation                  wire;
+  const struct ft93xx_profile             *profile;
   uint16_t                                 raw, rows;
   size_t                                   samples;
   struct fte3600_ft93xx_state             *state;
@@ -1503,7 +1062,7 @@ navigation_prepare (const struct navigation_operation *op, int configure_image)
 {
   uint8_t previous_idle_timeout = op->diagnostics == NULL ? 0 :
                                   op->diagnostics->transport.idle_unacknowledged;
-  int result = configure_image ? configure (&op->wire, op->profile, op->state, 0xa4) : idle (&op->wire);
+  int result = configure_image ? ft93xx_configure_image (&op->wire, op->profile, op->state, 0xa4) : ft93xx_idle (&op->wire);
 
   if (op->diagnostics != NULL)
     op->diagnostics->transport.idle_unacknowledged |= previous_idle_timeout;
@@ -1523,29 +1082,29 @@ navigation_capture (const struct navigation_operation *op)
     }
   if (!op->control->nav_ready)
     {
-      if (!navigation_prepare (op, 0) || !read_word (&op->wire, 0x1808, &word) ||
-          !write_word (&op->wire, 0x1808, (uint16_t) ((word & 0xc7ff) | 0x0800)) ||
-          !write_byte (&op->wire, 0x9a, 0x5a))
+      if (!navigation_prepare (op, 0) || !ft93xx_read_word (&op->wire, 0x1808, &word) ||
+          !ft93xx_write_word (&op->wire, 0x1808, (uint16_t) ((word & 0xc7ff) | 0x0800)) ||
+          !ft93xx_write_byte (&op->wire, 0x9a, 0x5a))
         return 0;
       for (unsigned int row = 0; row < op->rows; ++row)
         {
           int narrow = op->profile->id == 0x9363 || op->profile->id == 0x9365;
           uint16_t address = (uint16_t) (narrow ? 0xc2 + 3 * row : 0xc1 + 2 * row);
           uint16_t bits = row == 0 ? 7 : op->profile->id > 0x9390 ? 3 : 4;
-          if (!read_word (&op->wire, address, &word) ||
-              !write_word (&op->wire, address, (uint16_t) ((word & 0xffc0) | bits)))
+          if (!ft93xx_read_word (&op->wire, address, &word) ||
+              !ft93xx_write_word (&op->wire, address, (uint16_t) ((word & 0xffc0) | bits)))
             return 0;
         }
       op->control->nav_ready = 1;
-      if (!write_byte (&op->wire, 0x9a, 0))
+      if (!ft93xx_write_byte (&op->wire, 0x9a, 0))
         return 0;
     }
-  if (!navigation_prepare (op, 1) || !command (&op->wire, 0xc8))
+  if (!navigation_prepare (op, 1) || !ft93xx_command (&op->wire, 0xc8))
     return 0;
-  wait_ms (&op->wire, 1);
+  ft93xx_wait_ms (&op->wire, 1);
   for (unsigned int attempt = 0; attempt < 10; ++attempt)
     {
-      if (!read_byte (&op->wire, 0x80, &byte))
+      if (!ft93xx_read_byte (&op->wire, 0x80, &byte))
         return 0;
       if (byte == 0x58)
         break;
@@ -1555,29 +1114,29 @@ navigation_capture (const struct navigation_operation *op)
       ++op->diagnostics->mode_timeouts;
       op->diagnostics->transport.mode_unacknowledged = 1;
     }
-  if (!write_word (&op->wire, 0x1800, (uint16_t) (op->profile->window | 1)))
+  if (!ft93xx_write_word (&op->wire, 0x1800, (uint16_t) (op->profile->window | 1)))
     return 0;
   for (unsigned int poll = 0; poll < 5; ++poll)
     {
-      if (!read_word (&op->wire, 0x1a82, &word))
+      if (!ft93xx_read_word (&op->wire, 0x1a82, &word))
         return 0;
       if (word & 0x20)
         {
-          if (!write_word (&op->wire, 0x1a84, word))
+          if (!ft93xx_write_word (&op->wire, 0x1a84, word))
             return 0;
           break;
         }
-      wait_ms (&op->wire, 1);
+      ft93xx_wait_ms (&op->wire, 1);
     }
   if (!(word & 0x20) && op->diagnostics != NULL)
     {
       ++op->diagnostics->readiness_timeouts;
       op->diagnostics->transport.ready_unacknowledged = 1;
     }
-  if (!fifo (&op->wire, (uint8_t *) op->pixels, 2 * op->samples))
+  if (!ft93xx_read_fifo (&op->wire, (uint8_t *) op->pixels, 2 * op->samples))
     return 0;
   decode_samples ((uint8_t *) op->pixels, op->samples, op->raw);
-  return write_word (&op->wire, 0x1a84, 0x20);
+  return ft93xx_write_word (&op->wire, 0x1a84, 0x20);
 }
 
 static uint16_t
@@ -1748,7 +1307,7 @@ fte3600_ft93xx_image_cal_run (
   const struct fte3600_ft93xx_io *io,
   struct fte3600_ft93xx_image_diagnostics *diagnostics)
 {
-  const struct profile *p = lookup (chip_id);
+  const struct ft93xx_profile *p = ft93xx_lookup_profile (chip_id);
 
   if (!valid_state (state) || controller == NULL || !valid_io (io) || pixels == NULL || result == NULL ||
       controller->nav_ready > 1 || controller->initialized > 1 || controller->max_dac < 5 ||
