@@ -9,6 +9,7 @@
  * Build (repo root, after ninja -C build):
  *   gcc -O1 -o build/fte3600-match-lab tools/fte3600-match-lab.c \
  *     -include fte3600-build-config.h -DFTE3600_ENABLE_PERSONAL_AUTH=1 -DFTE3600_ENABLE_IPA_AUTH=0 \
+ *     -Ibuild/libfprint/drivers/fte3600 \
  *     -Ilibfprint/drivers/fte3600/sam7-brisk/libfprint/drivers \
  *     -Ilibfprint/drivers/fte3600/sam7-brisk/libfprint/matchers/brisk \
  *     $(pkg-config --cflags glib-2.0) build/libfprint/drivers/fte3600/libfprint-fte3600.a \
@@ -16,6 +17,7 @@
  * Usage: fte3600-match-lab [-v] frame.pgm...
  */
 #include "brisk.h"
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +42,10 @@ load_pgm (Frame *f, const char *path)
   guint maxval = 0;
   int consumed = 0;
   if (sscanf (data, "P5 %u %u %u%n", &f->width, &f->height, &maxval, &consumed) != 3)
+    return FALSE;
+  if (!f->width || !f->height || maxval != 255 ||
+      f->width > G_MAXSIZE / f->height || (gsize) consumed >= length ||
+      !isspace ((unsigned char) data[consumed]))
     return FALSE;
   consumed++;
   if (length < (gsize) consumed + (gsize) f->width * f->height)
