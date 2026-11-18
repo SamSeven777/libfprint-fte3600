@@ -24,6 +24,10 @@ enum fte3600_ft93xx_status {
   FTE3600_FT93XX_IMAGE_SEARCH_FAILED = 8
 };
 
+struct fte3600_ft93xx_io;
+/* Read the calibrated FDT event register using the existing CRC check. */
+enum fte3600_ft93xx_status fte3600_ft93xx_event_status (const struct fte3600_ft93xx_io *, uint16_t *);
+
 struct fte3600_ft93xx_geometry
 {
   uint16_t width, height, extra_rows;
@@ -103,7 +107,8 @@ enum fte3600_ft93xx_fdt_action {
   FTE3600_FT93XX_FDT_ADJUST_BASE,
   FTE3600_FT93XX_FDT_BASELINE,
   FTE3600_FT93XX_FDT_WRITE_BASE,
-  FTE3600_FT93XX_FDT_ARM
+  FTE3600_FT93XX_FDT_ARM,
+  FTE3600_FT93XX_FDT_STOP
 };
 
 struct fte3600_ft93xx_fdt_diagnostics

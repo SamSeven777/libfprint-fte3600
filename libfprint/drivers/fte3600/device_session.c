@@ -33,6 +33,7 @@ struct fte3600_device_session
   size_t                                    image_bytes, raw_bytes, workspace_bytes;
   int                                       active, io_failed;
   int                                       fw_maintenance_pending, fw_down_armed;
+  int                                       ft9365_up_pending;
   unsigned                                  fw_release_rejections;
 };
 static int
@@ -410,6 +411,7 @@ fte3600_device_start (struct fte3600_device_session *s)
   s->status.baseline_crc = 0;
   s->status.calibrated_image_dac = 0;
   s->fw_maintenance_pending = s->fw_down_armed = 0;
+  s->ft9365_up_pending = 0;
   s->fw_release_rejections = 0;
   /* Recovery starts a real cold initialization; stale flags cannot qualify. */
   (void) fte3600_factory_integration_state_defaults (&s->factory);
@@ -923,6 +925,34 @@ complete:
     }
   return error;
 }
+static enum fte3600_device_error
+ft9365_stop_up_io (struct fte3600_device_session *s)
+{
+  struct fte3600_ft93xx_device *m = &s->factory.word.modern;
+  struct fte3600_ft93xx_fdt_diagnostics d;
+  s->status.component_error = fte3600_ft93xx_fdt_run (
+    m->preparation.identity.chip_id, m->preparation.foundry, m->preparation.features,
+    &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_STOP, 0, NULL, 0, &s->modern_io, &d);
+  return s->status.component_error || modern_transport_bad (&d.transport) ?
+    FTE3600_DEVICE_ACQUISITION_ERROR : FTE3600_DEVICE_OK;
+}
+
+enum fte3600_device_error
+fte3600_device_ft9365_stop_up (struct fte3600_device_session *s)
+{
+  enum fte3600_device_error error;
+  if (!s || s->status.model != FTE3600_MODEL_FT9365 || s->status.chip_id != 0x9365)
+    return FTE3600_DEVICE_UNSUPPORTED;
+  if (s->active || s->status.state != FTE3600_DEVICE_IDLE || !s->ft9365_up_pending)
+    return FTE3600_DEVICE_NOT_READY;
+  begin (s);
+  error = ft9365_stop_up_io (s);
+  error = finish (s, error, error != FTE3600_DEVICE_OK);
+  if (!error)
+    s->ft9365_up_pending = 0;
+  return error;
+}
+
 enum fte3600_device_error
 fte3600_device_release_step (struct fte3600_device_session *s,
                              int                           *released)
@@ -933,6 +963,27 @@ fte3600_device_release_step (struct fte3600_device_session *s,
     return FTE3600_DEVICE_BUSY;
   if (s->status.state != FTE3600_DEVICE_IDLE)
     return FTE3600_DEVICE_NOT_READY;
+  if (s->status.model == FTE3600_MODEL_FT9365 && s->status.chip_id == 0x9365)
+    {
+      uint16_t flags;
+      enum fte3600_device_error error = FTE3600_DEVICE_OK;
+      if (!s->ft9365_up_pending)
+        return FTE3600_DEVICE_NOT_READY;
+      begin (s);
+      s->status.component_error = fte3600_ft93xx_event_status (&s->modern_io, &flags);
+      if (s->status.component_error)
+        error = FTE3600_DEVICE_ACQUISITION_ERROR;
+      if (!error && (flags & 0x04))
+        error = ft9365_stop_up_io (s);
+      error = finish (s, error, error != FTE3600_DEVICE_OK);
+      if (!error)
+        {
+          *released = (flags & 0x04) != 0;
+          if (*released)
+            s->ft9365_up_pending = 0;
+        }
+      return error;
+    }
   if (s->status.model == FTE3600_MODEL_FT9769)
     return raw_release_step (s, released);
   if (s->status.model != FTE3600_MODEL_FW9369)
@@ -1149,4 +1200,31 @@ fte3600_device_close (struct fte3600_device_session *s)
       free_buffers (s);
       free (s);
     }
+}
+
+enum fte3600_device_error
+fte3600_device_ft9365_arm_up (struct fte3600_device_session *s)
+{
+  struct fte3600_ft93xx_fdt_diagnostics d;
+  struct fte3600_ft93xx_device *m;
+  enum fte3600_device_error error = FTE3600_DEVICE_OK;
+  if (!s || s->status.model != FTE3600_MODEL_FT9365 || s->status.chip_id != 0x9365)
+    return FTE3600_DEVICE_UNSUPPORTED;
+  if (s->active || s->status.state != FTE3600_DEVICE_IDLE || !s->status.image_available)
+    return FTE3600_DEVICE_NOT_READY;
+  if (s->ft9365_up_pending)
+    return FTE3600_DEVICE_OK;
+  m = &s->factory.word.modern;
+  begin (s);
+  s->status.component_error = fte3600_ft93xx_fdt_run (
+    m->preparation.identity.chip_id, m->preparation.foundry, m->preparation.features,
+    &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_ARM, 0, NULL, 0, &s->modern_io, &d);
+  if (s->status.component_error || modern_transport_bad (&d.transport))
+    error = FTE3600_DEVICE_ACQUISITION_ERROR;
+  error = finish (s, error, error != FTE3600_DEVICE_OK);
+  if (!error)
+    {
+      s->ft9365_up_pending = 1;
+    }
+  return error;
 }

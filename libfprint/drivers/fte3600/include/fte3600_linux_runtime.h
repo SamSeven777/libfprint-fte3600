@@ -86,6 +86,10 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_capture (struct fte3600_l
                                                                 uint32_t timeout_ms,
                                                                 struct fte3600_linux_runtime_frame *,
                                                                 struct fte3600_linux_runtime_diagnostic *);
+/* Enrollment capture and release for the FT9365 contact gate. */
+enum fte3600_linux_runtime_error fte3600_linux_runtime_capture_enroll (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_frame *, struct fte3600_linux_runtime_diagnostic *);
+enum fte3600_linux_runtime_error fte3600_linux_runtime_wait_enroll_release (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_diagnostic *);
+enum fte3600_linux_runtime_error fte3600_linux_runtime_discard_enroll_retry (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_diagnostic *);
 /* FT9368 uses healthy information observations. FW9369 uses physical UP flags,
  * three reviewed FDT confirmations, retained maintenance and Down rearm;
  * repeated calls after completion do not repeat maintenance. Partial failure,

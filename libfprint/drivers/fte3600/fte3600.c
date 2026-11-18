@@ -292,13 +292,24 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
   if (self->needs_release)
     {
       enum fte3600_linux_runtime_error release =
+        work->action == FPI_DEVICE_ACTION_ENROLL ?
+        fte3600_linux_runtime_wait_enroll_release (self->runtime, cancel,
+                                                    self->identity.backend_model == 0x9365 ? 8000 : RELEASE_PROMPT_MS,
+                                                    &diag) :
         fte3600_linux_runtime_wait_release (self->runtime, cancel, RELEASE_PROMPT_MS, &diag);
       if (release == FTE3600_RUNTIME_TIMEOUT)
         {
+          if (work->action == FPI_DEVICE_ACTION_ENROLL && self->identity.backend_model == 0x9365)
+            {
+              error = runtime_error (&diag);
+              hardware_failed = TRUE;
+              goto out;
+            }
           /* Polling release may time out during maintenance or a raw scan.
            * Those runtimes require a fresh owner before another operation;
            * FT9368's contact-only timeout can keep waiting on this owner. */
-          hardware_failed = self->identity.backend_model == 0x9369 ||
+          hardware_failed = self->identity.backend_model == 0x9365 ||
+                            self->identity.backend_model == 0x9369 ||
                             self->identity.backend_model == 0x9769;
           error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
                                             "Lift your finger from the sensor");
@@ -314,7 +325,10 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
       if (!release)
         observe_finger (task, FP_FINGER_STATUS_NEEDED);
     }
-  if (fte3600_linux_runtime_capture (self->runtime, cancel, 30000, &work->frame, &diag))
+  enum fte3600_linux_runtime_error capture_result = work->action == FPI_DEVICE_ACTION_ENROLL ?
+    fte3600_linux_runtime_capture_enroll (self->runtime, cancel, 30000, &work->frame, &diag) :
+    fte3600_linux_runtime_capture (self->runtime, cancel, 30000, &work->frame, &diag);
+  if (capture_result)
     {
       error = runtime_error (&diag);
       hardware_failed = TRUE;
@@ -412,6 +426,23 @@ out:
   error = auth_error (g_steal_pointer (&error));
   if (!error)
     g_cancellable_set_error_if_cancelled (cancel, &error);
+  if (error && error->domain == FP_DEVICE_RETRY && work->action == FPI_DEVICE_ACTION_ENROLL &&
+      work->frame.status.model == FTE3600_MODEL_FT9365 && work->frame.status.chip_id == 0x9365 &&
+      self->needs_release)
+    {
+      enum fte3600_linux_runtime_error discard =
+        fte3600_linux_runtime_discard_enroll_retry (self->runtime, cancel, 8000, &diag);
+      if (discard)
+        {
+          g_clear_error (&error);
+          error = runtime_error (&diag);
+          hardware_failed = TRUE;
+        }
+      else
+        {
+          self->needs_release = FALSE;
+        }
+    }
   if (error && work->action == FPI_DEVICE_ACTION_OPEN && self->runtime)
     {
       fte3600_linux_runtime_close (self->runtime, &diag);
