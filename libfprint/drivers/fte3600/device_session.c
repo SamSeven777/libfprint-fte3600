@@ -22,7 +22,13 @@ struct fte3600_device_session
   struct fte3600_legacy_lifecycle_state     legacy_request;
   struct fte3600_ft93xx_processing_state    processing;
   uint8_t                                  *candidate, *image, *raw;
-  uint16_t                                 *processed;
+  uint16_t                                 *processed, *reference;
+  struct fte3600_ft93xx_state               raw_state;
+  int                                       reference_valid;
+  int                                       raw_clean_level, raw_clean_valid;
+/* Set by arm when a finger already rests on a still valid no-finger
+ * reference: the touch is reported pending instead of waiting for a lift. */
+  int                                       raw_present;
   void                                     *workspace;
   size_t                                    image_bytes, raw_bytes, workspace_bytes;
   int                                       active, io_failed;
@@ -222,9 +228,12 @@ free_buffers (struct fte3600_device_session *s)
   free (s->image);
   free (s->raw);
   free (s->processed);
+  free (s->reference);
   free (s->workspace);
   s->candidate = s->image = s->raw = NULL;
-  s->processed = NULL;
+  s->processed = s->reference = NULL;
+  s->reference_valid = 0;
+  s->raw_clean_valid = 0;
   s->workspace = NULL;
   s->image_bytes = s->raw_bytes = s->workspace_bytes = 0;
 }
@@ -252,6 +261,14 @@ allocate_buffers (struct fte3600_device_session *s)
         return FTE3600_DEVICE_UNSUPPORTED;
       if (!s->raw)
         return FTE3600_DEVICE_NO_MEMORY;
+      if (s->status.model == FTE3600_MODEL_FT9769)
+        {
+          if (fte3600_ft93xx_raw_image_state (s->status.raw_id, &s->raw_state) != FTE3600_FT93XX_OK)
+            return FTE3600_DEVICE_UNSUPPORTED;
+          s->reference = calloc (n, sizeof (uint16_t));
+          if (!s->reference)
+            return FTE3600_DEVICE_NO_MEMORY;
+        }
     }
   if (s->workspace_bytes)
     {
@@ -441,6 +458,12 @@ legacy_run (struct fte3600_device_session          *s,
   return fte3600_legacy_boot_lifecycle_run (&s->legacy_profile, operation, &s->legacy_request, &options,
                                             s->candidate, s->image_bytes, s->config.startup.firmware, s->config.startup.firmware_length, &io);
 }
+static enum fte3600_device_error modern_fdt_arm (struct fte3600_device_session *s);
+static enum fte3600_device_error modern_restart (struct fte3600_device_session *s);
+static enum fte3600_device_error raw_capture (struct fte3600_device_session *s, uint16_t *out);
+static enum fte3600_device_error raw_center_dac (struct fte3600_device_session *s);
+static int raw_median (struct fte3600_device_session *s, const uint16_t *frame, const uint16_t *reference);
+static enum fte3600_device_error raw_reference (struct fte3600_device_session *s);
 enum fte3600_device_error
 fte3600_device_arm (struct fte3600_device_session *s)
 {
@@ -476,14 +499,21 @@ fte3600_device_arm (struct fte3600_device_session *s)
             s->fw_down_armed = 1;
         }
     }
-  else if (s->status.model == FTE3600_MODEL_FT9365 || s->status.model == FTE3600_MODEL_FT9769)
+  else if (s->status.model == FTE3600_MODEL_FT9769)
     {
-      struct fte3600_ft93xx_device *m = &s->factory.word.modern;
-      struct fte3600_ft93xx_fdt_diagnostics d;
-      s->status.component_error = fte3600_ft93xx_fdt_run (m->preparation.identity.chip_id, m->preparation.foundry,
-                                                          m->preparation.features, &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_ARM, 1, NULL, 0, &s->modern_io, &d);
-      if (s->status.component_error || modern_transport_bad (&d.transport))
-        error = FTE3600_DEVICE_ACQUISITION_ERROR;
+      s->raw_present = 0;
+      error = modern_restart (s);
+      if (!error)
+        error = raw_reference (s);
+      if (!error)
+        {
+          s->reference_valid = 1;
+          error = modern_fdt_arm (s);
+        }
+    }
+  else if (s->status.model == FTE3600_MODEL_FT9365)
+    {
+      error = modern_fdt_arm (s);
     }
   else if (s->status.model == FTE3600_MODEL_FT9368)
     {
@@ -499,6 +529,284 @@ fte3600_device_arm (struct fte3600_device_session *s)
   if (!error)
     s->status.state = FTE3600_DEVICE_ARMED;
   return finish (s, error, error != FTE3600_DEVICE_OK);
+}
+
+/* FT9769 raw-array acquisition. Finger-detect mode writes register 0x1815=0,
+ * which flattens the image array until a hardware reset, so each request
+ * takes a no-finger reference frame before arming and re-initializes the part
+ * after the touch interrupt before reading the finger frame. The frame
+ * difference drives the host normalize stage. Calibrated FDT and image
+ * controllers survive; only the per-register "already configured" flags are
+ * cleared, because the reset discards the register file. */
+#define RAW_TOUCH_SHIFT 100
+/* 50 ms polls allowed for a finger to leave the array before arming. */
+#define RAW_CLEAN_WAITS 40
+/* Polls (50 ms apart) spent watching an array that detection fired on but
+ * that matches the reference, before deciding the interrupt was stale. */
+#define RAW_SETTLE_WAITS 60
+static enum fte3600_device_error
+modern_fdt_arm (struct fte3600_device_session *s)
+{
+  struct fte3600_ft93xx_device *m = &s->factory.word.modern;
+  struct fte3600_ft93xx_fdt_diagnostics d;
+
+  s->status.component_error = fte3600_ft93xx_fdt_run (m->preparation.identity.chip_id, m->preparation.foundry,
+                                                      m->preparation.features, &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_ARM, 1, NULL, 0, &s->modern_io, &d);
+  if (s->status.component_error || modern_transport_bad (&d.transport))
+    return FTE3600_DEVICE_ACQUISITION_ERROR;
+  return FTE3600_DEVICE_OK;
+}
+static enum fte3600_device_error
+modern_restart (struct fte3600_device_session *s)
+{
+  struct fte3600_ft93xx_device *m = &s->factory.word.modern;
+  struct fte3600_ft93xx_preparation p;
+  struct fte3600_ft93xx_diagnostics d;
+
+  if (failed (gpio (s, 1)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  wait_ms (s, 10);
+  if (failed (gpio (s, 0)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  wait_ms (s, 20);
+  if (failed (gpio (s, 1)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  wait_ms (s, 5);
+  s->status.component_error = fte3600_ft93xx_startup (&p, &s->modern_io, &d);
+  if (s->status.component_error || d.exhausted_transactions ||
+      p.identity.chip_id != m->preparation.identity.chip_id)
+    return FTE3600_DEVICE_ACQUISITION_ERROR;
+  m->preparation.state.mode = 0xa0;
+  m->preparation.state.configured = 0;
+  m->fdt.analog.fdt_configured = 0;
+  m->fdt.analog.threshold_cached = 0xaa;
+  m->image.nav_ready = 0;
+  s->raw_state.mode = 0xa0;
+  s->raw_state.configured = 0;
+  return FTE3600_DEVICE_OK;
+}
+static enum fte3600_device_error
+raw_capture (struct fte3600_device_session *s, uint16_t *out)
+{
+  struct fte3600_ft93xx_preparation *p = &s->factory.word.modern.preparation;
+  struct fte3600_ft93xx_diagnostics d;
+
+  s->status.component_error = fte3600_ft93xx_capture_retained (p->identity.chip_id, p->identity.raw_id, &p->geometry,
+                                                               &s->raw_state, 1, s->raw, s->raw_bytes, &s->modern_io, &d);
+  if (s->status.component_error || modern_transport_bad (&d))
+    return FTE3600_DEVICE_ACQUISITION_ERROR;
+  memcpy (out, s->raw, s->image_bytes * sizeof (uint16_t));
+  return FTE3600_DEVICE_OK;
+}
+/* Median of samples (or of sample differences when reference is given) via a
+ * histogram in the pipeline workspace, which is idle at this point. */
+static int
+raw_median (struct fte3600_device_session *s, const uint16_t *frame, const uint16_t *reference)
+{
+  uint32_t *hist = s->workspace;
+  const size_t bins = 8192, n = s->image_bytes;
+
+  memset (hist, 0, bins * sizeof (*hist));
+  for (size_t i = 0; i < n; ++i)
+    {
+      int v = (int) frame[i] - (reference ? (int) reference[i] : 0) + 4096;
+      ++hist[v < 0 ? 0 : v >= (int) bins ? bins - 1 : (size_t) v];
+    }
+  size_t seen = 0;
+  for (size_t b = 0; b < bins; ++b)
+    {
+      seen += hist[b];
+      if (seen * 2 >= n)
+        return (int) b - 4096;
+    }
+  return 0;
+}
+static enum fte3600_device_error
+raw_center_dac (struct fte3600_device_session *s)
+{
+  unsigned int waits = 0;
+
+  for (unsigned int i = 0; i < 16; ++i)
+    {
+      enum fte3600_device_error e = raw_capture (s, s->processed);
+      if (e)
+        return e;
+      int median = raw_median (s, s->processed, NULL);
+      s->status.raw_level = median;
+      if (s->raw_clean_valid && median < s->raw_clean_level - RAW_TOUCH_SHIFT)
+        {
+          /* A finger rests on the array (a touch lowers the level by more
+           * than RAW_TOUCH_SHIFT); the reference must not include it. While
+           * the previous no-finger reference is still valid, keep it and
+           * report the touch as already pending: users often press before
+           * detection is re-armed and are not expecting to lift again.
+           * Otherwise wait for the lift; past the wait, treat the lower
+           * level as drift and relearn it below. */
+          if (s->reference_valid)
+            {
+              s->raw_present = 1;
+              return FTE3600_DEVICE_OK;
+            }
+          if (++waits <= RAW_CLEAN_WAITS)
+            {
+              wait_ms (s, 50);
+              --i;
+              continue;
+            }
+          s->raw_clean_valid = 0;
+        }
+      if (median >= 1400 && median <= 2700)
+        {
+          s->status.calibrated_image_dac = s->raw_state.dac;
+          return FTE3600_DEVICE_OK;
+        }
+      int step = median < 400 || median > 3700 ? 4 : 1;
+      if (median < 1400)
+        {
+          if (s->raw_state.dac >= 255)
+            break;
+          s->raw_state.dac = (uint8_t) (s->raw_state.dac + step > 255 ? 255 : s->raw_state.dac + step);
+        }
+      else
+        {
+          if (s->raw_state.dac == 0)
+            break;
+          s->raw_state.dac = (uint8_t) (s->raw_state.dac < step ? 0 : s->raw_state.dac - step);
+        }
+    }
+  return FTE3600_DEVICE_CALIBRATION_ERROR;
+}
+/* Centre the DAC and take the no-finger reference. A finger landing between
+ * the centering scan and the reference scan shows as a reference well below
+ * the centering level (or below the last clean level); such a reference is
+ * retaken after a short wait, since it would hide every later touch. */
+static enum fte3600_device_error
+raw_reference (struct fte3600_device_session *s)
+{
+  for (unsigned int i = 0; i <= RAW_CLEAN_WAITS; ++i)
+    {
+      enum fte3600_device_error e = raw_center_dac (s);
+      if (e)
+        return e;
+      if (s->raw_present)
+        return FTE3600_DEVICE_OK;
+      s->reference_valid = 0;
+      e = raw_capture (s, s->reference);
+      if (e)
+        return e;
+      int level = raw_median (s, s->reference, NULL);
+      int clean = level >= s->status.raw_level - RAW_TOUCH_SHIFT &&
+                  (!s->raw_clean_valid || level >= s->raw_clean_level - RAW_TOUCH_SHIFT);
+      if (clean)
+        {
+          s->raw_clean_level = level;
+          s->raw_clean_valid = 1;
+          return FTE3600_DEVICE_OK;
+        }
+      if (i < RAW_CLEAN_WAITS)
+        wait_ms (s, 50);
+    }
+  return FTE3600_DEVICE_CALIBRATION_ERROR;
+}
+static enum fte3600_device_error
+raw_acquire (struct fte3600_device_session *s)
+{
+  struct fte3600_ft93xx_preparation *p = &s->factory.word.modern.preparation;
+  enum fte3600_device_error error;
+
+  if (!s->reference_valid)
+    return FTE3600_DEVICE_NOT_READY;
+  s->raw_present = 0;
+  error = modern_restart (s);
+  if (!error)
+    error = raw_capture (s, s->processed);
+  if (error)
+    return error;
+  int shift = raw_median (s, s->processed, s->reference);
+  s->status.raw_level = raw_median (s, s->processed, NULL);
+  s->status.raw_shift = shift;
+  if (shift > -RAW_TOUCH_SHIFT)
+    {
+      /* Detection fired but the array matches the reference. Either the
+       * interrupt was stale over a clean array, or the reference itself holds
+       * a resting finger that has just been placed again; both look the same
+       * from here. Watch the array instead of re-arming blindly: a drop means
+       * a finger landed on a clean reference and is captured now; a rise
+       * means the reference was contaminated, and this finger-free frame
+       * replaces it. Nothing moving within the window means a stale interrupt. */
+      for (unsigned int i = 0; i < RAW_SETTLE_WAITS && shift > -RAW_TOUCH_SHIFT && shift <= RAW_TOUCH_SHIFT; ++i)
+        {
+          wait_ms (s, 50);
+          error = raw_capture (s, s->processed);
+          if (error)
+            return error;
+          shift = raw_median (s, s->processed, s->reference);
+          s->status.raw_level = raw_median (s, s->processed, NULL);
+          s->status.raw_shift = shift;
+        }
+      if (shift > RAW_TOUCH_SHIFT)
+        {
+          memcpy (s->reference, s->processed, s->image_bytes * sizeof (uint16_t));
+          s->raw_clean_level = s->status.raw_level;
+        }
+      if (shift > -RAW_TOUCH_SHIFT)
+        {
+          error = modern_fdt_arm (s);
+          return error ? error : FTE3600_DEVICE_NO_FRAME;
+        }
+    }
+  size_t n = s->image_bytes;
+  /* Row-wise contact before normalisation: the strip is only 2 mm wide, so a
+   * finger that misses part of its length leaves rows at the reference level.
+   * The glue turns a short count into a placement prompt instead of matching. */
+  {
+    const size_t width = s->status.width, rows = width ? n / width : 0;
+    size_t touched = 0;
+    for (size_t r = 0; r < rows; ++r)
+      {
+        long sum = 0;
+        for (size_t c = 0; c < width; ++c)
+          sum += (long) s->processed[r * width + c] - (long) s->reference[r * width + c];
+        if (sum <= -(long) RAW_TOUCH_SHIFT * (long) width)
+          ++touched;
+      }
+    s->status.raw_contact = rows ? (int) (touched * 100 / rows) : 0;
+  }
+  for (size_t i = 0; i < n; ++i)
+    {
+      int v = 2048 + (int) s->processed[i] - (int) s->reference[i];
+      s->processed[i] = (uint16_t) (v < 0 ? 0 : v > 4092 ? 4092 : v);
+    }
+  const struct fte3600_ft93xx_pipeline_buffers b = {NULL, 0, s->processed, n, s->candidate, n};
+  struct fte3600_ft93xx_pipeline_diagnostics d;
+  s->status.component_error = fte3600_ft93xx_pipeline_run (p->identity.chip_id, p->identity.raw_id, &p->geometry,
+                                                           &s->raw_state, &s->processing, FTE3600_FT93XX_PIPELINE_NORMALIZE, &b, s->workspace, s->workspace_bytes, &s->modern_io, &d);
+  if (s->status.component_error || !d.completed)
+    return FTE3600_DEVICE_ACQUISITION_ERROR;
+  return FTE3600_DEVICE_OK;
+}
+/* Finger lift for the raw-array flow: the accepted frame sat at least
+ * RAW_TOUCH_SHIFT below the no-finger reference taken at arm, so the finger
+ * has lifted once a fresh frame is back within that band. The part is still
+ * in image mode from the capture, so this is a plain scan. */
+static enum fte3600_device_error
+raw_release_step (struct fte3600_device_session *s, int *released)
+{
+  if (!s->reference_valid)
+    {
+      *released = 1;
+      return FTE3600_DEVICE_OK;
+    }
+  begin (s);
+  enum fte3600_device_error error = raw_capture (s, s->processed);
+  error = finish (s, error, error != FTE3600_DEVICE_OK);
+  if (!error)
+    {
+      s->status.raw_level = raw_median (s, s->processed, NULL);
+      s->status.raw_shift = raw_median (s, s->processed, s->reference);
+      *released = s->status.raw_shift > -RAW_TOUCH_SHIFT;
+    }
+  return error;
 }
 static enum fte3600_device_error
 acquire (struct fte3600_device_session *s)
@@ -575,6 +883,12 @@ acquire (struct fte3600_device_session *s)
       if (!error)
         fw_staged = 1;
     }
+  else if (s->status.model == FTE3600_MODEL_FT9769)
+    {
+      error = raw_acquire (s);
+      if (error)
+        goto complete;
+    }
   else
     {
       struct fte3600_ft93xx_preparation *p = &s->factory.word.modern.preparation;
@@ -619,6 +933,8 @@ fte3600_device_release_step (struct fte3600_device_session *s,
     return FTE3600_DEVICE_BUSY;
   if (s->status.state != FTE3600_DEVICE_IDLE)
     return FTE3600_DEVICE_NOT_READY;
+  if (s->status.model == FTE3600_MODEL_FT9769)
+    return raw_release_step (s, released);
   if (s->status.model != FTE3600_MODEL_FW9369)
     return FTE3600_DEVICE_UNSUPPORTED;
   if (!s->fw_maintenance_pending)
@@ -738,6 +1054,28 @@ fte3600_device_irq (struct fte3600_device_session *s)
   if (s->status.state != FTE3600_DEVICE_ARMED)
     return FTE3600_DEVICE_NOT_READY;
   return acquire (s);
+}
+enum fte3600_device_error
+fte3600_device_pending (struct fte3600_device_session *s, int *pending)
+{
+  if (!s || !pending)
+    return FTE3600_DEVICE_INVALID_ARGUMENT;
+  if (s->active)
+    return FTE3600_DEVICE_BUSY;
+  if (s->status.state != FTE3600_DEVICE_ARMED)
+    return FTE3600_DEVICE_NOT_READY;
+  *pending = 0;
+  if (s->status.model != FTE3600_MODEL_FT9769)
+    return FTE3600_DEVICE_OK;
+  if (s->raw_present)
+    {
+      *pending = 1;
+      return FTE3600_DEVICE_OK;
+    }
+  begin (s);
+  s->status.component_error = fte3600_ft93xx_fdt_pending (&s->modern_io, pending);
+  return finish (s, s->status.component_error ? FTE3600_DEVICE_ACQUISITION_ERROR : FTE3600_DEVICE_OK,
+                 s->status.component_error != 0);
 }
 enum fte3600_device_error
 fte3600_device_capture (struct fte3600_device_session *s)

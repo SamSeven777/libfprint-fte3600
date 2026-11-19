@@ -11,6 +11,10 @@ G_BEGIN_DECLS
 #define FTE3600_AUTH_PROCESSING_VERSION 0x1001u
 #define FTE3600_AUTH_CODEC_VERSION 1u
 #define FTE3600_AUTH_MAX_TEMPLATE_BYTES 60000u
+/* Fewest descriptor correspondences against any enrolled sample before a
+ * strip touch is considered to show enrolled skin at all. Non-overlapping
+ * touches of the same finger produce 1-8; same-band touches 15-50. */
+#define FTE3600_AUTH_OVERLAP_MUTUAL 8u
 #define FTE3600_AUTH_ERROR (fte3600_auth_error_quark ())
 
 typedef enum {
@@ -42,6 +46,13 @@ typedef struct
   gboolean matched;
   guint    inliers;
   gdouble  mean_hamming, rms_error;
+  /* Highest correspondence count against any compared sample, including
+   * comparisons the matcher rejected. uninformative marks a non-match on a
+   * coverage (strip) profile whose best overlap stayed below
+   * FTE3600_AUTH_OVERLAP_MUTUAL: the touch showed skin the template does not
+   * hold, so it carries no evidence for or against the finger. */
+  guint    mutual_matches;
+  gboolean uninformative;
 } Fte3600AuthMatch;
 
 GQuark fte3600_auth_error_quark (void);

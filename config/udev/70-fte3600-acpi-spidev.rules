@@ -2,9 +2,9 @@
 # Event-local guard: distribution and standalone setup copies may coexist.
 ENV{.FTE3600_RULES_DONE}=="1", GOTO="fte3600_pair_end"
 ENV{.FTE3600_RULES_DONE}="1"
-ACTION=="add|change", SUBSYSTEM=="spi", DRIVER=="", ENV{MODALIAS}=="acpi:FTE3600:*", RUN{builtin}+="kmod load spi:spidev", RUN+="/bin/sh -c 'echo spidev > %S%p/driver_override && echo %k > %S%p/subsystem/drivers/spidev/bind'"
-ACTION=="add|change|bind", SUBSYSTEM=="spi", DRIVER=="spidev", ENV{MODALIAS}=="acpi:FTE3600:*", RUN{builtin}+="kmod load fte3600"
-ACTION=="add|change|bind", SUBSYSTEM=="spi", DRIVER=="spidev", ENV{MODALIAS}=="acpi:FTE3600:*", RUN+="/usr/libexec/fte3600-pair --refresh-spi %p"
+ACTION=="add|change", SUBSYSTEM=="spi", DRIVER=="", ENV{MODALIAS}=="acpi:FTE3600:*|acpi:FTE6600:*", RUN{builtin}+="kmod load spi:spidev", RUN+="/bin/sh -c 'echo spidev > %S%p/driver_override && echo %k > %S%p/subsystem/drivers/spidev/bind'"
+ACTION=="add|change|bind", SUBSYSTEM=="spi", DRIVER=="spidev", ENV{MODALIAS}=="acpi:FTE3600:*|acpi:FTE6600:*", RUN{builtin}+="kmod load fte3600"
+ACTION=="add|change|bind", SUBSYSTEM=="spi", DRIVER=="spidev", ENV{MODALIAS}=="acpi:FTE3600:*|acpi:FTE6600:*", RUN+="/usr/libexec/fte3600-pair --refresh-spi %p"
 ACTION=="add|change", SUBSYSTEM=="spidev", KERNEL=="spidev*", ENV{FTE3600_PAIR_ROLE}="", ENV{FTE3600_PAIR_ID}=""
 ACTION=="add|change", SUBSYSTEM=="spidev", KERNEL=="spidev*", IMPORT{program}="/usr/libexec/fte3600-pair --udev %p"
 ACTION=="add|change", SUBSYSTEM=="gpio", KERNEL=="gpiochip*", ENV{FTE3600_PAIR_ROLE}="", ENV{FTE3600_PAIR_ID}=""

@@ -52,7 +52,7 @@ trigger_spi() {
   local spi
   for spi in /sys/bus/spi/devices/*; do
     [ -r "$spi/firmware_node/hid" ] || continue
-    [ "$(cat "$spi/firmware_node/hid")" = FTE3600 ] || continue
+    case "$(cat "$spi/firmware_node/hid")" in FTE3600|FTE6600) ;; *) continue ;; esac
     udevadm trigger --action=change "$spi"
   done
   udevadm settle --timeout=10

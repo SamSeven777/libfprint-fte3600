@@ -55,6 +55,7 @@ static int runtime_poll(int timeout)
         while(!g_cancellable_is_cancelled(cancel_in_poll)) g_thread_yield();
         return 0;
     }
+    if(timeout>0&&irq_enabled&&runtime_bus)runtime_bus->finger=1; /* the touch arrives with the interrupt */
     return timeout>0&&irq_enabled;
 }
 static int runtime_expect_release_sync(void)
@@ -69,7 +70,7 @@ static void setup_bus(const struct fixture *f)
 {
     runtime_bus=calloc(1,sizeof(*runtime_bus));CHECK(runtime_bus);
     runtime_bus->fixture=f;runtime_bus->mode=0x50;wait_remaining=0;
-    test_name=f->name;reset_fake(1);irq_enabled=1;byte_contact=1;byte_unhealthy=0;
+    test_name=f->name;reset_fake(1);irq_enabled=1;runtime_bus->irq_finger=1;byte_contact=1;byte_unhealthy=0;
     bus_spi=runtime_spi;bus_gpio=runtime_gpio;bus_sleep=runtime_sleep;bus_poll=runtime_poll;
     expect_release_sync=runtime_expect_release_sync;
 }
@@ -146,9 +147,11 @@ static void runtime_cases(const struct fixture *f)
         runtime_bus->pattern=i;
         CHECK(fte3600_linux_runtime_capture(r,NULL,10000,&frame,&d)==0);
         CHECK(frame.status.image_sequence==i&&frame.length==(size_t)f->width*f->height&&frame.stride==f->width);
-        CHECK(runtime_bus->frames==i);fte3600_linux_runtime_frame_clear(&frame);
+        CHECK(runtime_bus->frames==i*per_request(f));fte3600_linux_runtime_frame_clear(&frame);
     }
-    CHECK(fte3600_linux_runtime_wait_release(r,NULL,10,&d)==FTE3600_RUNTIME_RELEASE_UNSUPPORTED);
+    /* The raw-array flow checks lift with one more scan against the arm reference. */
+    CHECK(fte3600_linux_runtime_wait_release(r,NULL,raw_array(f)?1000:10,&d)==(raw_array(f)?FTE3600_RUNTIME_OK:FTE3600_RUNTIME_RELEASE_UNSUPPORTED));
+    if(raw_array(f))CHECK(runtime_bus->frames==2*per_request(f)+1);
     irq_enabled=0;
     CHECK(fte3600_linux_runtime_capture(r,NULL,10,&frame,&d)==FTE3600_RUNTIME_TIMEOUT);
     CHECK(frame.pixels==NULL);

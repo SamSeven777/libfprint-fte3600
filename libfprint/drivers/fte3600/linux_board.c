@@ -291,7 +291,8 @@ inspect (const struct fte3600_linux_board_config *c, struct identity *id,
   if (resolve (&walk, id->classes[0], id->sys, rel, id->sys) ||
       resolve (&walk, id->physical, id->classes[0], "device", id->sys) ||
       driver (&walk, id->physical, id->sys, "spidev") ||
-      resolve (&walk, p, id->physical, "firmware_node", id->sys) || exact (p, "hid", "FTE3600"))
+      resolve (&walk, p, id->physical, "firmware_node", id->sys) ||
+      (exact (p, "hid", "FTE3600") && exact (p, "hid", "FTE6600")))
     return -1;
   snprintf (rel, sizeof (rel), "bus/gpio/devices/%s", c->gpio);
   if (resolve (&walk, id->classes[1], id->sys, rel, id->sys) ||

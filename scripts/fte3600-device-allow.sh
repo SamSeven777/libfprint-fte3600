@@ -75,7 +75,7 @@ UNIT_CONTENT="[Unit]${NEWLINE}"
 SERVICE_CONTENT="[Service]${NEWLINE}"
 while read -r role node alias; do
   case "$role:$alias" in
-    spi:/dev/fte3600-spi-FTE3600:*|gpio:/dev/fte3600-gpio-FTE3600:*|irq:/dev/fte3600-irq-FTE3600:*) ;;
+    spi:/dev/fte3600-spi-FTE[36]600:*|gpio:/dev/fte3600-gpio-FTE[36]600:*|irq:/dev/fte3600-irq-FTE[36]600:*) ;;
     *) echo 'Unexpected validated pair output.' >&2; exit 1 ;;
   esac
   unit=$(systemd-escape --path --suffix=device "$alias")

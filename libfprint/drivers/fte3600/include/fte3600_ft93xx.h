@@ -372,6 +372,12 @@ enum fte3600_ft93xx_status fte3600_ft93xx_configuration (uint16_t               
                                                          uint8_t                      version,
                                                          struct fte3600_ft93xx_state *state);
 
+/* FT9769-class raw-array image regime (see ft93xx.c). */
+enum fte3600_ft93xx_status fte3600_ft93xx_raw_image_state (uint16_t raw_id, struct fte3600_ft93xx_state *state);
+/* Reads whether the part has latched a finger-detect event since the last
+ * arm (a touch that landed while the host was busy and whose interrupt edge
+ * may already have been consumed). */
+enum fte3600_ft93xx_status fte3600_ft93xx_fdt_pending (const struct fte3600_ft93xx_io *io, int *pending);
 size_t fte3600_ft93xx_frame_count (uint8_t count);
 
 /* Positive width/height; extra rows may be zero. Arithmetic is checked even
