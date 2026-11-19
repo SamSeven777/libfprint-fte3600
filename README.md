@@ -7,10 +7,26 @@ persistent prints, verification and identification through libfprint/fprintd.
 [Security](SECURITY.md)
 
 Implemented profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369
-and FT9769. Hardware confirmation is currently limited to FT9361 on One-Netbook
-A1; other models, suspend/resume and complete Windows parity remain unverified.
-USB sensors are outside this driver. Authentication is experimental and has no
-population accuracy calibration; retain password access.
+and FT9769. Hardware results are specific to the tested device and revision;
+an implemented profile alone does not establish hardware validation.
+
+## Hardware reports
+
+| Device | Sensor | Reported results |
+| --- | --- | --- |
+| One-Netbook A1 | FT9361 | Hardware-confirmed on this project's original test device. |
+| GPD Pocket 3 (G1621-02) | FW9369, raw ID `0x9362` | Enrollment, repeated verification, S3 suspend/resume, and lock-screen unlock passed on `6efa376` ([report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6212129012)). The additional calibration-recovery fix in [#13](https://github.com/SamSeven777/libfprint-fte3600/pull/13) still needs hardware validation. |
+| OneMix 4 | FT9769-class, chip `0x9391`, ACPI `FTE6600` | Re-enrollment and verification confirmed by the contributor in merged [#11](https://github.com/SamSeven777/libfprint-fte3600/pull/11). |
+| ONEXPLAYER X2 Mini | FT9365, chip `0x9365` | Enrollment and unlock reported working with the contributor's downstream finger-lift fix. [#15](https://github.com/SamSeven777/libfprint-fte3600/pull/15) ports the fix to this driver; its follow-up release-timeout changes still need hardware validation. |
+
+Medion Akoya E3224 testing remains in progress ([#1](https://github.com/SamSeven777/libfprint-fte3600/issues/1)).
+Sixunited DNTU has a hardware compatibility report, without driver testing yet
+([#14](https://github.com/SamSeven777/libfprint-fte3600/issues/14)). Other devices,
+suspend/resume outside the reported Pocket 3 setup, and complete Windows parity
+remain unverified. USB sensors are outside this driver. Authentication is
+experimental and has no population accuracy calibration; retain password access.
+
+## Requirements and licensing
 
 The driver requires the ACPI reset/IRQ module in `kernel/fte3600`, distribution
 spidev and separately supplied firmware where needed. Firmware is not bundled.

@@ -81,10 +81,13 @@ fprintd-enroll -f right-index-finger "$USER"
 fprintd-verify -f right-index-finger "$USER"
 ```
 
-Low-quality, duplicate and inconsistent samples cause retries. FT9368 and
-FW9369 have explicit release detection; other families do not confirm finger
-removal separately. Physical suspend/resume remains unverified. Keep password
-access. Re-enroll when migrating from the previous driver; template
+Low-quality, duplicate and inconsistent samples cause retries. FT9368, FW9369
+and FT9769 have explicit release detection; other families in the current
+main branch do not confirm finger removal separately. S3 suspend/resume has
+been reported working on the GPD Pocket 3; this does not establish support on
+other devices. See the [hardware reports](../../README.md#hardware-reports)
+for tested revisions and pending fixes. Keep password access.
+Re-enroll when migrating from the previous driver; template
 compatibility is not established, so preserve existing prints for rollback.
 
 For errors, run `./scripts/setup-fte3600.sh check` and inspect
