@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Public API doubles with the real GLib default main context and timer. */
-#define main benchmark_main
-#include "../tools/fte3600-open-bench.c"
-#undef main
+#define FTE3600_TOOL_EMBEDDED
+#define FTE3600_TOOL_BENCH_ONLY
+#include "../tools/fte3600-tool.c"
 
 enum outcome { CANCELLED, OPEN_WINS, OTHER_ERROR, CANCELLED_BUT_OPEN };
 static enum outcome outcome;
@@ -48,7 +48,7 @@ static void run_case(enum outcome next,int expected,unsigned expected_opens,unsi
     g_ptr_array_add(devices,g_object_new(G_TYPE_OBJECT,NULL));
     char program[]="test-open-bench",cancel[]="--cancel-open-ms=1",cycles[]="2";
     char *args[]={program,cancel,cycles,NULL};
-    g_assert_cmpint(benchmark_main(3,args),==,expected);
+    g_assert_cmpint(bench_main(3,args),==,expected);
     g_assert_cmpuint(opens,==,expected_opens);g_assert_cmpuint(closes,==,expected_closes);
     g_assert_cmpuint(contexts_freed,==,1);g_assert_cmpuint(tokens_freed,==,1);g_assert_false(is_open);
     /* Pending sources from a winning open/error must have been removed;
@@ -63,14 +63,14 @@ int main(void)
     g_ptr_array_add(devices,g_object_new(G_TYPE_OBJECT,NULL));
     char program[]="test-open-bench";
     char *defaults[]={program,NULL};
-    g_assert_cmpint(benchmark_main(1,defaults),==,0);
+    g_assert_cmpint(bench_main(1,defaults),==,0);
     g_assert_cmpuint(opens,==,3);g_assert_cmpuint(closes,==,3);
     g_assert_cmpuint(contexts_freed,==,1);g_assert_cmpuint(tokens_freed,==,0);
     g_ptr_array_unref(devices);
     const char *invalid[]={"--cancel-open-ms=0","--cancel-open-ms=1001","--cancel-open-ms=-1","--cancel-open-ms=", "0","21"};
     for (size_t i=0;i<G_N_ELEMENTS(invalid);++i) {
         char *args[]={program,(char *)invalid[i],NULL};
-        g_assert_cmpint(benchmark_main(2,args),==,2);
+        g_assert_cmpint(bench_main(2,args),==,2);
     }
     run_case(CANCELLED,0,3,2);
     run_case(OPEN_WINS,1,1,1);

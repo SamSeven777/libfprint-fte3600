@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Test CLI reporting against runtime outcomes; no hardware I/O. */
-#define main probe_main
-#include "../tools/fte3600-probe.c"
-#undef main
+#define FTE3600_TOOL_EMBEDDED
+#define FTE3600_TOOL_PROBE_ONLY
+#include "../tools/fte3600-tool.c"
 
 static enum { READY, FIRMWARE, UNCONFIRMED, CLOSE_ERROR, STATUS_ERROR } outcome;
 static unsigned opened, closed;

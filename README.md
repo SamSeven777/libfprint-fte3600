@@ -7,8 +7,7 @@ persistent prints, verification and identification through libfprint/fprintd.
 [Security](SECURITY.md)
 
 Implemented profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369
-and FT9769. Hardware results are specific to the tested device and revision;
-an implemented profile alone does not establish hardware validation.
+and FT9769. Tested devices and revisions are listed below.
 
 ## Hardware reports
 
@@ -21,15 +20,15 @@ an implemented profile alone does not establish hardware validation.
 
 Medion Akoya E3224 testing remains in progress ([#1](https://github.com/SamSeven777/libfprint-fte3600/issues/1)).
 Sixunited DNTU has a hardware compatibility report, without driver testing yet
-([#14](https://github.com/SamSeven777/libfprint-fte3600/issues/14)). Other devices,
-suspend/resume outside the reported Pocket 3 setup, and complete Windows parity
-remain unverified. USB sensors are outside this driver. Authentication is
-experimental and has no population accuracy calibration; retain password access.
+([#14](https://github.com/SamSeven777/libfprint-fte3600/issues/14)).
+
+Use the [hardware tool](docs/fte3600/tools.md) to identify a sensor and collect
+a report. This driver supports SPI sensors.
 
 ## Requirements and licensing
 
 The driver requires the ACPI reset/IRQ module in `kernel/fte3600`, distribution
-spidev and separately supplied firmware where needed. Firmware is not bundled.
+spidev and the [firmware required by the chip](docs/fte3600/install.md#firmware).
 
 Host code is LGPL-2.1-or-later; kernel glue is GPL-2.0-only. Existing copyright
 and dependency notices apply. The independent driver uses the attributed

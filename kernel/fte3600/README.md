@@ -69,6 +69,3 @@ Requires ACPI, GPIO character devices, UIO and matching kernel headers:
 make KDIR=/lib/modules/"$(uname -r)"/build W=1
 make check
 ```
-
-The old private SPI bridge ABI is not supported; see
-[migration](../../docs/fte3600/install.md#migrate-an-earlier-bridge-installation).

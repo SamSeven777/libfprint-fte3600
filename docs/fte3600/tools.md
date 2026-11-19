@@ -1,34 +1,37 @@
-# FTE3600 tools
+# Hardware tools
 
-Use `scripts/fte3600-tool.sh` from a checkout. It separates connection metadata,
-chip identification through the production driver, and startup timing. It does
-not install packages, load modules or change services automatically.
+Use `scripts/fte3600-tool.sh` from the repository root:
 
-| Command | Purpose | Requirements |
-| --- | --- | --- |
-| `info` | Read-only ACPI, SPI and GPIO topology report; does not identify the chip | Bash; optional Python 3 and ACPICA tools for ACPI decoding; root for protected tables |
-| `check` | Check installed kernel and service prerequisites | See [installation](install.md); no chip identification |
-| `probe /dev/spidevB.C [firmware-directory]` | Report driver profile, chip IDs and startup result for one exact SPI device | Production build, root, matching ABI 2 bridge and spidev |
-| `bench [cycles]` | Measure normal driver open/close time | Built libfprint and tool, configured device permissions; defaults to three cycles |
+| Command | Purpose |
+| --- | --- |
+| `info` | Collect ACPI, SPI and GPIO connection information |
+| `check` | Check installed kernel and service prerequisites |
+| `probe /dev/spidevB.C [firmware-directory]` | Identify the chip and report its driver profile and initialization result |
+| `bench [cycles]` | Measure driver open/close time; defaults to three cycles |
 
-## Identify a chip
+## Build
 
-Build on the target distribution using the dependencies in
-[installation](install.md). There is no need to install the built libfprint or
-replace the system library to run these tools:
+Install the [build dependencies](install.md), then build the production tool:
 
 ```sh
 meson setup build -Ddrivers=fte3600 -Dfte3600-test-backend=false \
   -Dgtk-examples=false -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
-meson compile -C build fte3600-probe fte3600-open-bench
-./scripts/fte3600-tool.sh info
+meson compile -C build fte3600-tool
 ```
 
-The ACPI resource bridge must be installed and loaded before chip probing.
-Use the **actual** spidev character device associated with the FTE3600 sensor,
-as shown by the topology report; `spi-FTE3600:01` is not a `/dev/spidevB.C` path.
-Keep the sensor untouched and stop other sensor clients such as fprintd before
-running a probe. On systems using systemd, for example:
+The tool runs against the built library directly. `probe` and `bench` require
+the ABI 2 ACPI resource module and root access. `info` uses Bash, with Python 3
+and ACPICA tools for ACPI decoding; run it as root to read protected tables.
+
+## Identify a chip
+
+```sh
+sudo ./scripts/fte3600-tool.sh info
+```
+
+Find the sensor's `/dev/spidevB.C` path in the report. Substitute that path in
+the command below; `/dev/spidev2.0` is an example. Close other sensor clients
+and keep the sensor untouched during initialization. With fprintd running:
 
 ```sh
 sudo systemctl stop fprintd.service
@@ -36,56 +39,36 @@ sudo ./scripts/fte3600-tool.sh probe /dev/spidev2.0
 sudo systemctl start fprintd.service
 ```
 
-`/dev/spidev2.0` is an example, not a default or a guessed bus assignment. If the
-service was previously disabled or stopped, restore that state instead. The
-probe never starts or stops services itself.
+`probe` uses the driver's chip detection and startup sequence, including reset,
+firmware loading and calibration. It reports the driver profile, raw ID, chip
+ID, geometry and initialization status. It produces text output without saving
+images or templates.
 
-The probe reuses the production runtime, including validated device pairing,
-chip detection, firmware loading and full startup. **It performs hardware
-writes and resets, and may upload firmware and run calibration.** It does not
-request enrollment or verification, or save images or fingerprint templates.
-It is not a passive, identification-only register reader.
+Raw IDs and profiles can differ: FW9369 uses raw ID `0x9362`. On failed startup,
+zero IDs mean the runtime may not have reached identification; `Identity
+unconfirmed` marks an unresolved identity. Firmware and calibration errors are
+reported separately. Share the full output when reporting a device, followed
+by enrollment and verification results once initialization succeeds.
 
-Output distinguishes the selected driver profile, raw ID, chip ID, startup and
-calibration. A raw ID and the selected profile may differ (for example,
-FW9369 uses raw `0x9362`). Zero IDs in a failed startup may mean the ID was not
-available, rather than a measured chip ID of zero. An unconfirmed-identity
-message means the reported profile must not be treated as confirmed.
-
-Missing firmware or failed calibration is not proof that a chip is unsupported.
-The failure report retains the runtime's available identity and diagnostics.
-Even a successful startup does not establish enrollment, verification or
-suspend/resume compatibility. Share the full text output with a hardware report.
-
-An optional firmware directory must contain the raw files described in the
-installation guide. Otherwise the tool uses the driver's build-time firmware
-directory (`-Dfte3600-firmware-dir=...`), including on NixOS. The imperative
-kernel installation helpers are not NixOS packaging instructions.
-
-For a different build directory:
+The optional firmware directory defaults to the driver's build-time
+`fte3600-firmware-dir`. See [firmware setup](install.md#firmware).
+For a custom build directory and firmware location:
 
 ```sh
 sudo env FTE3600_BUILD_DIR=/absolute/path/to/build \
   ./scripts/fte3600-tool.sh probe /dev/spidev2.0 /path/to/firmware/fte3600
 ```
 
-Exit status is `0` after successful startup, status retrieval and cleanup;
-`1` for runtime/status/cleanup failure; `2` for incorrect arguments or a missing
-built tool. Build the real backend: the fake test backend cannot identify hardware.
+Exit codes: `0` for success, `1` for runtime/status/cleanup failure, and `2` for
+invalid arguments or a missing executable. `bench` also accepts
+`--cancel-open-ms=1..1000` for cancellation testing.
 
-## Developer tools
+## Development
 
-| Tool | Scope |
-| --- | --- |
-| `tools/fte3600-probe.c` | Implementation of the production chip/startup probe; built as `build/tools/fte3600-probe` |
-| `tools/fte3600-open-bench.c` | Public libfprint API startup benchmark; built as `build/tools/fte3600-open-bench`; supports `--cancel-open-ms=1..1000` |
-| `tools/ft93xx-lab.py` | Experimental direct-register lab for raw IDs `0x9391`, `0x9392`, `0x9395`, `0x9397`; requires Python spidev and explicitly configured device paths; does not cover every driver profile |
-| `tools/fte3600-match-lab.c` | Matcher development source; not a chip identification tool |
-| `scripts/fte3600-pair.py` | Resource pairing, service permissions and labeling integration; not chip identification |
-| `scripts/check-fte3600.sh` | Developer builds and software regression checks; not a hardware diagnostic command |
+`tools/fte3600-tool.c` implements both compiled commands in
+`build/tools/fte3600-tool`. The shell entry point contains the topology report
+and delegates installation checks to `setup-fte3600.sh`.
 
-The legacy `scripts/probe-fte3600.sh` and `scripts/setup-fte3600.sh check`
-entry points remain available for existing users. Their implementations are
-reused by `info` and `check`. The FT93xx lab remains separate because it exposes
-experimental register writes and capture operations. Its default device paths
-are not portable; do not use it as the general hardware-report probe.
+`tools/fte3600-match-lab.c` is for matcher experiments;
+`scripts/fte3600-pair.py` handles resource pairing and service permissions.
+Run `scripts/check-fte3600.sh` for the software regression checks.
