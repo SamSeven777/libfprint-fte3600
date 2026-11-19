@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Bring-up lab for FT93xx-family sensors (FTE3600/FTE6600 ACPI, chip 0x9391 etc.).
 
+Experimental subset only; for general chip identification use
+scripts/fte3600-tool.sh probe (see docs/fte3600/tools.md).
+
 Speaks the register protocol directly over spidev, so individual steps of the
 libfprint driver's sequence can be replayed, reordered and inspected. Run as root.
 

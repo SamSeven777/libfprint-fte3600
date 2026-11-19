@@ -4,6 +4,8 @@
 #
 # Safe, read-only hardware probe script for FTE3600 / FT9361 fingerprint sensors.
 # Collects non-biometric hardware topology to diagnose ACPI resource discovery.
+# This does not read chip IDs. Prefer fte3600-tool.sh info; for chip identity
+# use fte3600-tool.sh probe. See docs/fte3600/tools.md.
 
 set -u
 

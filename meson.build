@@ -320,6 +320,7 @@ endif
 
 # Some dependency resolving happens inside here
 subdir('libfprint')
+subdir('tools')
 
 configure_file(output: 'config.h', configuration: libfprint_conf)
 

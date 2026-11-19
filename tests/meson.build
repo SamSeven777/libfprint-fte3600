@@ -542,6 +542,16 @@ if 'fte3600' in drivers
       install: false)
     test('fte3600-linux-runtime', fte3600_linux_runtime_test, timeout: 180)
 
+    fte3600_probe_test = executable('test-fte3600-probe',
+      'test-fte3600-probe.c',
+      dependencies: deps,
+      include_directories: fte3600_test_include,
+      link_with: fte3600_driver,
+      c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
+      link_args: ['-Wl,--wrap=fte3600_linux_runtime_open,--wrap=fte3600_linux_runtime_get_status,--wrap=fte3600_linux_runtime_close'],
+      install: false)
+    test('fte3600-probe', fte3600_probe_test, timeout: 30)
+
     # Public runtime entrypoints use the production runtime/session archive.
     # Only physical syscalls and monotonic time are synthetic; no runtime clone.
     fte3600_runtime_test = executable('test-fte3600-fw9369-runtime',
@@ -558,11 +568,6 @@ if 'fte3600' in drivers
     test('fte3600-fw9369-runtime', fte3600_runtime_test, timeout: 180)
   endif
 
-  fte3600_open_bench = executable('fte3600-open-bench',
-    '../tools/fte3600-open-bench.c',
-    dependencies: libfprint_dep,
-    include_directories: include_directories('../libfprint'),
-    install: false)
   # The real benchmark is never a test: this executable wraps its public API
   # calls and uses synthetic GObjects plus the real GLib context and timers.
   fte3600_open_bench_test = executable('test-fte3600-open-bench',

@@ -29,6 +29,10 @@ a smaller buffer or an older glue module remains loaded. Secure Boot requires
 a trusted module signature. Resources are discovered from ACPI; do not guess
 GPIO pins or select firmware solely from the FTE3600 ACPI name.
 
+To identify the chip, use the [hardware tools](tools.md): the `probe` command
+reuses the production driver and reports its profile and available chip IDs.
+The `info` command only reports connection metadata.
+
 Select firmware for the identified chip. Example for FT9361:
 
 ```sh
