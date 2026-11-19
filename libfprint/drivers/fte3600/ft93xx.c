@@ -952,7 +952,7 @@ fte3600_ft93xx_fdt_run (
   struct fte3600_ft93xx_fdt_diagnostics *diagnostics)
 {
   if (state == NULL || controller == NULL || !valid_io (io) || foundry > 3 ||
-      action < FTE3600_FT93XX_FDT_MEASURE || action > FTE3600_FT93XX_FDT_ARM ||
+      action < FTE3600_FT93XX_FDT_MEASURE || action > FTE3600_FT93XX_FDT_STOP ||
       state->dac_polarity > 3 || state->subtract_baseline > 1 || state->configured > 1 ||
       state->check_registers > 2 || controller->analog.fdt_configured > 1 ||
       controller->analog.threshold_mode > 1 || controller->dac_calibrated > 1 ||
@@ -1002,6 +1002,9 @@ fte3600_ft93xx_fdt_run (
       break;
 
     case FTE3600_FT93XX_FDT_ARM: result = fdt_arm (&op, features, argument);
+      break;
+
+    case FTE3600_FT93XX_FDT_STOP: result = fdt_prepare (&op) && ft93xx_write_word (&op.wire, 0x1a84, 0x002f);
       break;
     }
   return result ? FTE3600_FT93XX_OK : error;
@@ -1547,4 +1550,14 @@ fte3600_ft93xx_fdt_pending (const struct fte3600_ft93xx_io *io, int *pending)
     return error;
   *pending = (word & 8) != 0;
   return FTE3600_FT93XX_OK;
+}
+
+enum fte3600_ft93xx_status
+fte3600_ft93xx_event_status (const struct fte3600_ft93xx_io *io, uint16_t *value)
+{
+  enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
+  struct ft93xx_operation op = {io, NULL, &error};
+  if (!valid_io (io) || !value)
+    return FTE3600_FT93XX_INVALID_ARGUMENT;
+  return ft93xx_read_word (&op, 0x1a82, value) ? FTE3600_FT93XX_OK : error;
 }

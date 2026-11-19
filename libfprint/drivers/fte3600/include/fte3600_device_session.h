@@ -120,6 +120,9 @@ enum fte3600_device_error fte3600_device_irq (struct fte3600_device_session *);
  * without such a latch report 0. */
 enum fte3600_device_error fte3600_device_pending (struct fte3600_device_session *, int *pending);
 enum fte3600_device_error fte3600_device_capture (struct fte3600_device_session *);
+/* FT9365 enrollment-only calibrated event handling. */
+enum fte3600_device_error fte3600_device_ft9365_arm_up (struct fte3600_device_session *);
+enum fte3600_device_error fte3600_device_ft9365_stop_up (struct fte3600_device_session *);
 /* FW9369 only: poll one physical status and, on UP, confirm/maintain/rearm.
  * released is written only on success; false means still held/unknown. The
  * caller supplies bounded waits, deadline and cancellation through callbacks.

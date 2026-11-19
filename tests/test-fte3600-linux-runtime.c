@@ -23,12 +23,20 @@ static struct bus *runtime_bus;
 static uint64_t wait_remaining;
 static int irq_enabled=1;
 static int byte_contact=1,byte_unhealthy;
+static int ft9365_release_observation, ft9365_reads, ft9365_release_after;
 static GCancellable *cancel_in_poll;
 static gint poll_waiting;
 static uint32_t runtime_spi(uint8_t *data,size_t length)
 {
     int post_start=runtime_bus->next==runtime_bus->fixture->count;
     uint8_t command=data[0];uint32_t rc=spi(runtime_bus,data,length);
+    if(post_start && ft9365_release_observation && command==4 && length==10 &&
+       data[2]==0x9a && data[3]==0x82) {
+        ++ft9365_reads;
+        if(ft9365_release_observation==2) return UINT32_C(0xc0000185);
+        data[6]=0;data[7]=ft9365_reads >= ft9365_release_after ? 0x05 : 0;
+        data[8]=data[9]=0;
+    }
     if(post_start&&command==0x91&&length==39&&runtime_bus->fixture->model==FTE3600_MODEL_FT9368) {
         data[8]=data[9]=byte_contact?0x11:0;
         if(byte_unhealthy) data[26]=0;
@@ -165,6 +173,67 @@ static void runtime_cases(const struct fixture *f)
     CHECK(fte3600_linux_runtime_capture(r,NULL,10000,&frame,&d)==0);
     fte3600_linux_runtime_frame_clear(&frame);CHECK(!fte3600_linux_runtime_close(r,&d));teardown_bus();
     CHECK(fd_count()==before);printf("runtime PASS %s\n",f->name);
+}
+static void ft9365_enrollment_release(const struct fixture *f)
+{
+    struct fte3600_linux_runtime *r=NULL;
+    struct fte3600_linux_runtime_config c=runtime_config();
+    struct fte3600_linux_runtime_diagnostic d;
+    struct fte3600_linux_runtime_frame frame={0};
+    unsigned before=fd_count();
+    setup_bus(f);
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    CHECK(frame.status.image_sequence==1 && runtime_bus->frames==1);
+    fte3600_linux_runtime_frame_clear(&frame);
+    ft9365_release_observation=1;ft9365_reads=0;ft9365_release_after=4;
+    CHECK(!fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d));
+    CHECK(ft9365_reads==4 && runtime_bus->frames==1);
+    ft9365_release_observation=0;
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    CHECK(frame.status.image_sequence==2 && runtime_bus->frames==2);
+    fte3600_linux_runtime_frame_clear(&frame);
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);
+    teardown_bus();
+
+    /* A rejected frame is not an accepted enrollment sample. Stopping its Up
+     * arm permits an immediate replacement without a physical release. */
+    setup_bus(f);
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    CHECK(runtime_bus->frames==1);
+    fte3600_linux_runtime_frame_clear(&frame);
+    CHECK(!fte3600_linux_runtime_discard_enroll_retry(r,NULL,10000,&d));
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    CHECK(runtime_bus->frames==2 && frame.status.image_sequence==2);
+    fte3600_linux_runtime_frame_clear(&frame);
+    ft9365_release_observation=1;ft9365_reads=0;ft9365_release_after=4;
+    CHECK(!fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d));
+    CHECK(ft9365_reads==4 && runtime_bus->frames==2);
+    ft9365_release_observation=0;
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);teardown_bus();
+
+    setup_bus(f);
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    fte3600_linux_runtime_frame_clear(&frame);
+    GCancellable *cancel=g_cancellable_new();g_cancellable_cancel(cancel);
+    CHECK(fte3600_linux_runtime_wait_enroll_release(r,cancel,10000,&d)==FTE3600_RUNTIME_CANCELLED);
+    CHECK(fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d)==FTE3600_RUNTIME_NOT_READY);
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);
+    g_object_unref(cancel);teardown_bus();
+
+    setup_bus(f);
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
+    fte3600_linux_runtime_frame_clear(&frame);
+    ft9365_release_observation=2;ft9365_reads=0;
+    CHECK(fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d)!=FTE3600_RUNTIME_OK);
+    CHECK(fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d)==FTE3600_RUNTIME_NOT_READY);
+    CHECK(runtime_bus->frames==1);
+    ft9365_release_observation=0;
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);teardown_bus();
+    puts("runtime FT9365 enrollment requires physical Up before another frame");
 }
 static gpointer glib_cancel_thread(gpointer cancel)
 {
@@ -442,6 +511,8 @@ int main(void)
         if(!fixtures[i].unconfirmed_stop&&(is_legacy(&fixtures[i])||fixtures[i].model==FTE3600_MODEL_FT9368))
             supplied_firmware_case(&fixtures[i]);
     for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i) if(fixtures[i].model==FTE3600_MODEL_FT9365) { threaded_cancel(&fixtures[i]);break; }
+    for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i)
+        if(fixtures[i].chip==0x9365) { ft9365_enrollment_release(&fixtures[i]);break; }
     rejected_startups();chip_select_negotiation();legacy_chip_select_negotiation();
     CHECK(sync_pairs>0);
     printf("runtime: %u release/sync pairs passed syscall-order guard through full startup and lifecycle LOAD\n",sync_pairs);

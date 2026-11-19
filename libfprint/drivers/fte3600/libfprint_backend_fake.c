@@ -241,3 +241,31 @@ fte3600_linux_runtime_error_string (enum fte3600_linux_runtime_error code)
   (void) code;
   return "synthetic backend failure (TEST ONLY)";
 }
+
+enum fte3600_linux_runtime_error
+fte3600_linux_runtime_capture_enroll (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
+                                      uint32_t timeout, struct fte3600_linux_runtime_frame *frame,
+                                      struct fte3600_linux_runtime_diagnostic *diag)
+{
+  return fte3600_linux_runtime_capture (runtime, cancel, timeout, frame, diag);
+}
+enum fte3600_linux_runtime_error
+fte3600_linux_runtime_wait_enroll_release (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
+                                            uint32_t timeout, struct fte3600_linux_runtime_diagnostic *diag)
+{
+  return fte3600_linux_runtime_wait_release (runtime, cancel, timeout, diag);
+}
+
+enum fte3600_linux_runtime_error
+fte3600_linux_runtime_discard_enroll_retry (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
+                                            uint32_t timeout, struct fte3600_linux_runtime_diagnostic *diag)
+{
+  (void) timeout;
+  if (g_cancellable_is_cancelled (cancel))
+    {
+      runtime->failed = TRUE;
+      return failure (diag, FTE3600_RUNTIME_CANCELLED);
+    }
+  trace (runtime->control, "release-retry-discarded");
+  return failure (diag, FTE3600_RUNTIME_OK);
+}
