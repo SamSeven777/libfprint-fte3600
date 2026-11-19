@@ -86,6 +86,11 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
   };
   if (g_str_equal (mode, "unsupported"))
     runtime->status.width = 3;
+  if (g_str_equal (mode, "ft9365") || g_str_equal (mode, "enroll-ft9365-resume"))
+    {
+      runtime->status.model = FTE3600_MODEL_FT9365;
+      runtime->status.chip_id = runtime->status.raw_id = 0x9365;
+    }
   if (g_str_equal (mode, "fw9369"))
     {
       runtime->status.model = FTE3600_MODEL_FW9369;
@@ -156,6 +161,8 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
   guint sample = 8;
   if (g_str_has_prefix (mode, "enroll"))
     sample = runtime->sample++ % 8;
+  if (g_str_equal (mode, "enroll-ft9365-resume"))
+    sample = (sample + 3) % 8;
   if (g_str_equal (mode, "enroll-retry") && runtime->sample > 1)
     sample = (runtime->sample - 2) % 8;
   if (g_str_equal (mode, "duplicate"))
@@ -181,6 +188,7 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
   (void) timeout;
   trace (runtime->control, "release-begin");
   if (runtime->status.model != FTE3600_MODEL_FT9368 &&
+      runtime->status.model != FTE3600_MODEL_FT9365 &&
       runtime->status.model != FTE3600_MODEL_FW9369 &&
       runtime->status.model != FTE3600_MODEL_FT9769)
     {
@@ -194,7 +202,8 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *runtime,
     {
       trace (runtime->control, "release-timeout");
       /* The production polling runtime requires cold recovery after timeout. */
-      if (runtime->status.model == FTE3600_MODEL_FW9369 ||
+      if (runtime->status.model == FTE3600_MODEL_FT9365 ||
+          runtime->status.model == FTE3600_MODEL_FW9369 ||
           runtime->status.model == FTE3600_MODEL_FT9769)
         runtime->failed = TRUE;
       return failure (diag, FTE3600_RUNTIME_TIMEOUT);

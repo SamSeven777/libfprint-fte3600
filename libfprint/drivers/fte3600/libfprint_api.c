@@ -258,6 +258,63 @@ test_enroll_release_progress (void)
 }
 
 static void
+ft9365_release_progress (FpDevice *device, gint stage, FpPrint *print,
+                         gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, 3);
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      g_assert_cmpuint (++retry_count, ==, 1);
+      mode ("enroll-ft9365-resume");
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+      if (stage == 3 && GPOINTER_TO_INT (data))
+        mode ("release-timeout");
+    }
+}
+
+static void
+test_ft9365_enroll_release (gconstpointer data)
+{
+  gboolean timeout = GPOINTER_TO_INT (data);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  g_autoptr(GArray) states = g_array_new (FALSE, FALSE, sizeof (FpFingerStatusFlags));
+  FpDevice *device = only_device (context);
+  mode ("ft9365");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_signal_connect (device, "notify::finger-status", G_CALLBACK (finger_changed), states);
+  mode ("enroll");
+  reset_trace ();
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                  ft9365_release_progress, (gpointer) data, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, timeout ? 1 : 0);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("release-ok"), ==, timeout ? 6 : 7);
+  g_assert_cmpuint (trace_count ("release-timeout"), ==, timeout ? 1 : 0);
+  g_assert_cmpuint (trace_count ("open"), ==, timeout ? 1 : 0);
+  g_assert_cmpuint (trace_count ("close"), ==, timeout ? 1 : 0);
+  g_assert_cmpuint (finger_count (states, FP_FINGER_STATUS_PRESENT), >=, 7);
+  g_assert_cmpuint (finger_count (states, FP_FINGER_STATUS_NEEDED), >=, 8);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_signal_handlers_disconnect_by_data (device, states);
+}
+
+static void
 test_release_timeout_recovery (gconstpointer profile)
 {
   g_autoptr(GError) error = NULL;
@@ -965,6 +1022,8 @@ main (int argc, char **argv)
   g_test_add_func ("/fte3600/capture-wait-contract", test_capture_wait_contract);
   g_test_add_func ("/fte3600/release-observations", test_release_observations);
   g_test_add_func ("/fte3600/enroll-release-progress", test_enroll_release_progress);
+  g_test_add_data_func ("/fte3600/ft9365-release-observations", GINT_TO_POINTER (FALSE), test_ft9365_enroll_release);
+  g_test_add_data_func ("/fte3600/ft9365-enroll-release-recovery", GINT_TO_POINTER (TRUE), test_ft9365_enroll_release);
   g_test_add_data_func ("/fte3600/release-timeout-recovery", "fw9369", test_release_timeout_recovery);
   g_test_add_data_func ("/fte3600/strip-release-timeout-recovery", "ft9769", test_release_timeout_recovery);
   g_test_add_func ("/fte3600/strip-retries", test_strip_retries);

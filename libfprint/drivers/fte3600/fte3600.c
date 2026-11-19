@@ -299,15 +299,11 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
         fte3600_linux_runtime_wait_release (self->runtime, cancel, RELEASE_PROMPT_MS, &diag);
       if (release == FTE3600_RUNTIME_TIMEOUT)
         {
-          if (work->action == FPI_DEVICE_ACTION_ENROLL && self->identity.backend_model == 0x9365)
-            {
-              error = runtime_error (&diag);
-              hardware_failed = TRUE;
-              goto out;
-            }
           /* Polling release may time out during maintenance or a raw scan.
            * Those runtimes require a fresh owner before another operation;
-           * FT9368's contact-only timeout can keep waiting on this owner. */
+           * FT9368's contact-only timeout can keep waiting on this owner.
+           * Retire FT9365's owner too, but preserve enrollment progress and
+           * ask for finger removal before opening the replacement. */
           hardware_failed = self->identity.backend_model == 0x9365 ||
                             self->identity.backend_model == 0x9369 ||
                             self->identity.backend_model == 0x9769;
@@ -643,7 +639,10 @@ start_work (FpDevice *device)
   self->worker_active = TRUE;
   if (work->action != FPI_DEVICE_ACTION_OPEN && work->action != FPI_DEVICE_ACTION_CLOSE)
     fpi_device_report_finger_status (device, self->needs_release &&
-                                     (self->identity.backend_model == 0x9368 ||
+                                     ((work->action == FPI_DEVICE_ACTION_ENROLL &&
+                                       self->identity.backend_model == 0x9365 &&
+                                       self->identity.chip_id == 0x9365) ||
+                                      self->identity.backend_model == 0x9368 ||
                                       self->identity.backend_model == 0x9769) ?
                                      FP_FINGER_STATUS_PRESENT : FP_FINGER_STATUS_NEEDED);
   task = g_task_new (device, self->worker_cancel, complete, NULL);
