@@ -19,3 +19,14 @@ Host code is LGPL-2.1-or-later; kernel glue is GPL-2.0-only. Existing copyright
 and dependency notices apply. The independent driver uses the attributed
 SamSeven777 BRISK implementation; [source origins](docs/fte3600/independent-source.json)
 and the dependency's `COPYING` / `UPSTREAM.json` identify the inputs.
+
+## Contributors
+
+- [@FlightDan](https://github.com/FlightDan)
+- [@solarkennedy](https://github.com/solarkennedy)
+- [@ttamakijp](https://github.com/ttamakijp)
+- [@iwansugiarto](https://github.com/iwansugiarto)
+- [@Tuxman2](https://github.com/Tuxman2)
+- [@Kriketo](https://github.com/Kriketo)
+- [@Evaner5580](https://github.com/Evaner5580)
+- [@shokerplz](https://github.com/shokerplz)
