@@ -3,7 +3,7 @@
 Linux SPI driver for FocalTech FTE3600 sensors, with BRISK enrollment,
 persistent prints, verification and identification through libfprint/fprintd.
 
-[Installation](docs/fte3600/install.md) · [Hardware tools](docs/fte3600/tools.md) · [Contributing](CONTRIBUTING.md) ·
+[Installation](docs/fte3600/install.md) · [Arch / NixOS](packaging/README.md) · [Hardware tools](docs/fte3600/tools.md) · [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md)
 
 Implemented profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369

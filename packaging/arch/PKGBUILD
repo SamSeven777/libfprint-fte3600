@@ -4,7 +4,7 @@ pkgname=libfprint-fte3600-personal-git
 # makepkg replaces this bootstrap value with pkgver() from the committed HEAD.
 pkgver=1.94.100.r9
 pkgrel=1
-pkgdesc='Experimental FTE3600 ACPI GPIO glue and stock-spidev libfprint'
+pkgdesc='libfprint with FTE3600 SPI fingerprint support and DKMS resource module'
 arch=(x86_64)
 url='https://github.com/SamSeven777/libfprint-fte3600'
 license=(LGPL-2.1-or-later GPL-2.0-only MIT)
@@ -19,14 +19,11 @@ install=fte3600.install
 # Do not inject a second -flto through makepkg's global compiler flags.
 options=(!lto)
 
-# This developer PKGBUILD packages the committed checkout containing it. A
-# release tag can replace this local VCS source with a fixed GitHub archive.
-source=(
-  "libfprint::git+file://${startdir}/../.."
-)
-sha256sums=(
-  SKIP
-)
+source=("libfprint::git+https://github.com/SamSeven777/libfprint-fte3600.git#branch=main")
+sha256sums=(SKIP)
+optdepends=('fprintd: enrollment and authentication service'
+            'linux-headers: build the module for the standard Arch kernel'
+            'linux-lts-headers: build the module for the LTS kernel')
 
 # Upstream libfprint development snapshot from which the FTE3600 work starts.
 _fte_upstream_base=c4654fdc85c25afdd9115bec2f95a44145ae3b94
@@ -65,7 +62,7 @@ check() {
     fpi-device fp-device fp-context-udev fte3600-auth \
     fte3600-install-firmware fte3600-setup fte3600-pair \
     fte3600-linux-board fte3600-linux-runtime fte3600-device-session \
-    fte3600-fw9369-release fte3600-fw9369-runtime
+    fte3600-fw9369-release fte3600-fw9369-runtime fte3600-probe fte3600-open-bench
 }
 
 package() {
@@ -83,6 +80,7 @@ package() {
   install -Dm644 "$srcdir/libfprint/config/modprobe.d/fte3600-acpi-spidev.conf" "$pkgdir/usr/lib/modprobe.d/fte3600-acpi-spidev.conf"
   install -Dm644 "$srcdir/libfprint/config/udev/70-fte3600-acpi-spidev.rules" "$pkgdir/usr/lib/udev/rules.d/70-fte3600-acpi-spidev.rules"
 
-  # Firmware is supplied separately by the device owner. Never silently
-  # bundle an ignored local blob into an otherwise reproducible package.
+  install -Dm755 "$srcdir/build/tools/fte3600-tool" "$pkgdir/usr/bin/fte3600-tool"
+  install -Dm755 "$srcdir/libfprint/scripts/install-firmware.sh" "$pkgdir/usr/bin/fte3600-install-firmware"
+  install -Dm644 "$srcdir/libfprint/docs/fte3600/tools.md" "$pkgdir/usr/share/doc/$pkgname/tools.md"
 }
