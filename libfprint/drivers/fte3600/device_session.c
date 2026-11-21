@@ -285,7 +285,7 @@ fte3600_device_create (
 {
   if (!config || !output || !config->io.spi || !config->io.wait_ms || !config->io.wait_us ||
       !config->io.gpio || !config->io.boundary || !config->io.clock_ms ||
-      !config->io.error || !config->io.clear_error || config->startup.scene != 0 ||
+      !config->io.error || !config->io.clear_error || config->prefer_running_application > 1 || config->startup.scene != 0 ||
       config->startup.initial_model != FTE3600_MODEL_UNKNOWN || config->startup.resume_cleanup ||
       ((config->startup.firmware || config->startup.firmware_length) && !legacy_sensor (config->legacy_firmware_model)))
     return FTE3600_DEVICE_INVALID_ARGUMENT;
@@ -395,6 +395,57 @@ identify_ready (struct fte3600_device_session *s)
   s->status.calibration_complete = 1;
   return allocate_buffers (s);
 }
+
+/* A healthy legacy application already identifies itself without the word
+ * and byte scanners' reset/retry rounds. This is live qualification, never
+ * a cached assertion of readiness. Keep it specific to the FT9361 profile
+ * measured on hardware; all other replies continue through cold discovery.
+ * Linux board callbacks check the physical identity and generation around
+ * every transaction, including these reads. No reset or upload is attempted
+ * until a positive match, and transport/cancellation failures never fall back. */
+static enum fte3600_device_error
+running_application (struct fte3600_device_session *s)
+{
+  static const uint8_t registers[] = {0x14, 0x15, 0x1a, 0x3c};
+  const struct fte3600_legacy_geometry geometry = fte3600_legacy_geometry (FTE3600_FT9361);
+  const struct fte3600_legacy_boot_profile profile = fte3600_legacy_boot_defaults (FTE3600_FT9361);
+  const uint8_t expected[] = {(uint8_t) geometry.width, (uint8_t) geometry.height,
+                              profile.expected_firmware, profile.expected_agc};
+  uint8_t ready[] = {0x10, 0xef, 0x20, 0, 0, 0};
+  uint8_t idle[] = {0x70};
+
+  /* The application may be asleep after the previous owner closed it.
+   * Use the existing legacy ping's two idle commands before reading status;
+   * sleeping replies alone cannot distinguish a healthy part from ROM. */
+  if (failed (spi (s, idle, sizeof idle)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  wait_ms (s, 5);
+  idle[0] = 0x70;
+  if (failed (spi (s, idle, sizeof idle)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+
+  if (failed (spi (s, ready, sizeof ready)))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  if (ready[4] != 0xa5 || ready[5] != 0x5a)
+    return FTE3600_DEVICE_NOT_READY;
+  for (size_t i = 0; i < sizeof registers; ++i)
+    {
+      uint8_t reply[] = {0x10, 0xef, registers[i], 0, 0};
+      if (failed (spi (s, reply, sizeof reply)))
+        return FTE3600_DEVICE_PLATFORM_ERROR;
+      if (reply[4] != expected[i])
+        return FTE3600_DEVICE_NOT_READY;
+    }
+
+  s->factory.selected_model = FTE3600_MODEL_FT9361;
+  s->startup_result.model = FTE3600_MODEL_FT9361;
+  s->startup_result.sensor_constructed = 1;
+  /* The ordinary initializer still checks firmware binding, wakes/configures
+   * the application and arms acquisition. A live application does not waive
+   * firmware verification or establish a usable capture by itself. */
+  return identify_ready (s);
+}
+
 enum fte3600_device_error
 fte3600_device_start (struct fte3600_device_session *s)
 {
@@ -413,11 +464,18 @@ fte3600_device_start (struct fte3600_device_session *s)
   s->fw_release_rejections = 0;
   /* Recovery starts a real cold initialization; stale flags cannot qualify. */
   (void) fte3600_factory_integration_state_defaults (&s->factory);
+  memset (&s->startup_result, 0, sizeof s->startup_result);
+  enum fte3600_device_error error;
+  if (s->config.prefer_running_application && s->status.state == FTE3600_DEVICE_CREATED)
+    {
+      error = running_application (s);
+      if (error != FTE3600_DEVICE_NOT_READY)
+        goto complete;
+    }
   s->status.component_error = fte3600_factory_integration_run_optional_firmware (&s->config.startup, s->config.legacy_firmware_model,
                                                                                  &s->factory, &s->startup_storage, sizeof (s->startup_storage), &s->factory_io, NULL, &s->startup_result);
   s->status.model = s->factory.selected_model;
   s->status.compatibility_status = s->startup_result.status;
-  enum fte3600_device_error error;
   if (s->status.component_error == FTE3600_FACTORY_INTEGRATION_MISSING_FIRMWARE)
     error = FTE3600_DEVICE_MISSING_FIRMWARE;
   else if (s->status.component_error == FTE3600_FACTORY_INTEGRATION_UNCONFIRMED_IDENTITY)
@@ -428,6 +486,7 @@ fte3600_device_start (struct fte3600_device_session *s)
     error = FTE3600_DEVICE_STARTUP_ERROR;
   else
     error = identify_ready (s);
+complete:
   if (!error)
     s->status.state = FTE3600_DEVICE_IDLE;
   enum fte3600_device_error result = finish (s, error, error != FTE3600_DEVICE_OK);

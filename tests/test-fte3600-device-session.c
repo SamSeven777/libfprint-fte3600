@@ -27,6 +27,8 @@ struct bus {
     unsigned recovery_gpio_calls,recovery_sync_calls;
     int fail_recovery_gpio;
     unsigned linux_policy_reads,linux_policy_writes;
+    unsigned application_probe,application_reads,application_wakes;
+    int application_reject,application_io_error;
 };
 static const struct event *event(struct bus *b,int kind)
 {
@@ -57,6 +59,24 @@ static uint16_t sample(struct bus *b,size_t i)
 static uint32_t spi(void *context,uint8_t *tx,size_t n)
 {
     struct bus *b=context;++b->calls;
+    if (b->application_probe) {
+        if(n==1&&tx[0]==0x70) {CHECK(b->application_wakes<2);++b->application_wakes;return 0;}
+        CHECK(b->application_wakes==2);
+        static const uint8_t registers[]={0x20,0x14,0x15,0x1a,0x3c};
+        static const uint8_t values[]={0xa5,64,80,0x30,0x31};
+        unsigned at=b->application_reads++;
+        CHECK(at<5&&n==(at?5:6)&&tx[0]==0x10&&tx[1]==0xef&&tx[2]==registers[at]);
+        if (b->application_io_error) {
+            b->application_probe=0;b->latched=5;return UINT32_C(0xc0000185);
+        }
+        tx[4]=values[at];if(!at)tx[5]=0x5a;
+        if (b->application_reject==(int)at+1) {
+            tx[4]^=1;b->application_probe=0;
+        } else if (at==4) {
+            b->application_probe=0;b->next=b->fixture->count;
+        }
+        return 0;
+    }
     /* Keep the original component transcript immutable. Hardware startup adds
      * a separately specified Linux policy between direction and final ACK. */
     if (b->fixture->model==FTE3600_MODEL_FW9369 && b->next<b->fixture->count) {
@@ -147,7 +167,7 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
     record_write(b,tx,n);return 0;
 }
 static void ms(void *context,uint32_t n)
-{struct bus *b=context;const struct event *e=event(b,2);if(e) CHECK(e->value==n);b->clock+=(uint64_t)n*1000;if(b->wait_failure)b->latched=4;}
+{struct bus *b=context;if(b->application_probe){CHECK(n==5&&b->application_wakes==1);b->clock+=(uint64_t)n*1000;return;}const struct event *e=event(b,2);if(e) CHECK(e->value==n);b->clock+=(uint64_t)n*1000;if(b->wait_failure)b->latched=4;}
 static void us(void *context,uint32_t n)
 {struct bus *b=context;const struct event *e=event(b,3);if(e) CHECK(e->value==n);b->clock+=n;}
 static uint32_t gpio(void *context,int level)
@@ -396,6 +416,60 @@ static void raw_reference_contamination(void)
     }
     puts("PASS contaminated raw references fail instead of becoming the baseline");
 }
+static void running_application_open(void)
+{
+    const struct fixture *f=NULL;
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i)
+        if(fixtures[i].model==FTE3600_MODEL_FT9361&&!fixtures[i].unconfirmed_stop) {f=&fixtures[i];break;}
+    CHECK(f);test_name="FT9361 live application fast open";
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *other=&fixtures[i];
+        if(other->unconfirmed_stop||other->model==FTE3600_MODEL_FW9369||other->model==FTE3600_MODEL_FT9361)continue;
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=other;b->mode=0x50;
+        b->application_probe=1;b->application_reject=1;
+        struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
+        struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        CHECK(status(s).model==other->model&&b->next==other->count);
+        fte3600_device_close(s);free(b);
+    }
+    /* Each physical identity/version predicate must fail closed into the
+     * original frozen cold-start transcript, not publish a guessed profile. */
+    for(int reject=0;reject<=5;++reject) {
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+        b->application_probe=1;b->application_reject=reject;
+        struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
+        struct fte3600_device_session *s=NULL;
+        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+        struct fte3600_device_status r=status(s);
+        CHECK(r.model==FTE3600_MODEL_FT9361&&r.startup_complete&&r.calibration_complete);
+        CHECK(b->next==f->count&&b->application_reads==(unsigned)(reject?reject:5)&&b->application_wakes==2);
+        CHECK(!r.image_available&&!r.image_sequence);
+        if(!reject)CHECK(b->calls<100&&!b->uploads);
+        success(fte3600_device_arm(s),s);success(fte3600_device_irq(s),s);
+        CHECK(status(s).image_available&&status(s).image_sequence==1&&b->frames==1);
+        fte3600_device_close(s);free(b);
+    }
+    for(int missing=0;missing<=1;++missing) {
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;
+        struct fte3600_device_config c=config(b,!missing);c.prefer_running_application=1;
+        if(!missing)c.legacy_firmware_model=FTE3600_MODEL_FT9348;
+        struct fte3600_device_session *s=NULL;success(fte3600_device_create(&c,&s),s);
+        CHECK(fte3600_device_start(s)==(missing?FTE3600_DEVICE_MISSING_FIRMWARE:FTE3600_DEVICE_FIRMWARE_MISMATCH));
+        CHECK(!status(s).startup_complete&&!status(s).image_available&&!b->uploads);
+        fte3600_device_close(s);free(b);
+    }
+    struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;b->application_io_error=1;
+    struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
+    struct fte3600_device_session *s=NULL;success(fte3600_device_create(&c,&s),s);
+    CHECK(fte3600_device_start(s)==FTE3600_DEVICE_PLATFORM_ERROR);
+    CHECK(status(s).state==FTE3600_DEVICE_FAULT&&b->application_reads==1&&b->next==0);
+    CHECK(!status(s).startup_complete&&!status(s).image_available);
+    /* Explicit recovery of this fault must use the complete cold transcript. */
+    b->application_io_error=0;success(fte3600_device_start(s),s);CHECK(b->next==f->count);
+    fte3600_device_close(s);free(b);
+    puts("PASS live FT9361 fast open, capture, identity/version fallback, firmware binding and I/O recovery");
+}
 int main(void)
 {
     /* FW9369 now requires physical contact/release event scripts. Its full
@@ -404,5 +478,5 @@ int main(void)
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         if(!fixtures[i].unconfirmed_stop && fixtures[i].model!=FTE3600_MODEL_FW9369)scenario(&fixtures[i]);
     }
-    raw_array_edges();raw_reference_contamination();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
+    running_application_open();raw_array_edges();raw_reference_contamination();missing_firmware();incomplete_calibration();refuse_guessed_firmware();legacy_terminal_recovery_errors();puts("PASS missing/mismatched firmware; real start→arm→capture, baseline reuse, geometry, cancel, failure and recovery");return 0;
 }

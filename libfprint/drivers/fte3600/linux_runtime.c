@@ -328,7 +328,7 @@ fte3600_linux_runtime_open (
   diagnostic_clear (d);
   if(out)
     *out = NULL;
-  if(!out || !c)
+  if(!out || !c || c->fast_open > 1)
     return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
   if(cancel && g_cancellable_is_cancelled (cancel))
     return result (d, FTE3600_RUNTIME_CANCELLED, ECANCELED, FTE3600_DEVICE_CANCELLED);
@@ -362,6 +362,7 @@ fte3600_linux_runtime_open (
     }
   end (r);
   r->device.io = *fte3600_linux_board_callbacks (r->board);
+  r->device.prefer_running_application = c->fast_open;
   rc = fte3600_linux_runtime_start (r, cancel, d);
   if(rc)
     goto fail;

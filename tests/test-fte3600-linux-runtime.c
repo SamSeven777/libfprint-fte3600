@@ -38,6 +38,7 @@ static uint32_t runtime_spi(uint8_t *data,size_t length)
 static void runtime_gpio(int level) { CHECK(!gpio(runtime_bus,level)); }
 static void runtime_sleep(uint64_t ns)
 {
+    if(runtime_bus->application_probe) {runtime_bus->clock+=ns/1000;return;}
     if(runtime_bus->next<runtime_bus->fixture->count||wait_remaining) {
         if(!wait_remaining) {
             const struct event *e=&runtime_bus->fixture->events[runtime_bus->next++];
@@ -432,6 +433,30 @@ static void legacy_chip_select_negotiation(void)
     CHECK(!fte3600_linux_runtime_close(r,&d)&&fake.mode==0&&fd_count()==before);cs_teardown();
     puts("runtime CS: FT9338 checked family startup, firmware gate and capture passed");
 }
+static void fast_open_firmware_gate(void)
+{
+    const struct fixture *f=NULL;
+    for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i)
+        if(fixtures[i].model==FTE3600_MODEL_FT9361&&!fixtures[i].unconfirmed_stop) {f=&fixtures[i];break;}
+    CHECK(f);test_name="runtime fast open keeps verified firmware gate";
+    unsigned before=fd_count();setup_bus(f);runtime_bus->application_probe=1;
+    struct fte3600_linux_runtime_config c=runtime_config();c.fast_open=1;
+    struct fte3600_linux_runtime *r=NULL;struct fte3600_linux_runtime_diagnostic d;
+    CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_FIRMWARE);
+    CHECK(!r&&d.system_error==ENOENT);
+    CHECK(runtime_bus->application_reads==5&&!runtime_bus->uploads&&fd_count()==before);
+    teardown_bus();
+    setup_bus(f);runtime_bus->application_probe=1;fake.stale_spi=1;
+    CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_IO);
+    CHECK(!r&&runtime_bus->application_reads<=1&&!runtime_bus->uploads&&fd_count()==before);
+    teardown_bus();reset_fake(1);
+    GCancellable *cancel=g_cancellable_new();g_cancellable_cancel(cancel);
+    setup_bus(f);runtime_bus->application_probe=1;
+    CHECK(fte3600_linux_runtime_open(&c,cancel,&r,&d)==FTE3600_RUNTIME_CANCELLED);
+    CHECK(!r&&!runtime_bus->application_reads&&fd_count()==before);
+    teardown_bus();g_object_unref(cancel);
+    puts("runtime fast open: verified firmware, stale generation and cancellation gates passed");
+}
 int main(void)
 {
     CHECK(board_suite_main()==0);reset_fake(1);pairing();verified_firmware();
@@ -442,7 +467,7 @@ int main(void)
         if(!fixtures[i].unconfirmed_stop&&(is_legacy(&fixtures[i])||fixtures[i].model==FTE3600_MODEL_FT9368))
             supplied_firmware_case(&fixtures[i]);
     for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i) if(fixtures[i].model==FTE3600_MODEL_FT9365) { threaded_cancel(&fixtures[i]);break; }
-    rejected_startups();chip_select_negotiation();legacy_chip_select_negotiation();
+    rejected_startups();chip_select_negotiation();legacy_chip_select_negotiation();fast_open_firmware_gate();
     CHECK(sync_pairs>0);
     printf("runtime: %u release/sync pairs passed syscall-order guard through full startup and lifecycle LOAD\n",sync_pairs);
     puts("runtime: strict pairing, verified firmware, actual startup/capture, timeout, fault/reopen and cross-thread cancellation passed");

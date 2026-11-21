@@ -50,6 +50,10 @@ struct fte3600_device_config
   struct fte3600_factory_integration_input startup;
   /* Required identity binding for startup.firmware; UNKNOWN if absent. */
   enum fte3600_factory_model legacy_firmware_model;
+  /* Linux warm-open policy: qualify a running FT9361 application using
+   * fresh ready/geometry/version replies before trying the cold scanner.
+   * Firmware remains mandatory and is supplied by the verified loader. */
+  unsigned prefer_running_application;
 };
 enum fte3600_device_error {
   FTE3600_DEVICE_OK,

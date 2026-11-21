@@ -247,7 +247,8 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
     goto out;
   if (work->action == FPI_DEVICE_ACTION_OPEN || !self->runtime)
     {
-      struct fte3600_linux_runtime_config config = { .spidev_path = work->resource };
+      struct fte3600_linux_runtime_config config = { .spidev_path = work->resource,
+                                                    .fast_open = work->action == FPI_DEVICE_ACTION_OPEN };
       struct fte3600_device_status status;
       Fte3600AuthIdentity opened_identity;
       if (fte3600_linux_runtime_open (&config, cancel, &self->runtime, &diag))
