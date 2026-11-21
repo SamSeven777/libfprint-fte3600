@@ -8,7 +8,7 @@
  *
  * Build (repo root, after ninja -C build):
  *   gcc -O1 -o build/fte3600-match-lab tools/fte3600-match-lab.c \
- *     -include fte3600-build-config.h -DFTE3600_ENABLE_PERSONAL_AUTH=1 -DFTE3600_ENABLE_IPA_AUTH=0 \
+ *     -include fte3600-build-config.h -DFTE3600_ENABLE_PERSONAL_AUTH=1 \
  *     -Ibuild/libfprint/drivers/fte3600 \
  *     -Ilibfprint/drivers/fte3600/sam7-brisk/libfprint/drivers \
  *     -Ilibfprint/drivers/fte3600/sam7-brisk/libfprint/matchers/brisk \

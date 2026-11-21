@@ -9,6 +9,21 @@ persistent prints, verification and identification through libfprint/fprintd.
 Implemented profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369
 and FT9769. Tested devices and revisions are listed below.
 
+## Branches and matching algorithms
+
+`main` uses BRISK for enrollment, verification and identification. IPA matcher
+sources and their standalone tests are maintained on
+[`research/algorithms`](https://github.com/SamSeven777/libfprint-fte3600/tree/research/algorithms),
+which is the starting point for algorithm experiments and comparisons.
+The research branch retains the existing IPA core; IPA and BRISK fusion is
+not yet integrated into the current driver's authentication flow.
+
+Both branches include the FT9361 fast-open path. `main` contains no IPA core,
+tests or build options. See [contribution guidance](CONTRIBUTING.md) for branch use.
+Fast open qualifies running FT9361 applications only; other profiles use full
+initialization. Hardware timing was measured on the One-Netbook A1; see
+[fast-open validation](docs/fte3600/fast-open-validation.md) for checks and limits.
+
 ## Hardware reports
 
 | Device | Sensor | Reported results |

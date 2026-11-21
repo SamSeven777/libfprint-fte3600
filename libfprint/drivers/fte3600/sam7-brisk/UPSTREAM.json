@@ -2,9 +2,9 @@
   "repository": "https://github.com/SamSeven777/libfprint-fte3600",
   "commit": "7e12c09abbd53516076b6d67a480003dc272cc8e",
   "license": "LGPL-2.1-or-later (preserve each original file notice and COPYING)",
-  "source": "Exact Git objects from the upstream commit, not the modified research working tree. Remote main independently resolves to the same commit on 2026-10-12.",
-  "scope": "BRISK core, FTE3600 policy/profile adapter, one identity type header, and upstream synthetic tests only. No vendor matcher, firmware, protocol implementation, IPA, or Pocket4 adapter.",
-  "modifications": "None to upstream files.",
+  "source": "Imported from exact Git objects at the upstream commit. Local changes are listed in modifications.",
+  "scope": "BRISK core, FTE3600 policy/profile adapter, one identity type header, and upstream synthetic tests only. No vendor matcher, firmware, protocol implementation, or Pocket4 adapter.",
+  "modifications": "Removed unused matcher compatibility switches from libfprint/drivers/fte3600-build-config.h. BRISK extraction, matching and authentication policy are unchanged. The modified file records both upstream and local hashes.",
   "provenance_limit": "Upstream authors state independent implementation of published techniques and a public-seed descriptor table. This is attributed provenance, not independent reconstruction of their development history or a patent clearance conclusion.",
   "files": [
     {
@@ -63,9 +63,12 @@
     },
     {
       "path": "libfprint/drivers/fte3600-build-config.h",
-      "size_bytes": 706,
-      "sha256": "8c398fb501e433499eb3f8a80b0aa0e1df8b379320134beee9f4721ac3742311",
-      "git_blob": "68420f0a60f9b9b4b2ac702f6eb506ba750912e5"
+      "size_bytes": 368,
+      "sha256": "770075a20cbe056239ac05112dd5e292b542038a71f6b0da5a04b157b1f31c5b",
+      "git_blob": "70eca1f14db2304fa911e6d8b7c007db43e08e02",
+      "upstream_size_bytes": 706,
+      "upstream_sha256": "8c398fb501e433499eb3f8a80b0aa0e1df8b379320134beee9f4721ac3742311",
+      "upstream_git_blob": "68420f0a60f9b9b4b2ac702f6eb506ba750912e5"
     },
     {
       "path": "libfprint/drivers/fte3600-sensor.h",
