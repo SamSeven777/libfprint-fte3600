@@ -19,6 +19,8 @@ jobs:
           pkgconf-pkg-config glib2-devel libgusb-devel libgudev-devel
           systemd systemd-devel cairo-devel umockdev umockdev-devel
       - uses: actions/checkout@v6
+      - name: Check standalone BRISK and IPA cores
+        run: ./scripts/check-fte3600-algorithms.sh
       - name: Check production and separate synthetic API builds
         run: ./scripts/check-fte3600.sh
 
@@ -38,6 +40,8 @@ jobs:
             libudev-dev systemd systemd-dev libcairo2-dev \
             umockdev libumockdev-dev linux-headers-generic
       - uses: actions/checkout@v6
+      - name: Check standalone BRISK and IPA cores
+        run: ./scripts/check-fte3600-algorithms.sh
       - name: Build ACPI reset and IRQ glue
         run: |
           kernel_headers=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)

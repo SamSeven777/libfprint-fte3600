@@ -9,6 +9,18 @@ persistent prints, verification and identification through libfprint/fprintd.
 Implemented profiles: FT9338, FT9348, FT9361, FT9536, FT9365, FT9368, FW9369
 and FT9769. Tested devices and revisions are listed below.
 
+## Algorithm research
+
+This is `research/algorithms`, retaining BRISK and IPA cores and standalone
+synthetic tests. Run `./scripts/check-fte3600-algorithms.sh` to check both cores.
+The driver still uses BRISK; the old IPA + BRISK fusion is not integrated.
+See [the research guide](docs/fte3600/algorithm-research.md).
+
+[`main`](https://github.com/SamSeven777/libfprint-fte3600/tree/main) is the
+BRISK-only driver branch. Both branches retain the FT9361 fast-open path.
+The fast path qualifies FT9361 applications only; other profiles use full
+initialization. See [fast-open validation](docs/fte3600/fast-open-validation.md).
+
 ## Hardware reports
 
 | Device | Sensor | Reported results |
