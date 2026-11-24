@@ -435,27 +435,28 @@ static void legacy_chip_select_negotiation(void)
 }
 static void fast_open_firmware_gate(void)
 {
-    const struct fixture *f=NULL;
-    for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i)
-        if(fixtures[i].model==FTE3600_MODEL_FT9361&&!fixtures[i].unconfirmed_stop) {f=&fixtures[i];break;}
-    CHECK(f);test_name="runtime fast open keeps verified firmware gate";
-    unsigned before=fd_count();setup_bus(f);runtime_bus->application_probe=1;
-    struct fte3600_linux_runtime_config c=runtime_config();c.fast_open=1;
-    struct fte3600_linux_runtime *r=NULL;struct fte3600_linux_runtime_diagnostic d;
-    CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_FIRMWARE);
-    CHECK(!r&&d.system_error==ENOENT);
-    CHECK(runtime_bus->application_reads==5&&!runtime_bus->uploads&&fd_count()==before);
-    teardown_bus();
-    setup_bus(f);runtime_bus->application_probe=1;fake.stale_spi=1;
-    CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_IO);
-    CHECK(!r&&runtime_bus->application_reads<=1&&!runtime_bus->uploads&&fd_count()==before);
-    teardown_bus();reset_fake(1);
-    GCancellable *cancel=g_cancellable_new();g_cancellable_cancel(cancel);
-    setup_bus(f);runtime_bus->application_probe=1;
-    CHECK(fte3600_linux_runtime_open(&c,cancel,&r,&d)==FTE3600_RUNTIME_CANCELLED);
-    CHECK(!r&&!runtime_bus->application_reads&&fd_count()==before);
-    teardown_bus();g_object_unref(cancel);
-    puts("runtime fast open: verified firmware, stale generation and cancellation gates passed");
+    for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i) {
+        const struct fixture *f=&fixtures[i];
+        if(!is_legacy(f)||f->unconfirmed_stop)continue;
+        test_name="runtime fast open keeps verified firmware gate";
+        unsigned before=fd_count();setup_bus(f);runtime_bus->application_probe=1;
+        struct fte3600_linux_runtime_config c=runtime_config();c.fast_open=1;
+        struct fte3600_linux_runtime *r=NULL;struct fte3600_linux_runtime_diagnostic d;
+        CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_FIRMWARE);
+        CHECK(!r&&d.system_error==ENOENT);
+        CHECK(runtime_bus->application_reads==5&&!runtime_bus->uploads&&fd_count()==before);
+        teardown_bus();
+        setup_bus(f);runtime_bus->application_probe=1;fake.stale_spi=1;
+        CHECK(fte3600_linux_runtime_open(&c,NULL,&r,&d)==FTE3600_RUNTIME_IO);
+        CHECK(!r&&runtime_bus->application_reads<=1&&!runtime_bus->uploads&&fd_count()==before);
+        teardown_bus();reset_fake(1);
+        GCancellable *cancel=g_cancellable_new();g_cancellable_cancel(cancel);
+        setup_bus(f);runtime_bus->application_probe=1;
+        CHECK(fte3600_linux_runtime_open(&c,cancel,&r,&d)==FTE3600_RUNTIME_CANCELLED);
+        CHECK(!r&&!runtime_bus->application_reads&&fd_count()==before);
+        teardown_bus();g_object_unref(cancel);
+    }
+    puts("runtime fast open: four legacy profiles retain verified firmware, stale generation and cancellation gates");
 }
 int main(void)
 {

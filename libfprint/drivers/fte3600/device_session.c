@@ -398,8 +398,9 @@ identify_ready (struct fte3600_device_session *s)
 
 /* A healthy legacy application already identifies itself without the word
  * and byte scanners' reset/retry rounds. This is live qualification, never
- * a cached assertion of readiness. Keep it specific to the FT9361 profile
- * measured on hardware; all other replies continue through cold discovery.
+ * a cached assertion of readiness. The four legacy profiles use the same
+ * registers and initializer; qualify their exact geometry and version pairs.
+ * All other replies continue through cold discovery.
  * Linux board callbacks check the physical identity and generation around
  * every transaction, including these reads. No reset or upload is attempted
  * until a positive match, and transport/cancellation failures never fall back. */
@@ -407,10 +408,11 @@ static enum fte3600_device_error
 running_application (struct fte3600_device_session *s)
 {
   static const uint8_t registers[] = {0x14, 0x15, 0x1a, 0x3c};
-  const struct fte3600_legacy_geometry geometry = fte3600_legacy_geometry (FTE3600_FT9361);
-  const struct fte3600_legacy_boot_profile profile = fte3600_legacy_boot_defaults (FTE3600_FT9361);
-  const uint8_t expected[] = {(uint8_t) geometry.width, (uint8_t) geometry.height,
-                              profile.expected_firmware, profile.expected_agc};
+  static const enum fte3600_factory_model models[] = {
+    FTE3600_MODEL_FT9338, FTE3600_MODEL_FT9348,
+    FTE3600_MODEL_FT9361, FTE3600_MODEL_FT9536
+  };
+  uint8_t values[sizeof registers];
   uint8_t ready[] = {0x10, 0xef, 0x20, 0, 0, 0};
   uint8_t idle[] = {0x70};
 
@@ -433,17 +435,25 @@ running_application (struct fte3600_device_session *s)
       uint8_t reply[] = {0x10, 0xef, registers[i], 0, 0};
       if (failed (spi (s, reply, sizeof reply)))
         return FTE3600_DEVICE_PLATFORM_ERROR;
-      if (reply[4] != expected[i])
-        return FTE3600_DEVICE_NOT_READY;
+      values[i] = reply[4];
     }
 
-  s->factory.selected_model = FTE3600_MODEL_FT9361;
-  s->startup_result.model = FTE3600_MODEL_FT9361;
-  s->startup_result.sensor_constructed = 1;
-  /* The ordinary initializer still checks firmware binding, wakes/configures
-   * the application and arms acquisition. A live application does not waive
-   * firmware verification or establish a usable capture by itself. */
-  return identify_ready (s);
+  for (size_t i = 0; i < sizeof models / sizeof models[0]; ++i)
+    {
+      const enum fte3600_sensor sensor = legacy_sensor (models[i]);
+      const struct fte3600_legacy_geometry geometry = fte3600_legacy_geometry (sensor);
+      const struct fte3600_legacy_boot_profile profile = fte3600_legacy_boot_defaults (sensor);
+      if (values[0] != geometry.width || values[1] != geometry.height ||
+          values[2] != profile.expected_firmware || values[3] != profile.expected_agc)
+        continue;
+      s->factory.selected_model = models[i];
+      s->startup_result.model = models[i];
+      s->startup_result.sensor_constructed = 1;
+      /* Keep firmware binding, ordinary initialization and acquisition setup.
+       * A running application alone does not establish a usable capture. */
+      return identify_ready (s);
+    }
+  return FTE3600_DEVICE_NOT_READY;
 }
 
 enum fte3600_device_error

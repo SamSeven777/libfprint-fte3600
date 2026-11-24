@@ -63,7 +63,12 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
         if(n==1&&tx[0]==0x70) {CHECK(b->application_wakes<2);++b->application_wakes;return 0;}
         CHECK(b->application_wakes==2);
         static const uint8_t registers[]={0x20,0x14,0x15,0x1a,0x3c};
-        static const uint8_t values[]={0xa5,64,80,0x30,0x31};
+        /* Independent signatures from the frozen profile fixtures. */
+        static const uint8_t firmware[]={0,0x40,0x30,0x30,0,0x23};
+        static const uint8_t agc[]={0,0x10,0x31,0x31,0,0x13};
+        unsigned model=b->fixture->model;
+        const uint8_t values[]={0xa5,(uint8_t)b->fixture->width,(uint8_t)b->fixture->height,
+            is_legacy(b->fixture)?firmware[model]:0,is_legacy(b->fixture)?agc[model]:0};
         unsigned at=b->application_reads++;
         CHECK(at<5&&n==(at?5:6)&&tx[0]==0x10&&tx[1]==0xef&&tx[2]==registers[at]);
         if (b->application_io_error) {
@@ -71,9 +76,12 @@ static uint32_t spi(void *context,uint8_t *tx,size_t n)
         }
         tx[4]=values[at];if(!at)tx[5]=0x5a;
         if (b->application_reject==(int)at+1) {
-            tx[4]^=1;b->application_probe=0;
-        } else if (at==4) {
-            b->application_probe=0;b->next=b->fixture->count;
+            tx[4]^=1;
+        }
+        if (!at&&b->application_reject==6)tx[5]^=1;
+        if ((!at&&(b->application_reject==1||b->application_reject==6))||at==4) {
+            b->application_probe=0;
+            if(!b->application_reject&&is_legacy(b->fixture))b->next=b->fixture->count;
         }
         return 0;
     }
@@ -418,57 +426,59 @@ static void raw_reference_contamination(void)
 }
 static void running_application_open(void)
 {
-    const struct fixture *f=NULL;
-    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i)
-        if(fixtures[i].model==FTE3600_MODEL_FT9361&&!fixtures[i].unconfirmed_stop) {f=&fixtures[i];break;}
-    CHECK(f);test_name="FT9361 live application fast open";
+    test_name="legacy live application fast open";
     for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
         const struct fixture *other=&fixtures[i];
-        if(other->unconfirmed_stop||other->model==FTE3600_MODEL_FW9369||other->model==FTE3600_MODEL_FT9361)continue;
+        if(other->unconfirmed_stop||other->model==FTE3600_MODEL_FW9369||is_legacy(other))continue;
         struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=other;b->mode=0x50;
-        b->application_probe=1;b->application_reject=1;
+        b->application_probe=1;
         struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
         struct fte3600_device_session *s=NULL;
         success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
         CHECK(status(s).model==other->model&&b->next==other->count);
         fte3600_device_close(s);free(b);
     }
-    /* Each physical identity/version predicate must fail closed into the
-     * original frozen cold-start transcript, not publish a guessed profile. */
-    for(int reject=0;reject<=5;++reject) {
-        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
-        b->application_probe=1;b->application_reject=reject;
+    for(size_t i=0;i<sizeof(fixtures)/sizeof(fixtures[0]);++i) {
+        const struct fixture *f=&fixtures[i];
+        if(!is_legacy(f)||f->unconfirmed_stop)continue;
+        test_name=f->name;
+        /* Each physical identity/version predicate must fail closed into the
+         * original frozen cold-start transcript, not publish a guessed profile. */
+        for(int reject=0;reject<=6;++reject) {
+            struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->mode=0x50;
+            b->application_probe=1;b->application_reject=reject;
+            struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
+            struct fte3600_device_session *s=NULL;
+            success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
+            struct fte3600_device_status r=status(s);
+            CHECK(r.model==f->model&&r.chip_id==f->chip&&r.width==f->width&&r.height==f->height&&r.startup_complete&&r.calibration_complete);
+            CHECK(b->next==f->count&&b->application_reads==(unsigned)((reject==1||reject==6)?1:5)&&b->application_wakes==2);
+            CHECK(!r.image_available&&!r.image_sequence);
+            if(!reject)CHECK(b->calls<100&&!b->uploads);
+            success(fte3600_device_arm(s),s);success(fte3600_device_irq(s),s);
+            CHECK(status(s).image_available&&status(s).image_sequence==1&&b->frames==1);
+            fte3600_device_close(s);free(b);
+        }
+        for(int missing=0;missing<=1;++missing) {
+            struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;
+            struct fte3600_device_config c=config(b,!missing);c.prefer_running_application=1;
+            if(!missing)c.legacy_firmware_model=f->model==FTE3600_MODEL_FT9348?FTE3600_MODEL_FT9361:FTE3600_MODEL_FT9348;
+            struct fte3600_device_session *s=NULL;success(fte3600_device_create(&c,&s),s);
+            CHECK(fte3600_device_start(s)==(missing?FTE3600_DEVICE_MISSING_FIRMWARE:FTE3600_DEVICE_FIRMWARE_MISMATCH));
+            CHECK(!status(s).startup_complete&&!status(s).image_available&&!b->uploads);
+            fte3600_device_close(s);free(b);
+        }
+        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;b->application_io_error=1;
         struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
-        struct fte3600_device_session *s=NULL;
-        success(fte3600_device_create(&c,&s),s);success(fte3600_device_start(s),s);
-        struct fte3600_device_status r=status(s);
-        CHECK(r.model==FTE3600_MODEL_FT9361&&r.startup_complete&&r.calibration_complete);
-        CHECK(b->next==f->count&&b->application_reads==(unsigned)(reject?reject:5)&&b->application_wakes==2);
-        CHECK(!r.image_available&&!r.image_sequence);
-        if(!reject)CHECK(b->calls<100&&!b->uploads);
-        success(fte3600_device_arm(s),s);success(fte3600_device_irq(s),s);
-        CHECK(status(s).image_available&&status(s).image_sequence==1&&b->frames==1);
-        fte3600_device_close(s);free(b);
-    }
-    for(int missing=0;missing<=1;++missing) {
-        struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;
-        struct fte3600_device_config c=config(b,!missing);c.prefer_running_application=1;
-        if(!missing)c.legacy_firmware_model=FTE3600_MODEL_FT9348;
         struct fte3600_device_session *s=NULL;success(fte3600_device_create(&c,&s),s);
-        CHECK(fte3600_device_start(s)==(missing?FTE3600_DEVICE_MISSING_FIRMWARE:FTE3600_DEVICE_FIRMWARE_MISMATCH));
-        CHECK(!status(s).startup_complete&&!status(s).image_available&&!b->uploads);
+        CHECK(fte3600_device_start(s)==FTE3600_DEVICE_PLATFORM_ERROR);
+        CHECK(status(s).state==FTE3600_DEVICE_FAULT&&b->application_reads==1&&b->next==0);
+        CHECK(!status(s).startup_complete&&!status(s).image_available);
+        /* Explicit recovery of this fault must use the complete cold transcript. */
+        b->application_io_error=0;success(fte3600_device_start(s),s);CHECK(b->next==f->count);
         fte3600_device_close(s);free(b);
     }
-    struct bus *b=calloc(1,sizeof(*b));CHECK(b);b->fixture=f;b->application_probe=1;b->application_io_error=1;
-    struct fte3600_device_config c=config(b,1);c.prefer_running_application=1;
-    struct fte3600_device_session *s=NULL;success(fte3600_device_create(&c,&s),s);
-    CHECK(fte3600_device_start(s)==FTE3600_DEVICE_PLATFORM_ERROR);
-    CHECK(status(s).state==FTE3600_DEVICE_FAULT&&b->application_reads==1&&b->next==0);
-    CHECK(!status(s).startup_complete&&!status(s).image_available);
-    /* Explicit recovery of this fault must use the complete cold transcript. */
-    b->application_io_error=0;success(fte3600_device_start(s),s);CHECK(b->next==f->count);
-    fte3600_device_close(s);free(b);
-    puts("PASS live FT9361 fast open, capture, identity/version fallback, firmware binding and I/O recovery");
+    puts("PASS four legacy fast-open profiles, capture, identity/version fallback, firmware binding and I/O recovery");
 }
 int main(void)
 {

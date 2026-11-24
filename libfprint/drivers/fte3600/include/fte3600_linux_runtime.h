@@ -43,7 +43,7 @@ struct fte3600_linux_runtime_config
   /* Exact absolute spidev path supplied by libfprint; no hidraw/USB route.
    * Test roots default to /sys and /dev; all normal board checks still run. */
   const char *spidev_path, *sys_root, *dev_root, *firmware_dir;
-  /* Opt in to waking and freshly qualifying an FT9361 application.
+  /* Opt in to waking and freshly qualifying an FT9338/FT9348/FT9361/FT9536 application.
    * Unknown or mismatched replies retain the complete cold path. */
   unsigned fast_open;
 };
@@ -65,8 +65,8 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_discover (const struct ft
                                                                  struct fte3600_linux_runtime_diagnostic *);
 /* Synchronous, single serialized owner (e.g. a GTask worker). open claims and
  * performs actual startup, returning measured identity/geometry. With fast_open,
- * a running FT9361 application may use qualified warm startup; all other
- * applications follow full cold discovery. The FT9361 fast path retains
+ * running FT9338/FT9348/FT9361/FT9536 applications may use qualified warm
+ * startup; all other applications follow full cold discovery. The fast path retains
  * mandatory verified firmware. It tries the opposite CS polarity once only
  * when native CS control is advertised
  * and startup reports unconfirmed identity without a transport failure. The

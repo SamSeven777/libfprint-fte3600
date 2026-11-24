@@ -18,11 +18,13 @@ which is the starting point for algorithm experiments and comparisons.
 The research branch retains the existing IPA core; IPA and BRISK fusion is
 not yet integrated into the current driver's authentication flow.
 
-Both branches include the FT9361 fast-open path. `main` contains no IPA core,
-tests or build options. See [contribution guidance](CONTRIBUTING.md) for branch use.
-Fast open qualifies running FT9361 applications only; other profiles use full
-initialization. Hardware timing was measured on the One-Netbook A1; see
-[fast-open validation](docs/fte3600/fast-open-validation.md) for checks and limits.
+`main` contains no IPA core, tests or build options. See
+[contribution guidance](CONTRIBUTING.md) for branch use.
+Fast open qualifies running FT9338, FT9348, FT9361 and FT9536 applications;
+other profiles use full initialization. FT9361 timing was measured on the
+One-Netbook A1. The other three fast-open profiles have synthetic coverage
+and await hardware validation; see
+[fast-open validation](docs/fte3600/fast-open-validation.md).
 
 ## Hardware reports
 
