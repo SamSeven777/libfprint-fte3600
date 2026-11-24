@@ -361,9 +361,65 @@ test_enroll_recalibration_progress (void)
   g_assert_cmpuint (retry_count, ==, 2);
   g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
   g_assert_cmpuint (trace_count ("open"), ==, 1);
+  g_assert_cmpuint (trace_count ("cold-open-required"), ==, 1);
+  g_assert_cmpuint (trace_count ("fast-open-enabled"), ==, 0);
+  g_assert_cmpuint (trace_count ("fw9369-hint"), ==, 0);
   g_assert_cmpuint (trace_count ("close"), ==, 1);
   g_assert_true (fp_device_close_sync (device, NULL, &error));
   g_assert_no_error (error);
+}
+
+static void
+test_fw9369_hint_lifecycle (void)
+{
+  for (guint fault = 0; fault < 4; fault++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(FpContext) context = fp_context_new ();
+      FpDevice *device = only_device (context);
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      if (fault == 1 || fault == 2)
+        {
+          g_autoptr(GCancellable) cancel = g_cancellable_new ();
+          mode (fault == 1 ? "capture-fail" : "block");
+          if (fault == 2)
+            {
+              busy_device = device;
+              g_timeout_add (20, cancel_timeout, cancel);
+            }
+          g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, cancel, &error);
+          g_assert_null (image);
+          if (fault == 1)
+            g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+          else
+            g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+          g_clear_error (&error);
+          busy_device = NULL;
+        }
+      mode (fault == 3 ? "close-fail" : "fw9369");
+      gboolean closed = fp_device_close_sync (device, NULL, &error);
+      if (fault == 3)
+        {
+          g_assert_false (closed);
+          g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+          g_clear_error (&error);
+        }
+      else
+        {
+          g_assert_true (closed);
+          g_assert_no_error (error);
+        }
+      reset_trace ();
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (trace_count ("fw9369-hint"), ==, fault ? 0 : 1);
+      g_assert_cmpuint (trace_count ("fast-open-enabled"), ==, 1);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+    }
 }
 
 static void
@@ -1089,6 +1145,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fte3600/strip-release-timeout-recovery", "ft9769", test_release_timeout_recovery);
   g_test_add_func ("/fte3600/strip-retries", test_strip_retries);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
+  g_test_add_func ("/fte3600/fw9369-hint-lifecycle", test_fw9369_hint_lifecycle);
   g_test_add_func ("/fte3600/enroll-recalibration-progress", test_enroll_recalibration_progress);
   g_test_add_data_func ("/fte3600/calibration-failure/other-profile", GINT_TO_POINTER (FALSE),
                          test_calibration_failure_policy);

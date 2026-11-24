@@ -38,6 +38,16 @@ struct fte3600_linux_runtime_diagnostic
   uint32_t acpi_mode, last_configured_mode;
   unsigned cs_control, cs_retry_attempted;
 };
+/* Optional per-FpDevice identity hint. Contains no fds, baseline or readiness.
+ * Zero initialize; keep only through a healthy close. open consumes it and
+ * replaces it after successful FW9369 startup. Never persist it to disk. */
+struct fte3600_linux_runtime_hint
+{
+  char spi[64], gpio[64], uio[64];
+  uint64_t generation;
+  uint32_t acpi_mode;
+  unsigned valid, cs_control, cs_high;
+};
 struct fte3600_linux_runtime_config
 {
   /* Exact absolute spidev path supplied by libfprint; no hidraw/USB route.
@@ -46,6 +56,7 @@ struct fte3600_linux_runtime_config
   /* Opt in to waking and freshly qualifying an FT9338/FT9348/FT9361/FT9536 application.
    * Unknown or mismatched replies retain the complete cold path. */
   unsigned fast_open;
+  struct fte3600_linux_runtime_hint *fw9369_hint;
 };
 struct fte3600_linux_runtime_frame
 {
@@ -67,7 +78,10 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_discover (const struct ft
  * performs actual startup, returning measured identity/geometry. With fast_open,
  * running FT9338/FT9348/FT9361/FT9536 applications may use qualified warm
  * startup; all other applications follow full cold discovery. The fast path retains
- * mandatory verified firmware. It tries the opposite CS polarity once only
+ * mandatory verified firmware. A matching FW9369 hint permits reset, live
+ * 9362 ID confirmation and full fresh calibration without family discovery.
+ * Pair/generation mismatches use cold startup; failed opens clear the hint.
+ * It tries the opposite CS polarity once only
  * when native CS control is advertised
  * and startup reports unconfirmed identity without a transport failure. The
  * retry uses a fresh session; close restores the original ACPI mode.

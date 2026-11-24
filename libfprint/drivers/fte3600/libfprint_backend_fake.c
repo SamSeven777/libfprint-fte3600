@@ -72,6 +72,13 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
   g_autofree gchar *mode = read_mode (config->spidev_path);
 
   trace (config->spidev_path, "open");
+  trace (config->spidev_path, config->fast_open ? "fast-open-enabled" : "cold-open-required");
+  if (config->fw9369_hint)
+    {
+      if (config->fw9369_hint->valid)
+        trace (config->spidev_path, "fw9369-hint");
+      memset (config->fw9369_hint, 0, sizeof (*config->fw9369_hint));
+    }
   *out = NULL;
   if (g_cancellable_is_cancelled (cancel))
     return failure (diag, FTE3600_RUNTIME_CANCELLED);
@@ -111,6 +118,8 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
       runtime->status.model = FTE3600_MODEL_FT9338;
       runtime->status.chip_id = runtime->status.raw_id = 0x9338;
     }
+  if (config->fw9369_hint && runtime->status.model == FTE3600_MODEL_FW9369)
+    config->fw9369_hint->valid = 1;
   *out = runtime;
   return failure (diag, FTE3600_RUNTIME_OK);
 }

@@ -25,6 +25,7 @@ struct _FpiDeviceFte3600
   FpDevice                      parent;
   struct fte3600_linux_runtime *runtime;
   Fte3600AuthIdentity           identity;
+  struct fte3600_linux_runtime_hint fw9369_hint;
   Fte3600AuthEnrollment        *enrollment;
   GCancellable                 *worker_cancel;
   gboolean                      worker_active;
@@ -281,7 +282,8 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
   if (work->action == FPI_DEVICE_ACTION_OPEN || !self->runtime)
     {
       struct fte3600_linux_runtime_config config = { .spidev_path = work->resource,
-                                                    .fast_open = work->action == FPI_DEVICE_ACTION_OPEN };
+                                                    .fast_open = work->action == FPI_DEVICE_ACTION_OPEN,
+                                                    .fw9369_hint = &self->fw9369_hint };
       struct fte3600_device_status status;
       Fte3600AuthIdentity opened_identity;
       if (fte3600_linux_runtime_open (&config, cancel, &self->runtime, &diag))
@@ -457,6 +459,8 @@ out:
   error = auth_error (g_steal_pointer (&error));
   if (!error)
     g_cancellable_set_error_if_cancelled (cancel, &error);
+  if (hardware_failed || (error && error->domain != FP_DEVICE_RETRY))
+    self->fw9369_hint.valid = 0;
   if (error && error->domain != FP_DEVICE_RETRY)
     {
       self->recalibration_prompt = FALSE;

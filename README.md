@@ -21,7 +21,10 @@ not yet integrated into the current driver's authentication flow.
 `main` contains no IPA core, tests or build options. See
 [contribution guidance](CONTRIBUTING.md) for branch use.
 Fast open qualifies running FT9338, FT9348, FT9361 and FT9536 applications;
-other profiles use full initialization. FT9361 timing was measured on the
+this test branch also tries FW9369 identity reuse after a healthy close,
+with reset, live ID checks and full fresh calibration. It includes PR #13's
+bounded recovery. FW9369 timing and hardware behavior await testing.
+FT9361 timing was measured on the
 One-Netbook A1. The other three fast-open profiles have synthetic coverage
 and await hardware validation; see
 [fast-open validation](docs/fte3600/fast-open-validation.md).

@@ -18,6 +18,22 @@
 static struct bus *fw_bus;
 static uint64_t fw_wait_remaining;
 static struct {
+    unsigned pending, resets, reads, mismatch, fail_read, stale_reset;
+    unsigned sleeping;
+    size_t startup;
+    GCancellable *cancel;
+} fast;
+/* The existing frozen transcript's reset immediately precedes full startup.
+ * Locate its suffix so fast-open must replay every calibration transaction. */
+static size_t fw_startup_offset(const struct fixture *f)
+{
+    for(size_t i=0;i+6<f->count;++i)
+        if(f->events[i].kind==1 && f->events[i].value==1 &&
+           f->events[i+2].kind==1 && f->events[i+2].value==0 &&
+           f->events[i+4].kind==1 && f->events[i+4].value==1) return i+6;
+    CHECK(0);return 0;
+}
+static struct {
     uint16_t status, adc_value, warm_value, up_status, down_status;
     unsigned arm, bank_pending, up_arms, down_arms, adc_reads, user_frames, warm_frames;
     unsigned reset_levels[16], resets, recovering, recovery_frames, recovery_adc;
@@ -56,6 +72,17 @@ static void fw_automatic_arm(int startup)
 }
 static uint32_t fw_spi(uint8_t *data, size_t length)
 {
+    if(fast.pending) {
+        CHECK(fast.resets==3&&!fast.sleeping&&length==12);
+        const uint8_t command[]={4,0xfb,0x9a,0x8b,0,1};
+        CHECK(!memcmp(data,command,sizeof command));++fast.reads;
+        if(fast.fail_read==fast.reads)return UINT32_C(0xc0000185);
+        data[6]=0x93;data[7]=fast.mismatch==fast.reads?0x65:0x62;
+        if(fast.mismatch==fast.reads) {fast.pending=0;fw_bus->next=0;}
+        else if(fast.reads==2) {fast.pending=0;fw_bus->next=fast.startup;}
+        return 0;
+    }
+    if(fw_bus->application_probe)return spi(fw_bus,data,length);
     uint16_t at=length>=4?(uint16_t)(((data[2]&127u)<<8)|data[3]):0;
     if (fw_bus->next < fw_bus->fixture->count) {
         const struct event *next=&fw_bus->fixture->events[fw_bus->next];
@@ -144,6 +171,13 @@ static uint32_t fw_spi(uint8_t *data, size_t length)
 }
 static void fw_gpio(int level)
 {
+    if(fast.pending) {
+        CHECK(fast.resets<3&&level!=(fast.resets==1));++fast.resets;
+        if(fast.resets==3)fast.sleeping=0;
+        if(fast.cancel)g_cancellable_cancel(fast.cancel);
+        if(fast.stale_reset)fake.stale_gpio=1;
+        return;
+    }
     if (fw_bus->next < fw_bus->fixture->count) { CHECK(!gpio(fw_bus,level));return; }
     CHECK(hw.resets<G_N_ELEMENTS(hw.reset_levels));
     hw.reset_levels[hw.resets]=(unsigned)level;hw.reset_times[hw.resets++]=fake.clock_ms;
@@ -151,6 +185,7 @@ static void fw_gpio(int level)
 }
 static void fw_sleep(uint64_t ns)
 {
+    if(fast.pending||fw_bus->application_probe) {fw_bus->clock+=ns/1000;return;}
     if (fw_bus->next < fw_bus->fixture->count || fw_wait_remaining) {
         if (!fw_wait_remaining) {
             const struct event *e = &fw_bus->fixture->events[fw_bus->next++];
@@ -176,6 +211,7 @@ static void fw_setup(const struct fixture *f)
     fw_bus->fixture = f;
     fw_bus->mode = 0x50;
     fw_wait_remaining = 0;
+    memset(&fast,0,sizeof(fast));
     memset(&hw,0,sizeof(hw));hw.arm=1;hw.warm_value=2100;hw.up_status=4;hw.down_status=2;
     reset_fake(1);
     bus_spi = fw_spi;
@@ -433,6 +469,69 @@ static void policy_failures(const struct fixture *f)
         }
     }
 }
+static void fast_reopen(const struct fixture *f)
+{
+    test_name="FW9369 identity hint, C1 wake and fresh calibration";
+    struct fte3600_linux_runtime_hint seed={0};
+    char device[PATH_MAX];path(device,devroot,"spidev0.0");
+    struct fte3600_linux_runtime_config c={.spidev_path=device,.sys_root=sysroot,
+        .dev_root=devroot,.fw9369_hint=&seed};
+    struct fte3600_linux_runtime *r=NULL;
+    struct fte3600_linux_runtime_diagnostic d;
+    unsigned before=fd_count();
+    fw_setup(f);
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d)&&seed.valid);
+    CHECK(seed.generation==0&&!strcmp(seed.gpio,"gpiochip7"));
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);fw_teardown();
+
+    /* First two cases mismatch live identity; the remaining cases invalidate
+     * the cached generation, pair, mode, or disable optimization for recovery. */
+    for(unsigned scenario=0;scenario<8;++scenario) {
+        struct fte3600_linux_runtime_hint hint=seed;
+        c.fw9369_hint=&hint;c.fast_open=scenario!=7;
+        fw_setup(f);fast.startup=fw_startup_offset(f);
+        if(scenario<3) {
+            fast.pending=fast.sleeping=1;fast.mismatch=scenario;
+        } else {
+            if(scenario==3)write_value(glue,"fte3600_generation","1\n");
+            if(scenario==4)strcpy(hint.gpio,"gpiochip8");
+            if(scenario==5)hint.acpi_mode^=SPI_CPHA;
+            if(scenario==6)hint.valid=0;
+            if(c.fast_open) {fw_bus->application_probe=1;fw_bus->application_reject=1;}
+        }
+        CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d)&&hint.valid);
+        CHECK(fw_bus->next==f->count&&!fw_wait_remaining&&hw.startup_arms==1);
+        CHECK(fw_status(r).model==FTE3600_MODEL_FW9369&&fw_status(r).calibration_complete);
+        CHECK(fw_status(r).baseline_crc==3634&&!fw_status(r).image_sequence);
+        CHECK(scenario<3?fast.resets==3:!fast.resets);
+        CHECK(scenario<3?fast.reads==(scenario?scenario:2):!fast.reads);
+        hw.status=2;capture_ok(r,1);
+        CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);fw_teardown();
+        write_value(glue,"fte3600_generation","0\n");
+    }
+    for(unsigned fault=0;fault<4;++fault) {
+        struct fte3600_linux_runtime_hint hint=seed;
+        c.fw9369_hint=&hint;c.fast_open=1;
+        fw_setup(f);fast.startup=fw_startup_offset(f);fast.pending=fast.sleeping=1;
+        GCancellable *cancel=g_cancellable_new();
+        if(fault<2)fast.fail_read=fault+1;
+        if(fault==2)fast.stale_reset=1;
+        if(fault==3)fast.cancel=cancel;
+        CHECK(fte3600_linux_runtime_open(&c,cancel,&r,&d)!=FTE3600_RUNTIME_OK);
+        CHECK(!r&&!hint.valid&&!fw_bus->next&&fd_count()==before);
+        if(fault==3)CHECK(d.code==FTE3600_RUNTIME_CANCELLED);
+        else CHECK(d.code==FTE3600_RUNTIME_IO);
+        g_object_unref(cancel);fw_teardown();write_value(glue,"fte3600_generation","0\n");
+    }
+    /* Cached CS is restored before reset/ID, and ACPI mode on close. */
+    struct fte3600_linux_runtime_hint hint=seed;hint.cs_high=1;
+    c.fw9369_hint=&hint;
+    fw_setup(f);fast.startup=fw_startup_offset(f);fast.pending=fast.sleeping=1;
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(fake.mode==SPI_CS_HIGH&&hint.cs_high&&fast.reads==2);
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fake.mode==0&&fd_count()==before);fw_teardown();
+    puts("FW9369 fast reopen: C1 reset, live identity, full calibration/capture, cold fallback, stale/cancel/I/O and CS restoration passed");
+}
 #ifndef FTE3600_FW_RUNTIME_MAIN
 #define FTE3600_FW_RUNTIME_MAIN main
 #endif
@@ -443,7 +542,7 @@ int FTE3600_FW_RUNTIME_MAIN(void)
         if (fixtures[i].model==FTE3600_MODEL_FW9369) { f=&fixtures[i];break; }
     CHECK(f);test_name="public FW9369 runtime";fixture();
     unsigned before=fd_count();
-    quiet_detection(f);policy_failures(f);
+    fast_reopen(f);quiet_detection(f);policy_failures(f);
     continuous(f);release_failures(f);recovery(f);contact_and_close(f);
     CHECK(fd_count()==before);
     puts("public FW9369 runtime: causal quiet Down/Up, Linux event policy, queued/lost IRQ, recovery, cancellation/deadlines, policy failures and eight captures passed");

@@ -1,4 +1,4 @@
-# Legacy fast-open validation
+# Fast-open validation
 
 ## FT9361 hardware measurements, 2026-11-21
 
@@ -60,3 +60,83 @@ open times, and results in [#16](https://github.com/SamSeven777/libfprint-fte360
 A running application can qualify after a reboot or resume; otherwise the
 same open falls back to full initialization. The FT9361 timings above do not
 predict timings on another chip.
+
+## FW9369 test branch: identity reuse with fresh calibration
+
+The [older Pocket 3 report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6006608845)
+contains a patch against `549767a`. That backend retained identity, glue path,
+generation and CS polarity across close, then ran normal initialization. Its
+C1 deep sleep made the next direct ID read return zero; the contributor fixed
+that by resetting before initialization. Repeated opens measured 1.38–1.39 s,
+with verification and S3 resume reported working. A
+[later report](https://github.com/SamSeven777/libfprint-fte3600/issues/2#issuecomment-6212129012)
+measured approximately 3.9 s from lock-screen authentication start to the PAM
+prompt on `6efa376`, compared with 1.4–2 s on `1270b39`.
+
+Current main uses separate Linux runtime/session objects and reconstructs its
+calibration state on every open. Close frees those objects and releases the
+board resources; it does not implement the old backend's C1 shutdown command.
+The old SSM patch therefore cannot be applied directly. This branch ports its
+identity-reuse and reset-before-ID ordering, retaining full fresh calibration:
+
+- A successful FW9369 open records only the SPI/GPIO/UIO pair, generation,
+  ACPI mode, CS capability and working CS polarity in the owning FpDevice.
+- A healthy close releases every hardware handle. A subsequent normal open
+  with the same pair and generation restores the confirmed CS polarity,
+  performs the existing H10/L20/H reset plus 10 ms settling, and reads SRAM
+  `0x1a8b` twice. Both replies must be `0x9362`.
+- Confirmed identity skips the generic byte/word/legacy family scanner.
+  The complete existing FW9369 startup, SPI negotiation, FDT calibration,
+  image baseline and automatic Down arm still run with new host state.
+- A missing/stale hint or different live ID uses full discovery. Transport,
+  cancellation and stale-generation errors terminate the open. An alternate
+  CS retry uses a new cold session at the opposite current polarity. Calibration failure never triggers a
+  speculative fast retry.
+- PR #13's bounded calibration recovery is included. Failed actions,
+  cancellation and failed close invalidate the hint. Recovery reopens remain
+  cold and retain the remove-finger / recalibrate / touch-again sequence.
+
+This differs from the [13 ms experiment in #12](https://github.com/SamSeven777/libfprint-fte3600/issues/12):
+it does not keep a calibrated runtime open across close, or retain calibration
+buffers. That experiment was withdrawn after higher idle package power and
+cancellation limitations. This branch has no hardware timing or power result.
+
+### Hardware test
+
+Use `feature/fw9369-fast-open`. Its merge commit `18147ef` combines main
+`96997d7` with PR #13 (`4decc0c`) and is the comparison baseline before the new
+optimization. Build the baseline and branch head with the same options from
+[the installation guide](install.md), recording each full commit. Keep the
+existing kernel/resource setup and matcher settings for both runs.
+
+With other sensor clients and fprintd stopped, run from each built checkout:
+
+```sh
+git rev-parse HEAD
+uname -r
+sudo ./scripts/fte3600-tool.sh bench 3
+```
+
+Restore fprintd after benchmarking. The first open in each new benchmark
+process has no identity hint and takes the ordinary path; cycles two and three
+exercise reuse. After reboot and suspend/resume, repeat the benchmark. A new
+benchmark process always starts without a hint. To test generation invalidation
+within one FpDevice, keep the same fprintd process running across suspend and
+perform verification before and after it.
+
+For enrollment, verification and PAM testing, install the candidate library
+using the normal installation steps and restart fprintd so it loads that build.
+Report first/repeated open times, repeated positive verification, enrollment,
+lock-screen/PAM behavior, and suspend/resume. Also retest #12's early-touch
+recovery and cancellation followed by another attempt. Confirm that accepted
+enrollment stages survive a recovery retry. Compare idle power after closing
+with the baseline if power measurements are available.
+
+The production-linked synthetic tests replay the existing full calibration
+transcript after the new reset and two ID reads, then capture an image. They
+also cover first/second ID mismatch, generation/pair/mode invalidation, cold
+recovery, I/O failure, cancellation, stale reset and CS restoration. Public API
+tests cover healthy-close hint reuse, invalidation after failure/cancellation,
+and PR #13 enrollment recovery. A cached-CS regression reproduced failure
+before switching the retry from the ACPI-derived polarity to the opposite
+current polarity. Hardware results belong in the test PR and #16.

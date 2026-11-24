@@ -54,6 +54,9 @@ struct fte3600_device_config
    * fresh ready/geometry/version replies before trying the cold scanner.
    * Firmware remains mandatory and is supplied by the verified loader. */
   unsigned prefer_running_application;
+  /* A Linux owner matched its prior FW9369 identity hint to this board and
+   * generation. Reset, live ID checks and fresh calibration remain required. */
+  unsigned prefer_fw9369;
 };
 enum fte3600_device_error {
   FTE3600_DEVICE_OK,
