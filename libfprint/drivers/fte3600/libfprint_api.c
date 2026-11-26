@@ -636,6 +636,78 @@ test_suspend_fallback (void)
   g_assert_no_error (error);
 }
 
+static void
+suspended_verify_done (GObject *source, GAsyncResult *result, gpointer data)
+{
+  g_autoptr(GError) error = NULL;
+  gboolean matched = TRUE;
+
+  g_assert_false (fp_device_verify_finish (FP_DEVICE (source), result,
+                                         &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+  *(gboolean *) data = TRUE;
+}
+
+/* Exercise the client's Release/Claim sequence, rather than just capture:
+ * suspend must drain the worker before returning; public close is forbidden
+ * while suspended, then succeeds after resume without another process. */
+static void
+test_suspend_verify_release (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+
+  for (guint release = 0; release < 2; release++)
+    {
+      gboolean done = FALSE;
+      reset_trace ();
+      mode (release ? "release-block" : "block");
+      fp_device_verify (device, print, NULL, NULL, NULL, NULL,
+                        suspended_verify_done, &done);
+      /* Wait for the worker to reach physical I/O, with a bounded deadline. */
+      gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+      const gchar *event = release ? "release-begin" : "capture-begin";
+      while (!trace_count (event) && g_get_monotonic_time () < deadline)
+        {
+          g_main_context_iteration (NULL, FALSE);
+          g_usleep (1000);
+        }
+      g_assert_cmpuint (trace_count (event), ==, 1);
+      g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+      g_clear_error (&error);
+      g_assert_true (done);
+      g_assert_cmpuint (trace_count ("close"), ==, 1);
+      g_assert_cmpuint (trace_count ("capture-ok"), ==, 0);
+      g_assert_true (fp_device_is_open (device));
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+      g_clear_error (&error);
+      g_assert_true (fp_device_resume_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_false (fp_device_is_open (device));
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (trace_count ("fw9369-hint"), ==, 0);
+      mode ("positive");
+      gboolean matched = FALSE;
+      g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                           &matched, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (matched);
+    }
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
 typedef struct
 {
   gint          hits, misses, evictions;
@@ -1152,6 +1224,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fte3600/calibration-failure/fw9369-limit", GINT_TO_POINTER (TRUE),
                          test_calibration_failure_policy);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
+  g_test_add_func ("/fte3600/suspend-verify-release", test_suspend_verify_release);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
   int result = g_test_run ();
   g_unlink (trace_path);

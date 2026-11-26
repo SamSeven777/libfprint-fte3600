@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Public API doubles with the real GLib default main context and timer. */
+/* Bind the embedded command to test doubles before LTO, as in the probe test. */
+#define fp_context_new bench_context_new
+#define fp_context_get_devices bench_context_get_devices
+#define fp_device_get_driver bench_device_get_driver
+#define fp_device_is_open bench_device_is_open
+#define fp_device_open_sync bench_device_open_sync
+#define fp_device_close_sync bench_device_close_sync
 #define FTE3600_TOOL_EMBEDDED
 #define FTE3600_TOOL_BENCH_ONLY
 #include "../tools/fte3600-tool.c"
@@ -11,18 +18,18 @@ static gboolean is_open;
 static unsigned opens,closes,contexts_freed,tokens_freed;
 static void freed(gpointer data,GObject *object)
 { (void)object;++*(unsigned *)data; }
-FpContext *__wrap_fp_context_new(void)
+FpContext *bench_context_new(void)
 {
     GObject *object=g_object_new(G_TYPE_OBJECT,NULL);
     g_object_weak_ref(object,freed,&contexts_freed);return (FpContext *)object;
 }
-GPtrArray *__wrap_fp_context_get_devices(FpContext *context)
+GPtrArray *bench_context_get_devices(FpContext *context)
 { (void)context;return devices; }
-const gchar *__wrap_fp_device_get_driver(FpDevice *device)
+const gchar *bench_device_get_driver(FpDevice *device)
 { (void)device;return "fte3600"; }
-gboolean __wrap_fp_device_is_open(FpDevice *device)
+gboolean bench_device_is_open(FpDevice *device)
 { (void)device;return is_open; }
-gboolean __wrap_fp_device_open_sync(FpDevice *device,GCancellable *cancel,GError **error)
+gboolean bench_device_open_sync(FpDevice *device,GCancellable *cancel,GError **error)
 {
     (void)device;g_assert_false(is_open);++opens;
     if (!cancel) { is_open=TRUE;return TRUE; }
@@ -36,7 +43,7 @@ gboolean __wrap_fp_device_open_sync(FpDevice *device,GCancellable *cancel,GError
     if (outcome==CANCELLED_BUT_OPEN) is_open=TRUE;
     return FALSE;
 }
-gboolean __wrap_fp_device_close_sync(FpDevice *device,GCancellable *cancel,GError **error)
+gboolean bench_device_close_sync(FpDevice *device,GCancellable *cancel,GError **error)
 {
     (void)device;(void)error;g_assert_null(cancel);g_assert_true(is_open);
     ++closes;is_open=FALSE;return TRUE;

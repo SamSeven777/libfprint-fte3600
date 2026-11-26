@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Test CLI reporting against runtime outcomes; no hardware I/O. */
+/* Bind the embedded CLI directly to these mocks. Linker --wrap can be
+ * bypassed when LTO resolves calls inside the production runtime archive. */
+#define fte3600_linux_runtime_open probe_runtime_open
+#define fte3600_linux_runtime_get_status probe_runtime_get_status
+#define fte3600_linux_runtime_close probe_runtime_close
 #define FTE3600_TOOL_EMBEDDED
 #define FTE3600_TOOL_PROBE_ONLY
 #include "../tools/fte3600-tool.c"
@@ -8,7 +13,7 @@ static enum { READY, FIRMWARE, UNCONFIRMED, CLOSE_ERROR, STATUS_ERROR } outcome;
 static unsigned opened, closed;
 
 enum fte3600_linux_runtime_error
-__wrap_fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *c,
+probe_runtime_open (const struct fte3600_linux_runtime_config *c,
                                  GCancellable *cancel,
                                  struct fte3600_linux_runtime **out,
                                  struct fte3600_linux_runtime_diagnostic *d)
@@ -37,7 +42,7 @@ __wrap_fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *c,
 }
 
 enum fte3600_linux_runtime_error
-__wrap_fte3600_linux_runtime_get_status (const struct fte3600_linux_runtime *r,
+probe_runtime_get_status (const struct fte3600_linux_runtime *r,
                                        struct fte3600_device_status *s)
 {
   g_assert_nonnull (r);
@@ -51,7 +56,7 @@ __wrap_fte3600_linux_runtime_get_status (const struct fte3600_linux_runtime *r,
 }
 
 enum fte3600_linux_runtime_error
-__wrap_fte3600_linux_runtime_close (struct fte3600_linux_runtime *r,
+probe_runtime_close (struct fte3600_linux_runtime *r,
                                   struct fte3600_linux_runtime_diagnostic *d)
 {
   g_assert_nonnull (r);

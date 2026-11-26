@@ -99,7 +99,44 @@ identity-reuse and reset-before-ID ordering, retaining full fresh calibration:
 This differs from the [13 ms experiment in #12](https://github.com/SamSeven777/libfprint-fte3600/issues/12):
 it does not keep a calibrated runtime open across close, or retain calibration
 buffers. That experiment was withdrawn after higher idle package power and
-cancellation limitations. This branch has no hardware timing or power result.
+cancellation limitations.
+
+### Pocket 3 hardware feedback
+
+@iwansugiarto [tested `453dc03` against `18147ef`](https://github.com/SamSeven777/libfprint-fte3600/pull/17#issuecomment-7183847268)
+on a GPD Pocket 3 (G1621-02, BIOS 2.04), Arch/Omarchy, kernel
+`7.2.15-4-omarchy`, fprintd 1.94.5. Benchmark opens were 3749/3712/3716 ms
+on the baseline and 3715/591/592 ms on the candidate. In the installed
+candidate, repeated claims took 0.61–0.71 s; a new process still opened cold
+in 3.75–3.86 s.
+
+Enrollment completed 8/8, including release-timeout recovery retaining 5/8
+and 6/8 stages. A newly enrolled template matched 5/5, and lock-screen
+authentication worked. Cancellation invalidated the hint as expected.
+The older template matched 3/7 before re-enrollment; the cause is unresolved.
+The calibration-failure branch of #13 and idle power remain untested.
+
+Verification pending across suspend produced fprintd Release/Claim errors
+and an open-device cleanup warning. This was not compared with the baseline.
+The existing framework cancels active operations when suspend is unsupported
+and waits for driver completion. It forbids public close until resume;
+`fp_device_is_open()` remains true until the client closes the public device,
+even after the driver has released its hardware runtime.
+
+The public API regression covers verification blocked in capture or release,
+hardware cleanup before suspend returns, the expected busy close during
+suspend, and resume/close/reopen/verification in the same process. It passes
+with the existing cancellation fallback. This does not reproduce fprintd's
+D-Bus client ordering or establish that the reported suspend issue is fixed.
+For a retest, include timestamped fprintd/debug and client logs covering
+suspend, completion of verification cancellation, Release, resume and Claim;
+compare the baseline with the candidate. Do not infer working suspend from
+a successful cold open in a new daemon.
+
+The reported LTO probe-test failure was reproduced, along with a benchmark
+test linker failure on GCC 13. Both embedded CLI tests now bind their calls
+directly to test mocks, avoiding LTO's bypass of linker `--wrap`. Production
+runtime code and LTO remain unchanged.
 
 ### Hardware test
 

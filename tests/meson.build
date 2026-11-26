@@ -548,7 +548,6 @@ if 'fte3600' in drivers
       include_directories: fte3600_test_include,
       link_with: fte3600_driver,
       c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
-      link_args: ['-Wl,--wrap=fte3600_linux_runtime_open,--wrap=fte3600_linux_runtime_get_status,--wrap=fte3600_linux_runtime_close'],
       install: false)
     test('fte3600-probe', fte3600_probe_test, timeout: 30)
 
@@ -568,14 +567,13 @@ if 'fte3600' in drivers
     test('fte3600-fw9369-runtime', fte3600_runtime_test, timeout: 180)
   endif
 
-  # The real benchmark is never a test: this executable wraps its public API
+  # The real benchmark is never a test: this executable replaces its public API
   # calls and uses synthetic GObjects plus the real GLib context and timers.
   fte3600_open_bench_test = executable('test-fte3600-open-bench',
     'test-fte3600-open-bench.c',
     dependencies: libfprint_dep,
     include_directories: include_directories('../libfprint'),
     c_args: ['-Wno-missing-prototypes', '-Wno-missing-declarations'],
-    link_args: ['-Wl,--wrap=fp_context_new,--wrap=fp_context_get_devices,--wrap=fp_device_get_driver,--wrap=fp_device_is_open,--wrap=fp_device_open_sync,--wrap=fp_device_close_sync'],
     install: false)
   test('fte3600-open-bench', fte3600_open_bench_test, timeout: 30)
 endif
