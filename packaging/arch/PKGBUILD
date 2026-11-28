@@ -15,7 +15,7 @@ checkdepends=(umockdev)
 provides=("libfprint=$pkgver" 'libfprint-2.so=2-64')
 conflicts=(libfprint)
 install=fte3600.install
-# Meson enables LTO for production and disables it for linker-wrapped tests.
+# Meson controls LTO; embedded tool tests bind directly to their mocks.
 # Do not inject a second -flto through makepkg's global compiler flags.
 options=(!lto)
 

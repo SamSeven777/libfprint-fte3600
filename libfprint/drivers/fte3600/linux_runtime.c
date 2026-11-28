@@ -271,20 +271,23 @@ fte3600_linux_runtime_start (struct fte3600_linux_runtime *r,
   if(e == FTE3600_DEVICE_UNSUPPORTED && !r->cs_retried)
     {
       struct fte3600_linux_board_info info;
+      uint32_t mode;
       fte3600_device_get_status (r->session, &s);
       if(s.component_error == FTE3600_FACTORY_INTEGRATION_UNCONFIRMED_IDENTITY &&
          !s.platform_error && !s.failed_spi_calls &&
          !r->device.io.error (r->device.io.context) && !cancelled (r) &&
-         !fte3600_linux_board_get_info (r->board, &info) && info.cs_control)
+         !fte3600_linux_board_get_info (r->board, &info) && info.cs_control &&
+         !fte3600_linux_board_get_mode (r->board, &mode))
         {
           /* Completed SPI transfers with an unidentified response may be a
            * polarity mismatch. One new cold session at the other permitted
            * polarity; never reuse the failed factory/session state. */
           r->cs_retried = 1;
+          r->device.prefer_fw9369 = r->device.prefer_running_application = 0;
           diagnostic_context (r, d);
           fte3600_device_close (r->session);
           r->session = NULL;
-          if(fte3600_linux_board_set_cs (r->board, !(info.acpi_mode & SPI_CS_HIGH)))
+          if(fte3600_linux_board_set_cs (r->board, !(mode & SPI_CS_HIGH)))
             {
               rc = session_error (r, FTE3600_DEVICE_PLATFORM_ERROR, d);
               goto done;
@@ -324,7 +327,13 @@ fte3600_linux_runtime_open (
   struct fte3600_linux_runtime *r;
   enum fte3600_linux_runtime_error rc;
   struct fte3600_linux_board_config board = {0};
+  struct fte3600_linux_runtime_hint previous = {0};
 
+  if(c && c->fw9369_hint)
+    {
+      previous = *c->fw9369_hint;
+      memset (c->fw9369_hint, 0, sizeof (*c->fw9369_hint));
+    }
   diagnostic_clear (d);
   if(out)
     *out = NULL;
@@ -360,12 +369,49 @@ fte3600_linux_runtime_open (
       end (r);
       goto fail;
     }
-  end (r);
+  if(fte3600_linux_board_get_info (r->board, &pair.board))
+    {
+      rc = result (d, FTE3600_RUNTIME_IO, EIO, FTE3600_DEVICE_PLATFORM_ERROR);
+      goto fail;
+    }
   r->device.io = *fte3600_linux_board_callbacks (r->board);
   r->device.prefer_running_application = c->fast_open;
+  if(c->fast_open && previous.valid == 1 && previous.cs_high <= 1 &&
+     previous.generation == pair.board.generation && previous.acpi_mode == pair.board.acpi_mode &&
+     previous.cs_control == pair.board.cs_control &&
+     !strncmp (previous.spi, pair.spi, sizeof previous.spi) &&
+     !strncmp (previous.gpio, pair.gpio, sizeof previous.gpio) &&
+     !strncmp (previous.uio, pair.uio, sizeof previous.uio))
+    {
+      if(pair.board.cs_control && fte3600_linux_board_set_cs (r->board, previous.cs_high))
+        {
+          rc = session_error (r, FTE3600_DEVICE_PLATFORM_ERROR, d);
+          goto fail;
+        }
+      r->device.prefer_fw9369 = 1;
+    }
+  end (r);
   rc = fte3600_linux_runtime_start (r, cancel, d);
   if(rc)
     goto fail;
+  if(c->fw9369_hint)
+    {
+      struct fte3600_device_status status;
+      uint32_t mode;
+      if(!fte3600_device_get_status (r->session, &status) && status.model == FTE3600_MODEL_FW9369 &&
+         !fte3600_linux_board_get_mode (r->board, &mode))
+        {
+          struct fte3600_linux_runtime_hint *hint = c->fw9369_hint;
+          memcpy (hint->spi, pair.spi, sizeof hint->spi);
+          memcpy (hint->gpio, pair.gpio, sizeof hint->gpio);
+          memcpy (hint->uio, pair.uio, sizeof hint->uio);
+          hint->generation = pair.board.generation;
+          hint->acpi_mode = pair.board.acpi_mode;
+          hint->cs_control = pair.board.cs_control;
+          hint->cs_high = !!(mode & SPI_CS_HIGH);
+          hint->valid = 1;
+        }
+    }
   *out = r;
   return FTE3600_RUNTIME_OK;
 fail:

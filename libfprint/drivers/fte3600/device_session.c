@@ -285,7 +285,7 @@ fte3600_device_create (
 {
   if (!config || !output || !config->io.spi || !config->io.wait_ms || !config->io.wait_us ||
       !config->io.gpio || !config->io.boundary || !config->io.clock_ms ||
-      !config->io.error || !config->io.clear_error || config->prefer_running_application > 1 || config->startup.scene != 0 ||
+      !config->io.error || !config->io.clear_error || config->prefer_running_application > 1 || config->prefer_fw9369 > 1 || config->startup.scene != 0 ||
       config->startup.initial_model != FTE3600_MODEL_UNKNOWN || config->startup.resume_cleanup ||
       ((config->startup.firmware || config->startup.firmware_length) && !legacy_sensor (config->legacy_firmware_model)))
     return FTE3600_DEVICE_INVALID_ARGUMENT;
@@ -456,6 +456,44 @@ running_application (struct fte3600_device_session *s)
   return FTE3600_DEVICE_NOT_READY;
 }
 
+/* A remembered FW9369 may be in C1 after close. The old backend's tested
+ * fast-open fix reset it before reading identity. Reuse only that ordering:
+ * no baseline, calibration flags or live hardware handles survive close. */
+static uint32_t
+word_gpio (void *context, unsigned level)
+{
+  return gpio (context, level != 0);
+}
+static enum fte3600_device_error
+reopen_fw9369 (struct fte3600_device_session *s)
+{
+  const struct fte3600_factory_startup_io io = {s, spi, wait_ms, word_gpio, boundary,
+                                               s->config.io.release_and_sync ? release_and_sync : NULL};
+  struct fte3600_factory_integration_result *r = &s->startup_result;
+  s->status.component_error = fte3600_factory_word_operation (FTE3600_FACTORY_WORD_RESET, 10,
+                                                             &io, NULL, &r->word, NULL);
+  if (s->status.component_error || s->io_failed || s->config.io.error (s->config.io.context))
+    return FTE3600_DEVICE_PLATFORM_ERROR;
+  for (unsigned i = 0; i < 2; ++i)
+    {
+      uint8_t reply[12] = {4, 0xfb, 0x9a, 0x8b, 0, 1};
+      if (failed (spi (s, reply, sizeof reply)))
+        return FTE3600_DEVICE_PLATFORM_ERROR;
+      if (reply[6] != 0x93 || reply[7] != 0x62)
+        return FTE3600_DEVICE_NOT_READY;
+    }
+  s->factory.selected_model = r->model = FTE3600_MODEL_FW9369;
+  r->sensor_constructed = r->fw_ran = 1;
+  r->child_status = fte3600_fw9369_startup_linux (&s->factory.word.fw, &s->startup_storage.fw,
+                                                  sizeof s->startup_storage.fw, &s->fw_io, NULL, &r->word.fw);
+  if (r->child_status > FTE3600_FW9369_STARTUP_FAILED)
+    {
+      s->status.component_error = FTE3600_FACTORY_INTEGRATION_FW_ERROR;
+      return FTE3600_DEVICE_STARTUP_ERROR;
+    }
+  return identify_ready (s);
+}
+
 enum fte3600_device_error
 fte3600_device_start (struct fte3600_device_session *s)
 {
@@ -478,7 +516,7 @@ fte3600_device_start (struct fte3600_device_session *s)
   enum fte3600_device_error error;
   if (s->config.prefer_running_application && s->status.state == FTE3600_DEVICE_CREATED)
     {
-      error = running_application (s);
+      error = s->config.prefer_fw9369 ? reopen_fw9369 (s) : running_application (s);
       if (error != FTE3600_DEVICE_NOT_READY)
         goto complete;
     }

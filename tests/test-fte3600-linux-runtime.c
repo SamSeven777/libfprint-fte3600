@@ -395,6 +395,24 @@ static void chip_select_negotiation(void)
     CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));fake.ignore_mode_write=3;
     CHECK(fte3600_linux_runtime_close(r,&d)==FTE3600_RUNTIME_IO&&d.system_error==EPROTO);
     CHECK(fd_count()==before);cs_teardown();
+    /* A cached active-high mode can become unresponsive. Retry must flip
+     * that current mode back to low, rather than reselect ACPI's opposite. */
+    test_name="FW9369 stale cached CS falls back to opposite current polarity";
+    cs_setup(f);cs_test.responsive_mode=0;
+    struct fte3600_linux_runtime_pair pair;
+    CHECK(!fte3600_linux_runtime_discover(&c,&pair,&d));
+    struct fte3600_linux_runtime_hint hint={.valid=1,.cs_high=1,
+        .generation=pair.board.generation,.acpi_mode=pair.board.acpi_mode,
+        .cs_control=pair.board.cs_control};
+    memcpy(hint.spi,pair.spi,sizeof hint.spi);memcpy(hint.gpio,pair.gpio,sizeof hint.gpio);
+    memcpy(hint.uio,pair.uio,sizeof hint.uio);
+    c.fast_open=1;c.fw9369_hint=&hint;
+    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
+    CHECK(hint.valid&&!hint.cs_high&&cs_test.zero_calls&&cs_test.live_calls);
+    CHECK(fake.mode==0&&fake.mode_writes==3);
+    CHECK(fake.written_modes[0]==0&&fake.written_modes[1]==SPI_CS_HIGH&&fake.written_modes[2]==0);
+    CHECK(!fte3600_linux_runtime_close(r,&d)&&fake.mode==0&&fd_count()==before);
+    cs_teardown();
     puts("runtime CS: zero-response retry, FW9369 identity, reversed polarity, strict gates and restoration passed");
 }
 static void legacy_chip_select_negotiation(void)

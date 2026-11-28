@@ -307,6 +307,182 @@ fw9369_retry_progress (FpDevice *device, gint stage, FpPrint *print, gpointer da
     }
 }
 
+static void
+recalibration_progress (FpDevice *device, gint stage, FpPrint *print, gpointer data, GError *error)
+{
+  (void) device;
+  (void) print;
+  (void) data;
+  g_assert_true (g_thread_self () == main_thread);
+  if (error)
+    {
+      g_assert_cmpuint (stage, ==, progress_count);
+      g_assert_cmpuint (stage, ==, 3);
+      if (retry_count == 0)
+        {
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+          mode ("fw9369");
+        }
+      else
+        {
+          g_assert_cmpuint (retry_count, ==, 1);
+          g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+          mode ("enroll-resume");
+        }
+      retry_count++;
+    }
+  else
+    {
+      g_assert_cmpuint (stage, ==, ++progress_count);
+      if (stage == 3)
+        mode ("calibration-fail");
+    }
+}
+
+static void
+test_enroll_recalibration_progress (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  mode ("enroll");
+  progress_count = retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                   recalibration_progress, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (print);
+  g_assert_cmpuint (progress_count, ==, 8);
+  g_assert_cmpuint (retry_count, ==, 2);
+  g_assert_cmpuint (trace_count ("capture-ok"), ==, 8);
+  g_assert_cmpuint (trace_count ("open"), ==, 1);
+  g_assert_cmpuint (trace_count ("cold-open-required"), ==, 1);
+  g_assert_cmpuint (trace_count ("fast-open-enabled"), ==, 0);
+  g_assert_cmpuint (trace_count ("fw9369-hint"), ==, 0);
+  g_assert_cmpuint (trace_count ("close"), ==, 1);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
+test_fw9369_hint_lifecycle (void)
+{
+  for (guint fault = 0; fault < 4; fault++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(FpContext) context = fp_context_new ();
+      FpDevice *device = only_device (context);
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      if (fault == 1 || fault == 2)
+        {
+          g_autoptr(GCancellable) cancel = g_cancellable_new ();
+          mode (fault == 1 ? "capture-fail" : "block");
+          if (fault == 2)
+            {
+              busy_device = device;
+              g_timeout_add (20, cancel_timeout, cancel);
+            }
+          g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, cancel, &error);
+          g_assert_null (image);
+          if (fault == 1)
+            g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+          else
+            g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+          g_clear_error (&error);
+          busy_device = NULL;
+        }
+      mode (fault == 3 ? "close-fail" : "fw9369");
+      gboolean closed = fp_device_close_sync (device, NULL, &error);
+      if (fault == 3)
+        {
+          g_assert_false (closed);
+          g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+          g_clear_error (&error);
+        }
+      else
+        {
+          g_assert_true (closed);
+          g_assert_no_error (error);
+        }
+      reset_trace ();
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (trace_count ("fw9369-hint"), ==, fault ? 0 : 1);
+      g_assert_cmpuint (trace_count ("fast-open-enabled"), ==, 1);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+    }
+}
+
+static void
+calibration_failure_progress (FpDevice *device, gint stage, FpPrint *print,
+                              gpointer data, GError *error)
+{
+  guint allowed_retries = GPOINTER_TO_UINT (data);
+  (void) device;
+  (void) print;
+  g_assert_true (g_thread_self () == main_thread);
+  g_assert_cmpuint (stage, ==, 0);
+  g_assert_cmpuint (retry_count, <, allowed_retries);
+  if (retry_count % 2 == 0)
+    {
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_REMOVE_FINGER);
+      mode ("fw9369");
+    }
+  else
+    {
+      g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+      mode ("calibration-fail");
+    }
+  retry_count++;
+}
+
+static void
+test_calibration_failure_policy (gconstpointer data)
+{
+  gboolean fw9369 = GPOINTER_TO_INT (data);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode (fw9369 ? "fw9369" : "other-profile");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) input = fp_print_new (device);
+  g_object_ref_sink (input);
+  reset_trace ();
+  mode ("calibration-fail");
+  retry_count = 0;
+  g_autoptr(FpPrint) print = fp_device_enroll_sync (device, input, NULL,
+                                                   calibration_failure_progress,
+                                                   GUINT_TO_POINTER (fw9369 ? 6 : 0), &error);
+  g_assert_null (print);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_assert_nonnull (strstr (error->message, "session=7"));
+  g_assert_nonnull (strstr (error->message, "component="));
+  g_clear_error (&error);
+  g_assert_cmpuint (retry_count, ==, fw9369 ? 6 : 0);
+  g_assert_cmpuint (trace_count ("open"), ==, fw9369 ? 3 : 0);
+  g_assert_cmpuint (trace_count ("close"), ==, fw9369 ? 4 : 1);
+  if (fw9369)
+    {
+      /* A terminal failure must not leave a retry prompt for a later action. */
+      mode ("fw9369");
+      g_autoptr(FpImage) image = fp_device_capture_sync (device, TRUE, NULL, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (image);
+    }
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
 /* Adapter path proof only: the distinct production-object runtime test checks
  * real FW9369 FDT observations and maintenance. This backend supplies images. */
 static void
@@ -455,6 +631,78 @@ test_suspend_fallback (void)
       g_assert_no_error (error);
       g_assert_nonnull (image);
       g_assert_cmpuint (trace_count ("open"), ==, 1);
+    }
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
+suspended_verify_done (GObject *source, GAsyncResult *result, gpointer data)
+{
+  g_autoptr(GError) error = NULL;
+  gboolean matched = TRUE;
+
+  g_assert_false (fp_device_verify_finish (FP_DEVICE (source), result,
+                                         &matched, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+  *(gboolean *) data = TRUE;
+}
+
+/* Exercise the client's Release/Claim sequence, rather than just capture:
+ * suspend must drain the worker before returning; public close is forbidden
+ * while suspended, then succeeds after resume without another process. */
+static void
+test_suspend_verify_release (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpContext) context = fp_context_new ();
+  FpDevice *device = only_device (context);
+  mode ("fw9369");
+  g_assert_true (fp_device_open_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) print = enroll (device, "enroll");
+
+  for (guint release = 0; release < 2; release++)
+    {
+      gboolean done = FALSE;
+      reset_trace ();
+      mode (release ? "release-block" : "block");
+      fp_device_verify (device, print, NULL, NULL, NULL, NULL,
+                        suspended_verify_done, &done);
+      /* Wait for the worker to reach physical I/O, with a bounded deadline. */
+      gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+      const gchar *event = release ? "release-begin" : "capture-begin";
+      while (!trace_count (event) && g_get_monotonic_time () < deadline)
+        {
+          g_main_context_iteration (NULL, FALSE);
+          g_usleep (1000);
+        }
+      g_assert_cmpuint (trace_count (event), ==, 1);
+      g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+      g_clear_error (&error);
+      g_assert_true (done);
+      g_assert_cmpuint (trace_count ("close"), ==, 1);
+      g_assert_cmpuint (trace_count ("capture-ok"), ==, 0);
+      g_assert_true (fp_device_is_open (device));
+      g_assert_false (fp_device_close_sync (device, NULL, &error));
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+      g_clear_error (&error);
+      g_assert_true (fp_device_resume_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_false (fp_device_is_open (device));
+      mode ("fw9369");
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (trace_count ("fw9369-hint"), ==, 0);
+      mode ("positive");
+      gboolean matched = FALSE;
+      g_assert_true (fp_device_verify_sync (device, print, NULL, NULL, NULL,
+                                           &matched, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (matched);
     }
   g_assert_true (fp_device_close_sync (device, NULL, &error));
   g_assert_no_error (error);
@@ -969,7 +1217,14 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fte3600/strip-release-timeout-recovery", "ft9769", test_release_timeout_recovery);
   g_test_add_func ("/fte3600/strip-retries", test_strip_retries);
   g_test_add_func ("/fte3600/fw9369-action-lifecycle", test_fw9369_action_lifecycle);
+  g_test_add_func ("/fte3600/fw9369-hint-lifecycle", test_fw9369_hint_lifecycle);
+  g_test_add_func ("/fte3600/enroll-recalibration-progress", test_enroll_recalibration_progress);
+  g_test_add_data_func ("/fte3600/calibration-failure/other-profile", GINT_TO_POINTER (FALSE),
+                         test_calibration_failure_policy);
+  g_test_add_data_func ("/fte3600/calibration-failure/fw9369-limit", GINT_TO_POINTER (TRUE),
+                         test_calibration_failure_policy);
   g_test_add_func ("/fte3600/suspend-fallback", test_suspend_fallback);
+  g_test_add_func ("/fte3600/suspend-verify-release", test_suspend_verify_release);
   g_test_add_func ("/fte3600/template-cache", test_template_cache);
   int result = g_test_run ();
   g_unlink (trace_path);

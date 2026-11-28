@@ -72,6 +72,13 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
   g_autofree gchar *mode = read_mode (config->spidev_path);
 
   trace (config->spidev_path, "open");
+  trace (config->spidev_path, config->fast_open ? "fast-open-enabled" : "cold-open-required");
+  if (config->fw9369_hint)
+    {
+      if (config->fw9369_hint->valid)
+        trace (config->spidev_path, "fw9369-hint");
+      memset (config->fw9369_hint, 0, sizeof (*config->fw9369_hint));
+    }
   *out = NULL;
   if (g_cancellable_is_cancelled (cancel))
     return failure (diag, FTE3600_RUNTIME_CANCELLED);
@@ -111,6 +118,8 @@ fte3600_linux_runtime_open (const struct fte3600_linux_runtime_config *config,
       runtime->status.model = FTE3600_MODEL_FT9338;
       runtime->status.chip_id = runtime->status.raw_id = 0x9338;
     }
+  if (config->fw9369_hint && runtime->status.model == FTE3600_MODEL_FW9369)
+    config->fw9369_hint->valid = 1;
   *out = runtime;
   return failure (diag, FTE3600_RUNTIME_OK);
 }
@@ -144,6 +153,19 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
     runtime->failed = TRUE;
   if (runtime->failed)
     return failure (diag, FTE3600_RUNTIME_IO);
+  if (g_str_equal (mode, "calibration-fail"))
+    {
+      runtime->failed = TRUE;
+      *diag = (struct fte3600_linux_runtime_diagnostic){
+        .code = FTE3600_RUNTIME_SESSION,
+        .device_error = FTE3600_DEVICE_CALIBRATION_ERROR,
+        .has_session_status = 1,
+        .model = runtime->status.model,
+        .raw_id = runtime->status.raw_id,
+        .chip_id = runtime->status.chip_id,
+      };
+      return FTE3600_RUNTIME_SESSION;
+    }
   if (g_strcmp0 (runtime->last_mode, mode))
     {
       g_free (runtime->last_mode);
@@ -158,6 +180,9 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *runtime,
     sample = runtime->sample++ % 8;
   if (g_str_equal (mode, "enroll-retry") && runtime->sample > 1)
     sample = (runtime->sample - 2) % 8;
+  /* Continue the enrollment fixture after its first three accepted samples. */
+  if (g_str_equal (mode, "enroll-resume"))
+    sample = (sample + 3) % 8;
   if (g_str_equal (mode, "duplicate"))
     sample = 0;
   if (!g_str_equal (mode, "blank"))
